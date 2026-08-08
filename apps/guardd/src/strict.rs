@@ -195,7 +195,18 @@ impl StrictClassifier {
             }
         };
         match self.classify_path(&path) {
-            Some(resource) => StrictClassification::Protected(resource),
+            Some(resource) => {
+                // A structural hit is also an object-identity observation.
+                // Publish it before answering the permission event so a
+                // subsequent rename outside the protected namespace cannot
+                // fall through the nlink=1 unrelated fast path while topology
+                // rediscovery is still pending.
+                self.inode_index
+                    .write()
+                    .expect("inode index lock poisoned")
+                    .insert(identity, resource.clone());
+                StrictClassification::Protected(resource)
+            }
             None => match fanotify::fd_link_count(fd) {
                 Ok(links) if links > 1 => {
                     self.metrics
@@ -508,6 +519,41 @@ mod tests {
         assert_eq!(metrics.strict_alias_scans.load(Ordering::Relaxed), 1);
         assert_eq!(metrics.strict_alias_matches.load(Ordering::Relaxed), 1);
         assert_eq!(index.read().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn structural_hit_promotes_inode_before_rename_away() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("chromium");
+        let target = root.join("Default/Network/Cookies");
+        let outside = temp.path().join("renamed-outside");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, b"synthetic").unwrap();
+
+        let index = std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+        let metrics = std::sync::Arc::new(BackendMetrics::new(EnforcementMode::StrictFilesystem));
+        let classifier = StrictClassifier::new(
+            &chromium_config(&root),
+            std::sync::Arc::clone(&index),
+            metrics,
+        )
+        .unwrap();
+
+        let first = std::fs::File::open(&target).unwrap();
+        let identity = fanotify::fd_identity(first.as_raw_fd()).unwrap();
+        assert!(matches!(
+            classifier.classify_fd(first.as_raw_fd()),
+            StrictClassification::Protected(_)
+        ));
+        drop(first);
+        assert!(index.read().unwrap().contains_key(&identity));
+
+        std::fs::rename(&target, &outside).unwrap();
+        let renamed = std::fs::File::open(&outside).unwrap();
+        assert!(matches!(
+            classifier.classify_fd(renamed.as_raw_fd()),
+            StrictClassification::Protected(_)
+        ));
     }
 
     #[test]

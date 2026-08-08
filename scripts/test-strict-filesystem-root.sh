@@ -18,9 +18,11 @@ PROBE="$REPO/target/debug/guard-test-probe"
 PASS=0
 FAIL=0
 BLOCKED=0
+OBSERVED=0
 pass() { echo "PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "FAIL: $1"; FAIL=$((FAIL + 1)); }
 blocked() { echo "BLOCKED: $1"; BLOCKED=$((BLOCKED + 1)); }
+observed() { echo "OBSERVED: $1"; OBSERVED=$((OBSERVED + 1)); }
 
 WORK="$(mktemp -d -t guard-strict-filesystem-XXXXXX)"
 DAEMON_PID=""
@@ -193,6 +195,117 @@ PY
 then pass "enrolled Chromium still opens its own protected data"
 else fail "strict mode regressed owning-browser allow policy"; fi
 
+echo "==> Structural-hit inode promotion and rename-away"
+A_TARGET="$CHROME_ROOT/Profile A/Network/Cookies"
+A_EXTERNAL="$RUNTIME/rename-away-authorized"
+A_STAGE="$STAGING/rename-away-authorized"
+mkdir -p "$(dirname "$A_TARGET")"
+printf '%s' "$CANARY" >"$A_STAGE"
+before="$(denied_count)"
+if "$CHROME_PROBE" promote-rename "$A_STAGE" "$A_TARGET" "$A_EXTERNAL" \
+  >"$RUNTIME/rename-away-a.json"; then
+  set +e
+  "$PROBE" read "$A_EXTERNAL" >"$RUNTIME/rename-away-a.out" 2>&1
+  rc=$?
+  set -e
+  after="$(denied_count)"
+  if [ "$rc" -ne 0 ] && [ "$after" -gt "$before" ] \
+    && ! grep -Fq -- "$CANARY" "$RUNTIME/rename-away-a.out"; then
+    pass "A: authorized first structural open promotes inode before rename-away"
+  else
+    fail "A: authorized new sensitive inode was readable after rename-away"
+  fi
+else
+  fail "A: enrolled browser could not publish/open/rename the synthetic inode"
+fi
+
+B_TARGET="$CHROME_ROOT/Profile B/Network/Cookies"
+B_EXTERNAL="$RUNTIME/rename-away-denied"
+B_STAGE="$STAGING/rename-away-denied"
+mkdir -p "$(dirname "$B_TARGET")"
+printf '%s' "$CANARY" >"$B_STAGE"
+mv "$B_STAGE" "$B_TARGET"
+before="$(denied_count)"
+if "$PROBE" deny-rename-retry "$B_TARGET" "$B_EXTERNAL" \
+    >"$RUNTIME/rename-away-b.json" \
+  && python3 - "$RUNTIME/rename-away-b.json" <<'PY'
+import json, sys
+r=json.load(open(sys.argv[1], encoding="utf-8"))
+raise SystemExit(0 if r["first_denied"] is True and
+                      r["second_denied"] is True and
+                      r["successful_unauthorized_opens"] == 0 else 1)
+PY
+then
+  after="$(denied_count)"
+  if [ "$after" -ge $((before + 2)) ]; then
+    pass "B: denied structural first open promotes inode before rename-away retry"
+  else
+    fail "B: both opens failed but two firewall DENY events were not recorded"
+  fi
+else
+  fail "B: denied new sensitive inode became readable after rename-away"
+fi
+
+C_TARGET="$CHROME_ROOT/Profile C/Network/Cookies"
+C_EXTERNAL="$RUNTIME/rename-away-without-open"
+C_STAGE="$STAGING/rename-away-without-open"
+mkdir -p "$(dirname "$C_TARGET")"
+printf '%s' "$CANARY" >"$C_STAGE"
+if "$PROBE" transit-rename "$C_STAGE" "$C_TARGET" "$C_EXTERNAL" \
+    >"$RUNTIME/rename-away-c.json" \
+  && python3 - "$RUNTIME/rename-away-c.json" <<'PY'
+import json, sys
+r=json.load(open(sys.argv[1], encoding="utf-8"))
+raise SystemExit(0 if r["opened_while_protected"] is False and
+                      r["outside_opened"] is True else 1)
+PY
+then
+  observed "C: an inode moved through a sensitive name without an open is not labeled by FAN_OPEN_PERM"
+else
+  observed "C: no-open transit did not reproduce on this run; FAN_OPEN_PERM still cannot mediate rename"
+fi
+
+echo "==> Alias-scan amplification stress"
+ALIAS_FLOOD_A="$RUNTIME/unprotected-nlink-file"
+ALIAS_FLOOD_B="$RUNTIME/unprotected-nlink-alias"
+printf '%s' 'synthetic-non-secret' >"$ALIAS_FLOOD_A"
+ln "$ALIAS_FLOOD_A" "$ALIAS_FLOOD_B"
+"$GUARDCTL" --socket "$SOCKET" --json status >"$RUNTIME/alias-flood-before.json"
+flood_started="$(date +%s%N)"
+flood_pids=()
+flood_iterations="${ALIAS_FLOOD_ITERATIONS:-2000}"
+for worker in $(seq 1 8); do
+  "$PROBE" open-bench "$ALIAS_FLOOD_A" "$flood_iterations" \
+    >"$RUNTIME/alias-flood-$worker.json" &
+  flood_pids+=("$!")
+done
+flood_ok=1
+for flood_pid in "${flood_pids[@]}"; do
+  if ! wait "$flood_pid"; then flood_ok=0; fi
+done
+flood_elapsed_ms=$(( ( $(date +%s%N) - flood_started ) / 1000000 ))
+"$GUARDCTL" --socket "$SOCKET" --json status >"$RUNTIME/alias-flood-after.json"
+if [ "$flood_ok" -eq 1 ] && python3 - \
+    "$RUNTIME/alias-flood-before.json" "$RUNTIME/alias-flood-after.json" \
+    "$RUNTIME"/alias-flood-[0-9]*.json <<'PY'
+import json, sys
+before=json.load(open(sys.argv[1], encoding="utf-8"))["data"]
+after=json.load(open(sys.argv[2], encoding="utf-8"))["data"]
+workloads=[json.load(open(p, encoding="utf-8")) for p in sys.argv[3:]]
+expected=sum(r["iterations"] for r in workloads)
+ok=(all(r["successful"] == r["iterations"] and r["other_errors"] == 0 for r in workloads)
+    and after["strict_alias_scans"] - before["strict_alias_scans"] >= expected
+    and after["fanotify_overflows"] == before["fanotify_overflows"]
+    and after["classifier_failures"] == before["classifier_failures"]
+    and after["audit_dropped"] == before["audit_dropped"])
+raise SystemExit(0 if ok else 1)
+PY
+then
+  pass "alias-scan amplification completed $((8 * flood_iterations)) opens in ${flood_elapsed_ms} ms without overflow or audit loss"
+else
+  fail "alias-scan amplification caused errors, overflow, classifier failure, or audit loss"
+fi
+
 echo "==> New-inode external-hardlink investigation"
 "$PROBE" alias-race "$CHROME_ROOT/Default/Network/Cookies" "$STAGING" \
   "$RUNTIME/external-cookie-alias" "${ALIAS_ITERATIONS:-1000}" >"$RUNTIME/alias.json"
@@ -326,5 +439,5 @@ else
 fi
 
 echo
-echo "Strict filesystem summary: PASS=$PASS FAIL=$FAIL BLOCKED=$BLOCKED"
+echo "Strict filesystem summary: PASS=$PASS FAIL=$FAIL BLOCKED=$BLOCKED OBSERVED=$OBSERVED"
 [ "$FAIL" -eq 0 ]

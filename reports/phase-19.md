@@ -1,5 +1,10 @@
 # Phase 19 — Strict Filesystem Enforcement and Performance Acceptance
 
+> Post-commit review found a structural-hit rename-away gap. Phase 19.1 fixed
+> it and added root A/B/C plus alias-scan amplification coverage. See
+> [`phase-19.1.md`](phase-19.1.md). The measurements below remain the original
+> Phase 19 evidence rather than being silently rewritten.
+
 ## Decision
 
 ```text

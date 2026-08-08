@@ -68,6 +68,19 @@ fn main() -> ExitCode {
                 iterations,
             )
         }
+        Some("promote-rename") if args.len() == 5 => do_promote_rename(
+            Path::new(&args[2]),
+            Path::new(&args[3]),
+            Path::new(&args[4]),
+        ),
+        Some("deny-rename-retry") if args.len() == 4 => {
+            do_deny_rename_retry(Path::new(&args[2]), Path::new(&args[3]))
+        }
+        Some("transit-rename") if args.len() == 5 => do_transit_rename(
+            Path::new(&args[2]),
+            Path::new(&args[3]),
+            Path::new(&args[4]),
+        ),
         _ => {
             print_usage();
             ExitCode::from(2)
@@ -90,7 +103,10 @@ fn print_usage() {
            sqlite-exfil-unix DATABASE SOCKET\n\
            topology-race TARGET STAGING_DIR ITERATIONS\n\
            open-bench PATH ITERATIONS\n\
-           alias-race TARGET STAGING_DIR EXTERNAL_ALIAS ITERATIONS"
+           alias-race TARGET STAGING_DIR EXTERNAL_ALIAS ITERATIONS
+           promote-rename STAGED TARGET EXTERNAL
+           deny-rename-retry TARGET EXTERNAL
+           transit-rename STAGED TARGET EXTERNAL"
     );
 }
 
@@ -433,6 +449,86 @@ fn do_alias_race(
     } else {
         ExitCode::FAILURE
     }
+}
+
+/// Model an enrolled browser publishing a new sensitive inode, opening it
+/// once, and immediately renaming it outside the browser namespace. The
+/// executable running this command must be explicitly enrolled by the test.
+/// Contents are never read or printed.
+fn do_promote_rename(staged: &Path, target: &Path, external: &Path) -> ExitCode {
+    if let Err(error) = std::fs::rename(staged, target) {
+        return report_failure("rename staged inode into protected path", target, &error);
+    }
+    let file = match File::open(target) {
+        Ok(file) => file,
+        Err(error) => return report_failure("authorized first open", target, &error),
+    };
+    drop(file);
+    if let Err(error) = std::fs::rename(target, external) {
+        return report_failure("rename promoted inode outside namespace", external, &error);
+    }
+    println!("{{\"authorized_first_open\":true,\"renamed_outside\":true}}");
+    ExitCode::SUCCESS
+}
+
+/// Attempt a protected first open, rename the same inode outside the protected
+/// namespace, and retry immediately in one unauthorized process. No file bytes
+/// are read or printed; a successful second open is reported as a recovery.
+fn do_deny_rename_retry(target: &Path, external: &Path) -> ExitCode {
+    let first_denied = match File::open(target) {
+        Err(error) if is_access_denial(&error) => true,
+        Ok(file) => {
+            drop(file);
+            false
+        }
+        Err(error) => return report_failure("first protected open", target, &error),
+    };
+    if let Err(error) = std::fs::rename(target, external) {
+        return report_failure("rename denied inode outside namespace", external, &error);
+    }
+    let second_denied = match File::open(external) {
+        Err(error) if is_access_denial(&error) => true,
+        Ok(file) => {
+            drop(file);
+            false
+        }
+        Err(error) => return report_failure("second outside open", external, &error),
+    };
+    println!(
+        "{{\"first_denied\":{first_denied},\"renamed_outside\":true,\"second_denied\":{second_denied},\"successful_unauthorized_opens\":{}}}",
+        u8::from(!first_denied) + u8::from(!second_denied)
+    );
+    if first_denied && second_denied {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+/// Move an inode through a protected pathname without opening it there, then
+/// try the external name. This measures the deliberate FAN_OPEN_PERM boundary:
+/// an open-only backend does not observe the two rename operations.
+fn do_transit_rename(staged: &Path, target: &Path, external: &Path) -> ExitCode {
+    if let Err(error) = std::fs::rename(staged, target) {
+        return report_failure("rename transit inode into protected path", target, &error);
+    }
+    if let Err(error) = std::fs::rename(target, external) {
+        return report_failure("rename transit inode outside namespace", external, &error);
+    }
+    let outside_opened = match File::open(external) {
+        Ok(file) => {
+            drop(file);
+            true
+        }
+        Err(error) if is_access_denial(&error) => false,
+        Err(error) => {
+            return report_failure("open transit inode outside namespace", external, &error)
+        }
+    };
+    println!(
+        "{{\"opened_while_protected\":false,\"renamed_outside\":true,\"outside_opened\":{outside_opened}}}"
+    );
+    ExitCode::SUCCESS
 }
 
 fn is_access_denial(error: &std::io::Error) -> bool {

@@ -62,6 +62,9 @@ Two backend modes remain explicit:
 
 Strict unrelated events avoid process ancestry, executable hashing, package
 lookups, SQLite and audit. Only protected candidates enter the policy engine.
+Every structural path hit is inserted into the inode index before the fanotify
+response, whether its policy result is ALLOW or DENY. A later rename outside
+the namespace therefore remains protected without waiting for inotify.
 Guardd's kernel PID has a pre-lock self-event fast path, preventing audit and
 topology activity from deadlocking the permission loop. Missing required roots
 or failed filesystem marks abort startup rather than claiming ACTIVE.
@@ -91,6 +94,15 @@ The repair synchronously checks configured namespaces only when an otherwise
 unclassified event inode has `st_nlink > 1`, using directory reads and metadata
 without opening regular contents. The final 10,000-iteration rerun had zero
 recoveries.
+
+Post-commit review identified a separate nlink=1 rename-away gap: structural
+path classification protected one open but did not retain the new inode. The
+Phase 19.1 fix promotes the inode before answering the permission event. Root
+case A (owning browser first open, then rename-away) and case B (denied first
+open, then rename-away retry) both recovered zero objects. Case C moved an
+inode into and out of a sensitive name without opening it there; the later
+external open succeeded. This is explicitly the open-only `FAN_OPEN_PERM`
+boundary, not a claimed rename guarantee.
 
 Browser adversarial acceptance passed in both modes:
 
@@ -166,6 +178,12 @@ topology degraded:     false
 No unlimited queue is requested. Any observed future overflow or classifier
 failure makes status DEGRADED.
 
+Phase 19.1 also forced 16,000 exceptional hardlink-alias namespace scans with
+eight concurrent readers. The synthetic workload completed in 889 ms with zero
+queue overflow, classifier failure, or audit drop. This is a targeted bounded
+measurement, not a denial-of-service resistance guarantee for arbitrary real
+profile sizes.
+
 ## Privileged acceptance
 
 | Suite | PASS | FAIL | BLOCKED |
@@ -183,11 +201,17 @@ failure makes status DEGRADED.
 | SSH broker adversarial, conservative | 29 | 0 | 0 |
 | SSH broker adversarial, Strict | 29 | 0 | 0 |
 | `test-installed-auth-root.sh` | 14 | 0 | 1 |
-| `test-strict-filesystem-root.sh` | 22 | 0 | 0 |
+| `test-strict-filesystem-root.sh` | 25 | 0 | 0 |
 | `test-strict-concurrency-root.sh` | 1 | 0 | 0 |
 | `benchmark-strict-filesystem-root.sh` | 1 | 0 | 0 |
 | topology stress, conservative | 1 | 0 | 0 |
 | topology stress, Strict | 2 | 0 | 0 |
+
+The current Strict filesystem suite also reported one separate `OBSERVED`
+boundary: rename into and out of a sensitive pathname without any intervening
+open was not mediated. It is not counted as PASS, FAIL, or BLOCKED because it
+is an explicit measurement of the open-only backend rather than an access
+decision test.
 
 The bypass BLOCKED rows are the explicit pre-open/inherited-fd non-goals. The
 installed-auth BLOCKED row is an already-running user manager with stale
@@ -206,7 +230,7 @@ denial, real polkit NO/YES, non-root broker load and notification delivery.
 cargo fmt --check                                           PASS
 cargo clippy --workspace --all-targets --all-features
   -- -D warnings                                            PASS
-cargo test --workspace --all-features                       200 passed, 0 failed
+cargo test --workspace --all-features                       201 passed, 0 failed
 cargo build --release                                       PASS
 ```
 
@@ -233,6 +257,10 @@ cargo build --release                                       PASS
 10. Strict has material open overhead and a finite kernel event queue. The
     observed acceptance load did not overflow it; that is not a proof against
     arbitrary resource-exhaustion attacks.
+11. `FAN_OPEN_PERM` does not observe rename itself. An inode moved through a
+    sensitive pathname and back out without any open while sensitive is not
+    labeled. If browser data were written through a descriptor opened before
+    that transit, it would also fall under the existing pre-open-fd non-goal.
 
 ## Promotion rationale
 

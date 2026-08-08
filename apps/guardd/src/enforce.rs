@@ -444,12 +444,15 @@ impl EnforcementEngine {
             registry.enroll_file(resource);
         }
 
-        let fd_index = merge_fd_index(
-            &self.fd_index.read().expect("inode index lock poisoned"),
+        // Extend under one write lock. Strict classification promotes new
+        // structural hits concurrently with topology refresh; replacing the
+        // map from an earlier read snapshot could otherwise erase a promotion
+        // just before its permission response is sent.
+        extend_fd_index(
+            &mut self.fd_index.write().expect("inode index lock poisoned"),
             &registry,
         );
         self.registry = registry;
-        *self.fd_index.write().expect("inode index lock poisoned") = fd_index;
 
         let (files, directories) = if mark_objects {
             (self.mark_files(group)?, self.mark_trees(group)?)
@@ -706,17 +709,15 @@ pub enum SshAgentBinding {
     UncheckedForTests,
 }
 
-fn merge_fd_index(
-    previous: &HashMap<(u64, u64), ProtectedResource>,
+fn extend_fd_index(
+    index: &mut HashMap<(u64, u64), ProtectedResource>,
     registry: &ProtectedResourceRegistry,
-) -> HashMap<(u64, u64), ProtectedResource> {
-    let mut index = previous.clone();
+) {
     for resource in registry.files() {
         if let Ok(identity) = stat_dev_ino(&resource.path) {
             index.insert(identity, resource.clone());
         }
     }
-    index
 }
 
 /// Recursively mark `dir` and all its subdirectories with the tree mask.
@@ -1937,8 +1938,10 @@ mod tests {
         }
         .enroll_into(&mut registry)
         .unwrap();
-        let refreshed = merge_fd_index(&engine.fd_index.read().expect("inode index"), &registry);
-        *engine.fd_index.write().expect("inode index") = refreshed;
+        extend_fd_index(
+            &mut engine.fd_index.write().expect("inode index"),
+            &registry,
+        );
         engine.registry = registry;
 
         let renamed_file = std::fs::File::open(&renamed).unwrap();

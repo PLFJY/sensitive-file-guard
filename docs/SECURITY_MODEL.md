@@ -143,6 +143,14 @@ not exist during discovery. Classification is ordered as:
 3. exceptional multi-hardlink alias search;
 4. immediate unrelated allow.
 
+A structural path hit is promoted to the shared `(st_dev, st_ino)` index
+before guardd answers the permission event. This applies whether policy allows
+or denies that first open. Once an object has been observed as sensitive, a
+subsequent rename outside the configured namespace therefore remains protected
+without waiting for topology rediscovery. Phase 19.1 exercised both the owning
+browser ALLOW path and the unauthorized DENY path before an immediate
+rename-away; neither external retry recovered the synthetic object.
+
 The unrelated path performs fstat, a small inode-index read, fd-path readlink,
 and structural prefix/name checks. It does not resolve process ancestry, hash
 executables, query packages or SQLite, or emit audit records. Process identity
@@ -285,6 +293,13 @@ audit drops, classifier failures, or deadlocks. This is evidence for the tested
 load, not a proof that an intentional resource-exhaustion attack cannot
 overflow the finite kernel queue.
 
+The exceptional hardlink scan was also stressed directly with eight concurrent
+readers opening an unrelated `st_nlink=2` inode 16,000 times. That deliberately
+forced at least 16,000 protected-namespace scans, completed in 889 ms on the
+small synthetic fixture, and produced zero overflow, audit drop, or classifier
+failure. It does not prove resistance to arbitrary denial-of-service pressure
+or predict cost for very large real profile trees.
+
 ### Bind-mount / alternate-mount behavior
 `FAN_MARK_FILESYSTEM` covers the filesystem from all of its mount points. The
 root acceptance test created a bind alias and observed denial through it for an
@@ -314,7 +329,9 @@ noise and are recorded only as a usability smoke test. Strict remains opt-in.
 | Hardlink to protected file | **Yes** | Inode index; Strict also scans new multi-link aliases before allow |
 | Symlink to protected file | **Yes** | Canonical path resolution |
 | Relative path `..` traversal | **Yes** | Canonicalize resolves `..` |
-| Renamed protected file | **Yes** | Inode follows rename |
+| Previously indexed/classified protected file after rename | **Yes** | Inode identity follows rename |
+| New sensitive inode renamed away after its first classified open | **Yes** | Structural hit is indexed before FAN response |
+| Inode only renamed through sensitive name, never opened there | **No** | `FAN_OPEN_PERM` does not mediate rename; explicit open-only boundary |
 | PID reuse | **Yes** | start_time in identity + lease binding |
 | Spoofed exe name | **Yes** | Canonical exe path + trust tier |
 | AI coding agent reads secrets | **Yes** | No brand special-casing; agent = ordinary process |

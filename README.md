@@ -48,7 +48,9 @@ read-only because permission events do not reveal the opener's original flags.
 process injection; malicious browser extensions; browser remote-debugging
 attacks; memory scraping of already-open secrets; an attacker engineered against
 this project; full information-flow tracking after a user grants access; proving
-every browser storage location is covered on every release.
+every browser storage location is covered on every release. The open-only
+fanotify backend also does not observe an inode that is renamed into and back
+out of a sensitive pathname without any open occurring while it has that name.
 
 ## Architecture
 
@@ -156,8 +158,10 @@ Linux enforcement is explicit:
   measured first-open race for replacement inodes.
 - `strict-filesystem` installs `FAN_MARK_FILESYSTEM | FAN_OPEN_PERM` once per
   distinct protected filesystem. It classifies new sensitive paths before the
-  first open completes. It is opt-in because it intercepts all opens on those
-  filesystems and has a measurable cost.
+  first open completes. A structural path hit immediately records the inode
+  before guardd answers the permission event, so a later rename outside the
+  namespace remains inode-protected. It is opt-in because it intercepts all
+  opens on those filesystems and has a measurable cost.
 
 `guardctl status` reports `mode`, observed/required filesystem-mark counts and
 kernel mark health, strict-event and fast-allow counters,
@@ -234,6 +238,14 @@ p50/p95/p99/max to convergence). The Phase 19 conservative rerun again allowed
 recoveries. A separate 10,000-iteration external-hardlink/replacement attack
 also had zero recoveries after the strict alias check was added.
 
+The Phase 19.1 rename-away regression additionally proved both an owning
+browser's first open and a denied first open promote the new inode before it is
+renamed outside the profile. Both cases had zero recoveries. A rename-only
+transit with no open at the sensitive name remains outside `FAN_OPEN_PERM` and
+is documented rather than presented as protected. A targeted 16,000-open
+multi-hardlink amplification run completed in 889 ms with no queue overflow,
+classifier failure, or audit drop.
+
 Run the broader strict and performance acceptance with:
 
 ```sh
@@ -246,7 +258,8 @@ On this host, a 100,000-open unprotected workload on the marked ext4
 filesystem fell from about 900k opens/s without guardd to about 72.6k opens/s
 in Strict Mode (12.41x wall-time). The bounded 180,624-event concurrent run had
 zero fanotify overflows, audit drops, classifier failures, or deadlocks. See
-[`reports/phase-19.md`](reports/phase-19.md).
+[`reports/phase-19.md`](reports/phase-19.md). The post-review rename-away fix
+and evidence are in [`reports/phase-19.1.md`](reports/phase-19.1.md).
 
 ## Status
 
@@ -260,5 +273,6 @@ Conservative mode is explicitly not promoted. See
 [`reports/phase-16.md`](reports/phase-16.md),
 [`reports/phase-17.md`](reports/phase-17.md), and
 [`reports/phase-18.md`](reports/phase-18.md),
-[`reports/phase-19.md`](reports/phase-19.md), plus
+[`reports/phase-19.md`](reports/phase-19.md),
+[`reports/phase-19.1.md`](reports/phase-19.1.md), plus
 [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md).
