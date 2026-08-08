@@ -48,9 +48,12 @@ impl ProtectedResourceKind {
 /// High-level browser family, used by discovery classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BrowserFamily {
+    #[serde(alias = "chromium")]
     Chromium,
+    #[serde(alias = "firefox")]
     Firefox,
     /// Firefox-derived (e.g. Zen).
+    #[serde(alias = "zen")]
     Zen,
 }
 

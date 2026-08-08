@@ -1,5 +1,9 @@
 # Phase 11 — ssh-agent Load Flow
 
+> Historical report, superseded by Phase 16. Client-declared executable
+> identity fields were removed; the daemon now verifies a stopped direct child
+> and constructs the target identity from `/proc` plus system `ssh-add`.
+
 ## Objective
 
 Allow normal SSH/Git use while keeping raw key reads denied. A brokered

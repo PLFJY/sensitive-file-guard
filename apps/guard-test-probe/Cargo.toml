@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# No network code. This binary only opens/reads/mmaps a path.
+# No IP network code. The only transport is an AF_UNIX synthetic-canary sink.
 [dependencies]
 libc = { workspace = true }
+rusqlite = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

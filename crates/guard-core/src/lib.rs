@@ -12,7 +12,7 @@ pub mod policy;
 pub mod resource;
 
 pub use identity::{AncestorSummary, ProcessIdentity, ProcessStableId, StableIdentity, TrustTier};
-pub use lease::{LeaseId, LeaseSet, MigrationLease, SshLoadLease};
+pub use lease::{LeaseId, LeaseSet, MigrationAccessLease, MigrationLeaseState, SshLoadLease};
 pub use logging::init_logging;
 pub use policy::{evaluate, AccessEvent, AccessOperation, Decision, DenyReason};
 pub use resource::{

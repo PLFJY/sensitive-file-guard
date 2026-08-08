@@ -1,5 +1,9 @@
 # Sensitive Data Firewall (Linux V1)
 
+> **Current status: implementation-complete Alpha; security acceptance is
+> pending privileged integration tests. Do not use real browser data or SSH
+> private keys yet.**
+
 A narrow local capability firewall for sensitive files. It prevents
 unauthorized local processes from reading protected local secrets **before**
 the protected file is successfully opened.
@@ -10,8 +14,9 @@ the protected file is successfully opened.
 
 Never point this tool, its tests, or its fixtures at your real browser profiles,
 cookies, saved passwords, session tokens, or real SSH private keys. All tests
-use synthetic fixtures only (see `crates/guard-test-fixtures`). No test contains
-network exfiltration code.
+use synthetic fixtures only (see `crates/guard-test-fixtures`). Tests never use
+IP networking; the adversarial harness can send only a generated canary to an
+AF_UNIX socket below its disposable test directory.
 
 ## What it protects (V1)
 
@@ -31,8 +36,11 @@ private-key files.
 
 **Allows:** a browser accessing its own profile; normal `git push`, SSH
 authentication, and SSH-format Git signing through `ssh-agent`; cross-browser
-migration only under an explicit, temporary, read-only `MigrationLease`; an
+migration only under an explicit, temporary `MigrationAccessLease` that binds
+on first use to one exact process tree; an
 explicit one-shot `SshLoadLease` for loading a private key into `ssh-agent`.
+The Linux fanotify backend does **not** claim that migration access is
+read-only because permission events do not reveal the opener's original flags.
 
 **Explicit V1 non-goals:** root/SYSTEM compromise; kernel exploits; browser
 process injection; malicious browser extensions; browser remote-debugging
@@ -43,7 +51,7 @@ every browser storage location is covered on every release.
 ## Architecture
 
 ```
-                 CLI / TUI
+              CLI / TUI / guard-notify
                      |
               local authenticated IPC
                      |
@@ -62,7 +70,8 @@ every browser storage location is covered on every release.
           protected filesystem resources
 ```
 
-Binaries: `guardd` (daemon), `guardctl` (control), `guard-tui` (terminal UI).
+Binaries: `guardd` (daemon), `guardctl` (control), `guard-tui` (terminal UI),
+and `guard-notify` (unprivileged user-session notification presenter).
 
 ## Build
 
@@ -71,7 +80,7 @@ cargo build --release
 ```
 
 Binaries are placed in `target/release/`: `guardd`, `guardctl`, `guard-tui`,
-`guard-test-probe`.
+`guard-notify`, `guard-test-probe`.
 
 ## Install (systemd service)
 
@@ -81,6 +90,9 @@ cargo build --release
 
 # 2. Install as a systemd service (run as root).
 sudo deploy/install.sh
+
+# The installer adds the invoking sudo user to guardd-users. Log out/in once
+# so the new group is present in the user session.
 
 # 3. Edit the config — set your browser profile_root and ssh_keys.
 sudo vi /etc/guardd/config.json
@@ -94,6 +106,10 @@ guardctl status
 
 # 6. (Optional) enable auto-start on boot.
 sudo systemctl enable guardd   # already done by install.sh
+
+# 7. Desktop notifications run in the user session, never in root guardd.
+systemctl --user daemon-reload
+systemctl --user enable --now guard-notify
 ```
 
 ### Uninstall
@@ -121,7 +137,7 @@ target/release/guard-tui /run/guardd/guardd.sock
 
 ## Config
 
-See [`deploy/guardd-config.example.json`](file:///home/plfjy/sensitive-file-guard/deploy/guardd-config.example.json)
+See [`deploy/guardd-config.example.json`](deploy/guardd-config.example.json)
 for a template. Replace `REPLACE_USER` with your username and set the correct
 `owner_uid`.
 
@@ -132,9 +148,31 @@ journalctl -u guardd -f          # systemd
 RUST_LOG=info                    # env var (set in the unit file)
 ```
 
+## Defensive browser adversarial acceptance
+
+Run this from the intended Arch desktop user's logged-in session. It builds
+unique disposable Firefox/Chromium profiles below `/tmp`, exercises ordinary
+read, mmap, SQLite, copy, links, rename, child, `/proc/PID/fd`, replacement
+inode, nested-resource, and local-sink paths, then deletes the fixtures:
+
+```sh
+sudo bash scripts/test-browser-adversarial-root.sh
+```
+
+An enforcement PASS requires all three facts: the probe returned failure, its
+output contained no canary, and a new audit `Deny` appeared. Notification
+delivery is a separate assertion and never substitutes for access denial. When
+a working `org.freedesktop.Notifications` desktop service is available, every
+audited adversarial DENY is offered as a visible “Blocked protected-data
+access” notification and the delivered/expected totals must match. Use
+`KEEP_WORK=1` only when you intentionally want to retain the synthetic audit
+artifacts for inspection.
+
 ## Status
 
-Phases 01–14 complete. See `reports/` for per-phase reports. Phase 15 is the
-final acceptance phase. See `sensitive-data-firewall-harness/` for the full
-harness and [`docs/SECURITY_MODEL.md`](file:///home/plfjy/sensitive-file-guard/docs/SECURITY_MODEL.md)
-for the security model.
+Hardening Pass 1 is implemented and its non-privileged gates pass. The nine
+root/CAP_SYS_ADMIN acceptance scripts have not been run in this environment;
+Linux V1 therefore remains **security-acceptance pending**. See
+[`reports/phase-16.md`](reports/phase-16.md),
+[`reports/phase-17.md`](reports/phase-17.md), and
+[`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md).

@@ -394,6 +394,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "guard-notify"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "guard-ipc",
+ "platform-linux",
+ "serde_json",
+]
+
+[[package]]
 name = "guard-ssh"
 version = "0.1.0"
 dependencies = [
@@ -413,6 +423,8 @@ name = "guard-test-probe"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "rusqlite",
+ "tempfile",
 ]
 
 [[package]]

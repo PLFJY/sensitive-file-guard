@@ -11,8 +11,8 @@
 
 mod enforce;
 mod ipc;
-mod notify;
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
@@ -136,6 +136,21 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
 
     let engine = enforce::EnforcementEngine::from_config(&cfg)?;
 
+    // Start observing before the initial fanotify marking pass so a resource
+    // replacement concurrent with startup is queued and triggers rediscovery.
+    let topology_roots = cfg
+        .browsers
+        .iter()
+        .map(|browser| browser.profile_root.clone())
+        .chain(
+            cfg.ssh_keys
+                .iter()
+                .filter_map(|key| key.parent().map(std::path::Path::to_path_buf)),
+        )
+        .collect();
+    let topology = platform_linux::topology::TopologyWatcher::new(topology_roots)
+        .map_err(|e| anyhow::anyhow!("initializing browser topology watcher: {e}"))?;
+
     let group = fanotify::FanotifyGroup::new_content()?;
     // Mark before wrapping in Arc<Mutex> — mark_files/mark_trees take &self.
     let n_files = engine.mark_files(&group)?;
@@ -146,6 +161,70 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
     // `&self`; the underlying syscalls are thread-safe.
     let group = Arc::new(group);
     let engine = Arc::new(Mutex::new(engine));
+
+    // A startup-only fanotify snapshot is not sufficient: browser databases
+    // are routinely replaced with new inodes and profiles gain directories at
+    // runtime. Refuse ACTIVE startup if the persistent topology watcher cannot
+    // cover every enrolled profile root.
+    let topology_engine = Arc::clone(&engine);
+    let topology_group = Arc::clone(&group);
+    let topology_handle = std::thread::Builder::new()
+        .name("guardd-topology".into())
+        .spawn(move || {
+            let mut dirty = false;
+            while !signal::is_shutdown() {
+                match topology.wait_for_change(std::time::Duration::from_millis(250)) {
+                    Ok(changed) => dirty |= changed,
+                    Err(error) => {
+                        tracing::error!(err = %error, "browser topology watcher failed");
+                        topology_engine
+                            .lock()
+                            .expect("engine mutex poisoned")
+                            .topology_degraded = true;
+                        dirty = true;
+                    }
+                }
+                if !dirty {
+                    continue;
+                }
+                if let Err(error) = topology.rebuild_watches() {
+                    tracing::warn!(err = %error, "topology watch rebuild failed; retrying");
+                    topology_engine
+                        .lock()
+                        .expect("engine mutex poisoned")
+                        .topology_degraded = true;
+                    continue;
+                }
+                let refreshed = topology_engine
+                    .lock()
+                    .expect("engine mutex poisoned")
+                    .refresh_browser_resources(&topology_group);
+                match refreshed {
+                    Ok((files, directories)) => {
+                        topology_engine
+                            .lock()
+                            .expect("engine mutex poisoned")
+                            .topology_degraded = false;
+                        tracing::info!(
+                            marked_files = files,
+                            marked_tree_dirs = directories,
+                            "browser topology changed; protection refreshed"
+                        );
+                        dirty = false;
+                    }
+                    Err(error) => {
+                        topology_engine
+                            .lock()
+                            .expect("engine mutex poisoned")
+                            .topology_degraded = true;
+                        tracing::warn!(
+                            err = %error,
+                            "resource rediscovery/mark failed; retrying"
+                        );
+                    }
+                }
+            }
+        })?;
 
     // Open the audit store (if a path was given or a default is appropriate).
     let audit_path = cli
@@ -167,6 +246,7 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
             audit: Arc::clone(&audit),
             version: env!("CARGO_PKG_VERSION").to_string(),
             group: Some(Arc::clone(&group)),
+            authorization: ipc::SensitiveAuthorization::Polkit,
         };
         Some(
             std::thread::Builder::new()
@@ -182,21 +262,29 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
     };
 
     signal::install_shutdown_handler();
+    // Take one snapshot under one lock. Two `engine.lock()` expressions in the
+    // same formatting statement self-deadlock because argument temporaries live
+    // until the statement ends.
+    let (protected_files, browser_exes) = {
+        let engine = engine.lock().expect("engine");
+        (engine.registry().file_count(), engine.browser_exe_count())
+    };
     println!(
         "guardd: enforcement ACTIVE — browsers={} protected_files={} marked_files={} marked_tree_dirs={} browser_exes={} (fanotify fd={})",
         cfg.browsers.len(),
-        engine.lock().expect("engine").registry().file_count(),
+        protected_files,
         n_files,
         n_dirs,
-        engine.lock().expect("engine").browser_exe_count(),
+        browser_exes,
         group.raw_fd()
     );
+    std::io::stdout().flush()?;
     if let Some(sock) = &cli.ipc_socket {
         println!("guardd: IPC socket: {}", sock.display());
     }
     tracing::info!(
         browsers = cfg.browsers.len(),
-        protected_files = engine.lock().expect("engine").registry().file_count(),
+        protected_files,
         marked_files = n_files,
         marked_tree_dirs = n_dirs,
         ipc_socket = ?cli.ipc_socket,
@@ -205,9 +293,6 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
 
     let mut buf = vec![0u8; 65536];
     let mut processed: u64 = 0;
-    // Phase 09: deny-only desktop-notification coalescer. Owned by the fanotify
-    // loop thread (the IPC thread never notifies), so no Mutex needed.
-    let mut coalescer = notify::NotificationCoalescer::new(notify::COALESCE_WINDOW);
     loop {
         if signal::is_shutdown() {
             let eng = engine.lock().expect("engine");
@@ -250,21 +335,10 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
             );
 
             // Non-blocking audit record. Dropped if the channel is full. The
-            // full event always reaches the audit log; the desktop notification
-            // is coalesced (deny-only) so a busy open loop doesn't storm the
-            // user. Delivery runs on a detached thread so a hung D-Bus / missing
-            // `notify-send` can never stall the authorization hot path.
+            // full event reaches the audit log. Desktop presentation is owned
+            // by the unprivileged guard-notify user-session service; this root
+            // daemon never attempts to connect to a user's D-Bus session.
             if let Some(rec) = audit_record {
-                if let Some(key) = notify::key_for(&rec) {
-                    let now_ms = monotonic_ms();
-                    if coalescer.should_notify(&key, now_ms) {
-                        let (summary, body) = notify::notification_text(&rec);
-                        std::thread::Builder::new()
-                            .name("guardd-notify".into())
-                            .spawn(move || notify::deliver(&summary, &body))
-                            .ok();
-                    }
-                }
                 audit.record(rec);
             }
 
@@ -295,23 +369,15 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
             if cli.exit_after != 0 && processed >= cli.exit_after {
                 tracing::info!(processed, "reached exit_after; exiting");
                 drop(ipc_handle);
+                drop(topology_handle);
                 return Ok(());
             }
         }
     }
 
     drop(ipc_handle);
+    let _ = topology_handle.join();
     Ok(())
-}
-
-/// Monotonic-ish millisecond clock for notification coalescing. Uses
-/// `SystemTime` since the UNIX epoch; coalescing only cares about deltas
-/// within a short window, so wall-clock drift is irrelevant.
-fn monotonic_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 fn run_protect_test_file(target: &std::path::Path, cli: &Cli) -> anyhow::Result<()> {
@@ -334,6 +400,7 @@ fn run_protect_test_file(target: &std::path::Path, cli: &Cli) -> anyhow::Result<
         group.raw_fd(),
         allow_set.len()
     );
+    std::io::stdout().flush()?;
     tracing::info!(target = %target.display(), "enforcement active");
 
     let mut buf = vec![0u8; 65536];

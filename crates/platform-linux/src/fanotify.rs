@@ -45,30 +45,6 @@ pub fn fd_path(fd: RawFd) -> io::Result<std::path::PathBuf> {
     std::fs::read_link(format!("/proc/self/fd/{fd}"))
 }
 
-/// Whether an open fd was opened for writing (`O_WRONLY` or `O_RDWR`), via
-/// `fcntl(F_GETFL)`. Used by the enforcement engine to classify a protected
-/// open as `AccessOperation::Write` so a read-only `MigrationLease` can refuse
-/// writes to the source profile.
-///
-/// # Caveat (fanotify)
-///
-/// For a `FAN_OPEN_PERM` event fd the kernel historically opens the metadata fd
-/// `O_RDONLY | O_LARGEFILE` regardless of the triggering open's flags, in which
-/// case this returns `false` and a write-open is classified as a read. The
-/// read-only-write invariant is therefore enforced at the policy layer
-/// (unit-tested); on kernels that surface the opener's flags this becomes
-/// enforceable at the open gate as well. The call is cheap (one syscall) and
-/// correct for any fd that does carry its open flags.
-pub fn fd_is_writable(fd: RawFd) -> io::Result<bool> {
-    // SAFETY: fcntl(F_GETFL) is a query on a valid open fd; no pointer arg.
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    if flags < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let acc = (flags & libc::O_ACCMODE) as libc::c_int;
-    Ok(acc == libc::O_WRONLY || acc == libc::O_RDWR)
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum FanotifyError {
     #[error("fanotify metadata version mismatch: found {found}, expected {expected}")]
@@ -332,26 +308,5 @@ mod tests {
             overflow: true,
         };
         assert!(!ov.has_fd());
-    }
-
-    #[test]
-    fn fd_is_writable_reflects_open_flags() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("f");
-        std::fs::write(&path, b"x").unwrap();
-        use std::os::unix::io::AsRawFd;
-
-        let r = std::fs::File::open(&path).unwrap();
-        assert!(!fd_is_writable(r.as_raw_fd()).unwrap(), "O_RDONLY");
-
-        let w = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
-        assert!(fd_is_writable(w.as_raw_fd()).unwrap(), "O_WRONLY");
-
-        let rw = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&path)
-            .unwrap();
-        assert!(fd_is_writable(rw.as_raw_fd()).unwrap(), "O_RDWR");
     }
 }

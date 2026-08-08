@@ -32,7 +32,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use guard_audit::AuditRecord;
 use guard_browser::{CustomProfile, ProtectedResourceRegistry};
 use guard_core::identity::{ExeIdentity, ProcessIdentity};
-use guard_core::lease::{LeaseId, LeaseSet, MigrationLease};
+use guard_core::lease::{LeaseId, LeaseSet, MigrationAccessLease, MigrationLeaseState};
 use guard_core::policy::{evaluate, AccessEvent, AccessOperation, Decision, DenyReason};
 use guard_core::resource::{
     BrowserFamily, BrowserId, ProfileId, ProtectedResource, ProtectedResourceKind,
@@ -109,6 +109,9 @@ pub struct EnforcementEngine {
     pub denied: u64,
     /// Decisions where classify_fd failed (race / unmarked path). Fail-closed.
     pub unclassified: u64,
+    /// Persistent topology refresh is currently failing; existing marks still
+    /// enforce, but replacement/new-object coverage may be stale.
+    pub topology_degraded: bool,
 }
 
 impl EnforcementEngine {
@@ -184,6 +187,7 @@ impl EnforcementEngine {
             allowed: 0,
             denied: 0,
             unclassified: 0,
+            topology_degraded: false,
         })
     }
 
@@ -228,7 +232,7 @@ impl EnforcementEngine {
         found
     }
 
-    /// Authorize a read-only cross-browser migration lease (Phase 08). The
+    /// Authorize a cross-browser migration access lease. The
     /// lease is **armed**: bound to the target browser's executable file
     /// identity (`ExeIdentity`), so it matches the next target process — or any
     /// process in its tree — that opens the named source profile. This avoids
@@ -273,16 +277,15 @@ impl EnforcementEngine {
         let expires_at = now.saturating_add(dur);
         self.next_lease_id = self.next_lease_id.saturating_add(1);
         let id = LeaseId(self.next_lease_id);
-        self.leases.migration.push(MigrationLease {
+        self.leases.migration.push(MigrationAccessLease {
             id,
             source_browser: BrowserId(source_browser.into()),
             source_profile: ProfileId(source_profile.into()),
             target_browser: BrowserId(target_browser.into()),
             uid,
-            target,
+            state: MigrationLeaseState::Armed { target },
             expires_at,
             revoked: false,
-            read_only: true,
         });
         Ok((id, expires_at))
     }
@@ -363,6 +366,50 @@ impl EnforcementEngine {
         Ok(n)
     }
 
+    /// Rediscover browser resources after an inotify topology change, extend
+    /// the inode index, and apply permission marks to every current object.
+    /// Runtime-enrolled SSH resources are preserved. Existing inode aliases
+    /// are retained because an individual fanotify mark follows a live object
+    /// across rename even when its new name is no longer discoverable. An
+    /// unmarked inode cannot reach this classifier; a newly marked object that
+    /// reuses an identity overwrites the retained entry below.
+    pub fn refresh_browser_resources(
+        &mut self,
+        group: &fanotify::FanotifyGroup,
+    ) -> anyhow::Result<(usize, usize)> {
+        let ssh_resources: Vec<ProtectedResource> = self
+            .registry
+            .files()
+            .filter(|resource| resource.kind == ProtectedResourceKind::SshPrivateKey)
+            .cloned()
+            .collect();
+        let mut registry = ProtectedResourceRegistry::new();
+        for browser in &self.browser_config {
+            let owner_uid = browser
+                .owner_uid
+                .or_else(|| stat_owner(&browser.profile_root))
+                .unwrap_or(0);
+            CustomProfile {
+                browser: BrowserId(browser.id.clone()),
+                family: browser.family,
+                root: browser.profile_root.clone(),
+                owner_uid,
+            }
+            .enroll_into(&mut registry)?;
+        }
+        for resource in ssh_resources {
+            registry.enroll_file(resource);
+        }
+
+        let fd_index = merge_fd_index(&self.fd_index, &registry);
+        self.registry = registry;
+        self.fd_index = fd_index;
+
+        let files = self.mark_files(group)?;
+        let directories = self.mark_trees(group)?;
+        Ok((files, directories))
+    }
+
     /// Runtime-enroll a single SSH private key (Phase 10). Updates the registry
     /// and the inode `fd_index` so subsequent opens are classified + denied by
     /// the SSH policy. The caller is responsible for adding the fanotify kernel
@@ -373,13 +420,19 @@ impl EnforcementEngine {
     /// path is missing, not a regular file, or not a private-key candidate
     /// (e.g. `.pub` / `known_hosts`). Idempotent: re-enrolling an already-
     /// protected path replaces the existing entry.
+    #[cfg(test)]
     pub fn protect_ssh_key(&mut self, path: &Path) -> std::io::Result<ProtectedResource> {
         let res = guard_ssh::enroll_key(path)?;
+        self.enroll_ssh_resource(res.clone());
+        Ok(res)
+    }
+
+    /// Publish a pre-validated SSH resource after its kernel mark is active.
+    pub fn enroll_ssh_resource(&mut self, res: ProtectedResource) {
         if let Ok(id) = stat_dev_ino(&res.path) {
             self.fd_index.insert(id, res.clone());
         }
-        self.registry.enroll_file(res.clone());
-        Ok(res)
+        self.registry.enroll_file(res);
     }
 
     /// Hot-path entry (test convenience). Equivalent to
@@ -416,20 +469,12 @@ impl EnforcementEngine {
             }
         };
         let now = now_secs();
-        // Classify the open as a write when the fd carries O_WRONLY/O_RDWR so a
-        // read-only migration lease can refuse writes to the source profile.
-        // (For FAN_OPEN_PERM event fds the kernel may report O_RDONLY; the
-        // read-only write invariant is enforced at the policy layer regardless.)
-        let operation = if fanotify::fd_is_writable(fd).unwrap_or(false) {
-            AccessOperation::Write
-        } else {
-            AccessOperation::Open
-        };
+        self.refresh_migration_states(&resource, &process);
         let decision = evaluate(
             &AccessEvent {
                 resource: resource.clone(),
                 process: process.clone(),
-                operation,
+                operation: AccessOperation::Open,
             },
             &self.leases,
             now,
@@ -458,6 +503,53 @@ impl EnforcementEngine {
         );
         let record = build_audit_record(&resource, Some(&process), decision, &backend_diag);
         (decision, Some(record))
+    }
+
+    /// Bind an armed migration lease to the first matching target process and
+    /// retire bound leases as soon as their root process exits. This mutation
+    /// happens while the engine mutex is held, immediately before policy
+    /// evaluation, so an armed executable-wide grant is never exposed.
+    fn refresh_migration_states(
+        &mut self,
+        resource: &ProtectedResource,
+        process: &ProcessIdentity,
+    ) {
+        for lease in &mut self.leases.migration {
+            if let MigrationLeaseState::Bound { root } = &lease.state {
+                if linux_identity::read_start_time(root.pid as i32).ok() != Some(root.start_time) {
+                    lease.state = MigrationLeaseState::Dead;
+                }
+            }
+
+            let MigrationLeaseState::Armed { target } = &lease.state else {
+                continue;
+            };
+            if lease.uid != process.uid
+                || resource.browser_id() != &lease.source_browser
+                || resource.profile_id() != &lease.source_profile
+            {
+                continue;
+            }
+
+            let root = if process.stable.exe_identity() == *target {
+                Some(process.stable.clone())
+            } else {
+                process
+                    .ancestors
+                    .iter()
+                    .find(|ancestor| ancestor.exe_identity() == *target)
+                    .map(|ancestor| guard_core::identity::ProcessStableId {
+                        pid: ancestor.pid,
+                        start_time: ancestor.start_time,
+                        exe: ancestor.exe.clone(),
+                        exe_dev: ancestor.exe_dev,
+                        exe_ino: ancestor.exe_ino,
+                    })
+            };
+            if let Some(root) = root {
+                lease.state = MigrationLeaseState::Bound { root };
+            }
+        }
     }
 
     /// Classify an open fd to a protected resource. Order:
@@ -512,6 +604,19 @@ impl EnforcementEngine {
             .insert(pid as u32, (current_start, identity.clone()));
         Some((identity, "fresh_resolve"))
     }
+}
+
+fn merge_fd_index(
+    previous: &HashMap<(u64, u64), ProtectedResource>,
+    registry: &ProtectedResourceRegistry,
+) -> HashMap<(u64, u64), ProtectedResource> {
+    let mut index = previous.clone();
+    for resource in registry.files() {
+        if let Ok(identity) = stat_dev_ino(&resource.path) {
+            index.insert(identity, resource.clone());
+        }
+    }
+    index
 }
 
 /// Recursively mark `dir` and all its subdirectories with the tree mask.
@@ -740,6 +845,22 @@ mod tests {
     }
 
     // --- resource classification via fd ---
+
+    #[test]
+    fn config_accepts_documented_lowercase_browser_families() {
+        let config: EnforcementConfig = serde_json::from_str(
+            r#"{
+                "browsers": [
+                    {"id":"chrome","family":"chromium","profile_root":"/tmp/chrome"},
+                    {"id":"firefox","family":"firefox","profile_root":"/tmp/firefox"}
+                ]
+            }"#,
+        )
+        .expect("documented lowercase config must deserialize");
+
+        assert_eq!(config.browsers[0].family, BrowserFamily::Chromium);
+        assert_eq!(config.browsers[1].family, BrowserFamily::Firefox);
+    }
 
     #[test]
     fn classify_fd_returns_concrete_critical_file() {
@@ -1199,9 +1320,10 @@ mod tests {
     }
 
     #[test]
-    fn migration_lease_write_denied_at_engine_level() {
-        // Open chrome cookies with O_WRONLY under a firefox->chrome lease: the
-        // engine classifies the open as Write and the read-only lease denies it.
+    fn migration_access_lease_does_not_claim_read_only_enforcement() {
+        // The fanotify backend cannot observe the triggering open mode. V1
+        // therefore grants process-tree-scoped migration access and must not
+        // pretend that an O_WRONLY open is distinguishable.
         let chrome = ChromiumProfile::create("Default").unwrap();
         let ff = FirefoxProfile::create("ff-profile").unwrap();
         let ff_exe = ff.root_path().join("fake-firefox-bin");
@@ -1230,15 +1352,16 @@ mod tests {
             Decision::AllowByLease(lease_id)
         );
 
-        // Write open under the read-only lease is denied (LeaseScopeMismatch).
+        // The same bound process can also issue a write open. This test records
+        // the honest backend limitation rather than asserting fake semantics.
         let w = std::fs::OpenOptions::new()
             .write(true)
             .open(&chrome.cookies)
             .unwrap();
         assert_eq!(
             engine.decide(ff_pid, w.as_raw_fd()),
-            Decision::Deny(DenyReason::LeaseScopeMismatch),
-            "read-only lease must not grant a write open"
+            Decision::AllowByLease(lease_id),
+            "fanotify migration access is not a read-only guarantee"
         );
     }
 
@@ -1656,6 +1779,45 @@ mod tests {
             .classify_fd(f.as_raw_fd())
             .expect("renamed file must classify via inode index");
         assert_eq!(res.kind, ProtectedResourceKind::CookieStore);
+    }
+
+    #[test]
+    fn refreshed_index_retains_live_renamed_inode() {
+        let p = ChromiumProfile::create("Default").unwrap();
+        let mut engine =
+            EnforcementEngine::from_config(&chrome_config(&p.user_data_dir, None)).expect("engine");
+        let renamed = p.user_data_dir.join("Default/Network/renamed-cookies");
+        std::fs::rename(&p.cookies, &renamed).unwrap();
+        std::fs::write(&p.cookies, b"synthetic replacement").unwrap();
+
+        let mut registry = ProtectedResourceRegistry::new();
+        CustomProfile {
+            browser: BrowserId("chrome".into()),
+            family: BrowserFamily::Chromium,
+            root: p.user_data_dir.clone(),
+            owner_uid: unsafe { libc::getuid() },
+        }
+        .enroll_into(&mut registry)
+        .unwrap();
+        engine.fd_index = merge_fd_index(&engine.fd_index, &registry);
+        engine.registry = registry;
+
+        let renamed_file = std::fs::File::open(&renamed).unwrap();
+        assert_eq!(
+            engine
+                .classify_fd(renamed_file.as_raw_fd())
+                .expect("renamed inode retained")
+                .kind,
+            ProtectedResourceKind::CookieStore
+        );
+        let replacement_file = std::fs::File::open(&p.cookies).unwrap();
+        assert_eq!(
+            engine
+                .classify_fd(replacement_file.as_raw_fd())
+                .expect("replacement inode indexed")
+                .kind,
+            ProtectedResourceKind::CookieStore
+        );
     }
 
     /// Browser/profile path containing spaces and unicode: enrollment +

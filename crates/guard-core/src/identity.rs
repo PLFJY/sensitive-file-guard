@@ -50,7 +50,7 @@ pub struct ProcessStableId {
 /// (e.g. different start time) indicate PID reuse and must not match a lease.
 ///
 /// Used by one-shot leases (`SshLoadLease`) that bind to a specific process
-/// invocation. Migration leases use the coarser `ExeIdentity` (armed binding).
+/// invocation.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct StableIdentity {
     pub exe: PathBuf,
@@ -61,7 +61,7 @@ pub struct StableIdentity {
 
 /// Executable file identity (canonical path + `st_dev` + `st_ino`), excluding
 /// the per-instance start time. This is the "armed" binding used by
-/// `MigrationLease`: a lease is created bound to the target browser's
+/// `MigrationAccessLease`: a lease is created armed for the target browser's
 /// executable file identity and matches the next process (or any process in its
 /// tree) whose exe identity equals it. A different executable at the same path
 /// (different inode) does not match; a renamed binary at a different path does

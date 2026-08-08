@@ -4,6 +4,9 @@ This document defines the guarantees, non-goals, and known limitations of the
 Linux V1 implementation of the Sensitive Data Firewall (`guardd`). It is the
 authoritative reference for what the firewall does and does not protect against.
 
+**Acceptance state:** implementation-complete Alpha. Non-privileged tests pass;
+root/CAP_SYS_ADMIN acceptance remains pending. Do not use real secrets yet.
+
 ## Mission
 
 Prevent unauthorized local processes from reading protected local secrets —
@@ -65,6 +68,13 @@ key by the exact `ssh-add` invocation (bound by `StableIdentity`). The `used`
 flag is set on the first `AllowByLease`; a second open by the same process is
 denied with `OneShotLeaseUsed`.
 
+The client cannot declare that identity. It submits only a stopped child PID;
+the daemon verifies that the child is the IPC peer's direct child, is stopped,
+has the same UID/GID, and combines its kernel start time with the daemon-chosen,
+root-owned system `ssh-add` inode. The child's `SSH_AUTH_SOCK` must name a Unix
+socket owned by the requesting UID. Polkit user authentication is required for
+non-root requests.
+
 ### 10. No secret contents in audit logs
 Audit records contain metadata only (path, exe, uid, pid, decision, deny
 reason, resource kind). They never contain file contents, cookie values,
@@ -79,6 +89,22 @@ and notification happen out-of-band.
 If `classify_fd` cannot determine whether a fd is protected (race, unmarked
 path, fd_path readlink failure), the decision is `Deny(UnclassifiedFd)` — the
 engine fails closed, not open.
+
+### 13. Dynamic resource rediscovery
+An inotify watcher is established before initial fanotify marking and watches
+every directory below enrolled browser roots. Create, move, delete, and
+attribute changes trigger full rediscovery, inode-index reconstruction, and
+fanotify remarking. Replaced Cookie databases, new sidecars, new profiles, and
+new nested storage directories therefore do not remain unprotected until the
+next daemon restart.
+
+### 14. Migration capability lifecycle
+A `MigrationAccessLease` starts `Armed` for one enrolled executable identity.
+An armed lease does not authorize in the pure policy engine. On first matching
+access, the enforcement engine binds it to the exact browser root process
+(PID + start time + executable path/dev/inode). Only that process tree can use
+the capability; it becomes dead when the root process exits or the PID is
+reused.
 
 ## Non-goals
 
@@ -125,6 +151,13 @@ The firewall does not scan file contents for malware, does not quarantine
 files, and does not maintain reputation databases. It enforces an access
 policy on a fixed set of protected paths.
 
+### 7. Migration access is not read-only on fanotify
+The fanotify event fd uses the flags selected by `fanotify_init`; `F_GETFL` on
+that fd does not recover the triggering process's `open(2)` mode. Linux V1
+therefore exposes a process-tree-scoped `MigrationAccessLease`, not a
+read-only guarantee. Enforcing read-only migration requires another boundary
+such as an LSM or a sandbox around a daemon-controlled migration process.
+
 ## Linux-specific behavior
 
 ### Fail-open on daemon close
@@ -143,11 +176,9 @@ LSM (Linux Security Module) hooks or a kernel module that survives userspace
 daemon death. That is out of scope for V1.
 
 ### Fanotify mount limitations
-`fanotify_mark` with `FAN_MARK_MOUNT` marks an entire mount. The current
-implementation uses `FAN_MARK_INODE` for individual files (critical browser
-databases, SSH keys) and `FAN_MARK_FILESYSTEM` for tree protection where
-available. On kernels < 5.13, `FAN_MARK_FILESYSTEM` is unavailable; tree marks
-fall back to per-inode marks on discovered descendants.
+The current implementation uses inode marks for individual critical files and
+recursive directory marks for storage trees. It does not currently use
+`FAN_MARK_MOUNT` or `FAN_MARK_FILESYSTEM`.
 
 ### Recursive directory coverage
 The `mark_tree` / `mark_trees` strategy marks the tree root directory with
@@ -155,10 +186,15 @@ The `mark_tree` / `mark_trees` strategy marks the tree root directory with
 **directly under** that directory. New subdirectories created after the mark
 may not be automatically covered unless `FAN_MARK_FILESYSTEM` is used.
 
-**Known gap:** if a new nested directory is created and a file is opened in it
-before `guardd` discovers and marks the new directory, that open is not
-intercepted. This is a race window. The implementation does not claim
-race-free tree coverage. The gap is documented and tested in Phase 13.
+The persistent topology watcher discovers and marks new directories. A small
+create/move notification → rediscovery → fanotify mark race remains; the
+implementation does not claim race-free tree coverage. Strict filesystem-scope
+permission monitoring remains future work.
+
+Configured SSH-key parent directories are watched as well, so configured keys
+are remarked after inode replacement. A key enrolled only at runtime is not yet
+added to the watch-root set; if its parent is otherwise unwatched, replacing
+that key requires `guardctl ssh protect` again.
 
 ### FAN_Q_OVERFLOW
 If the fanotify event queue overflows (too many events too fast), the kernel
@@ -206,6 +242,7 @@ that is documented but not specifically tested in V1.
 | Network exfiltration of in-memory secret | **No** | Not a network firewall |
 | Daemon crash window | **No** | Fail-open on daemon death (systemd restart mitigates) |
 | New nested dir race before mark | **No** | Documented tree-mark race window |
+| Replaced Cookie inode remains unprotected until restart | **Yes** | Topology watcher rediscovers and remarks; bounded watcher→mark race remains |
 
 ## Deployment recommendations
 
@@ -220,3 +257,6 @@ that is documented but not specifically tested in V1.
    process identity via `/proc` regardless of the target process's UID.
 5. **Audit log persistence** (Phase 07): the SQLite audit DB survives daemon
    restarts. Review `guardctl events` periodically.
+6. Put interactive users in `guardd-users` for socket transport. This does not
+   authorize mutations: migration and SSH policy changes separately require
+   polkit. Desktop notifications run as `guard-notify` in the user's session.

@@ -33,12 +33,15 @@ KillMode=control-group
 
 # Run as root (fanotify FAN_CLASS_CONTENT requires CAP_SYS_ADMIN).
 User=root
-Group=root
+# The socket inherits this group. Sensitive mutation requests still require
+# polkit; group membership only grants transport access/read-only own-UID APIs.
+Group=guardd-users
 
 # State + runtime directories (systemd creates these with correct perms).
 StateDirectory=guardd
+StateDirectoryMode=0700
 RuntimeDirectory=guardd
-RuntimeDirectoryMode=0755
+RuntimeDirectoryMode=0750
 LogsDirectory=guardd
 
 # Environment: minimal, no network proxy tricks.

@@ -65,7 +65,7 @@ fn mock_response(op: &RequestOp) -> Response {
             target_exe: "/usr/bin/firefox".into(),
             uid: 1000,
             expires_at: 17_000_000_600,
-            read_only: true,
+            read_only_guaranteed: false,
         })),
         RequestOp::LeasesRevoke { lease_id } => Response::ok(ResponseBody::LeaseRevoked {
             lease_id: lease_id.clone(),
@@ -106,7 +106,7 @@ fn tui_client_grants_then_revokes_synthetic_migration_lease() {
     assert_eq!(granted.source_profile, "Default");
     assert_eq!(granted.target_browser, "firefox");
     assert_eq!(granted.target_exe, "/usr/bin/firefox");
-    assert!(granted.read_only);
+    assert!(!granted.read_only_guaranteed);
     assert_eq!(granted.uid, 1000);
 
     // Revoke: the TUI client sends LeasesRevoke and parses LeaseRevoked.

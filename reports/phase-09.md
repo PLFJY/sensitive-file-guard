@@ -1,5 +1,9 @@
 # Phase 09 — TUI and Desktop Notifications
 
+> Historical report, superseded by Phase 16. Root `guardd` no longer runs
+> `notify-send`; desktop presentation is handled by the unprivileged
+> `guard-notify` user-session service.
+
 ## Implemented behavior
 
 ### TUI (`guard-tui`)

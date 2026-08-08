@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>Sensitive Data Firewall</vendor>
+  <vendor_url>https://example.invalid/guardd</vendor_url>
+
+  <action id="org.guardd.migration-authorize">
+    <description>Authorize temporary browser profile migration access</description>
+    <message>Authentication is required to let $(target_browser) access $(source_browser) profile $(source_profile)</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_self</allow_active>
+    </defaults>
+  </action>
+
+  <action id="org.guardd.ssh-protect">
+    <description>Add an SSH private key to guardd protection</description>
+    <message>Authentication is required to protect SSH key $(path)</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_self</allow_active>
+    </defaults>
+  </action>
+
+  <action id="org.guardd.ssh-load">
+    <description>Load a protected SSH private key into ssh-agent</description>
+    <message>Authentication is required to load $(path) into agent $(agent_socket)</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_self</allow_active>
+    </defaults>
+  </action>
+</policyconfig>

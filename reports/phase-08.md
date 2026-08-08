@@ -1,5 +1,9 @@
 # Phase 08 — Browser Migration Lease
 
+> Historical report, superseded by Phase 16. Linux fanotify does not enforce
+> the claimed read-only invariant; current code uses `MigrationAccessLease`
+> with `read_only_guaranteed: false` and armed→bound process-tree state.
+
 ## Implemented behavior
 
 Legitimate cross-browser import is now possible without permanent allow-listing.

@@ -16,7 +16,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Wire protocol version. Bumped on incompatible changes.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Hard upper bound on a single request frame. The server rejects anything
 /// larger (and any malformed length prefix) so a peer cannot exhaust memory.
@@ -55,7 +55,7 @@ pub enum RequestOp {
         lease_id: String,
     },
     ConfigCheck,
-    /// Authorize a read-only cross-browser migration lease (Phase 08). The
+    /// Authorize a cross-browser migration access lease. The
     /// daemon binds the lease to the target browser's armed `ExeIdentity` and
     /// caps `duration_secs` at 1 hour (default 10 min). `uid` is taken from
     /// peer creds, NOT from this struct.
@@ -73,26 +73,23 @@ pub enum RequestOp {
     SshProtect {
         path: String,
     },
-    /// Authorize a one-shot SSH load lease (Phase 11). The daemon validates
-    /// that `path` is a protected SSH private key owned by the requesting user,
-    /// then creates a `SshLoadLease` bound to the exact `ssh-add` process
-    /// invocation (exe + start_time + dev + ino). The client (`guardctl`) forks
-    /// `ssh-add` in a stopped state, reads the start_time, sends this request,
-    /// then continues the child. No key contents are ever sent.
+    /// Authorize a one-shot SSH load lease (Phase 11, hardened). The daemon
+    /// validates that `path` is a protected SSH private key owned by the
+    /// requesting user, then creates a `SshLoadLease` bound to the exact
+    /// `ssh-add` process invocation.
+    ///
+    /// **Security (hardening pass 1):** the client sends ONLY the PID of the
+    /// stopped `ssh-add` child. The daemon reads `/proc/<pid>/exe`, stats the
+    /// binary (dev + ino), and reads `/proc/<pid>/stat` (start_time) itself —
+    /// it does NOT trust client-declared identity fields. This closes the
+    /// authorization bypass where a malicious client could declare any identity.
     ///
     /// `uid` is taken from peer creds, NOT from this struct.
     SshLoadAuthorize {
         path: String,
-        /// Canonical exe path of `ssh-add`.
-        ssh_add_exe: String,
-        /// `st_dev` of the `ssh-add` binary.
-        ssh_add_dev: u64,
-        /// `st_ino` of the `ssh-add` binary.
-        ssh_add_ino: u64,
-        /// Process start time of the stopped `ssh-add` child (from
-        /// `/proc/<pid>/stat` field 22). The lease binds to this so a different
-        /// `ssh-add` invocation (different start time) cannot reuse it.
-        start_time: u64,
+        /// PID of the stopped `ssh-add` child. The daemon verifies this PID's
+        /// identity from `/proc` before creating the lease.
+        ssh_add_pid: u32,
     },
 }
 
@@ -146,7 +143,7 @@ pub enum ResponseBody {
     ConfigCheck(ConfigCheckInfo),
     /// Result of `MigrationAuthorize`: the new lease id, its expiry (epoch
     /// seconds), the armed target browser identity (canonical exe path), and
-    /// the read-only flag (always true for migration leases).
+    /// an explicit statement that Linux V1 does not guarantee read-only access.
     MigrationAuthorized(MigrationAuthorizedInfo),
     /// Result of `SshProtect`: the now-protected canonical path + owner uid.
     SshProtected(SshProtectedInfo),
@@ -187,7 +184,9 @@ pub struct MigrationAuthorizedInfo {
     pub target_exe: String,
     pub uid: u32,
     pub expires_at: u64,
-    pub read_only: bool,
+    /// Always false on the fanotify backend: its event fd flags do not expose
+    /// the triggering process's original open mode.
+    pub read_only_guaranteed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -278,6 +277,8 @@ pub struct LeaseInfo {
     pub source_profile: Option<String>,
     pub target_browser: Option<String>,
     pub resource: Option<String>,
+    /// Migration lifecycle (`armed`, `bound`, `dead`); absent for SSH leases.
+    pub state: Option<String>,
     pub expires_at: u64,
     pub revoked: bool,
     pub used: bool,
@@ -332,10 +333,7 @@ mod tests {
             },
             RequestOp::SshLoadAuthorize {
                 path: "/home/u/.ssh/id_ed25519".into(),
-                ssh_add_exe: "/usr/bin/ssh-add".into(),
-                ssh_add_dev: 100,
-                ssh_add_ino: 200,
-                start_time: 9999,
+                ssh_add_pid: 12345,
             },
         ];
         for op in cases {
@@ -378,7 +376,7 @@ mod tests {
             target_exe: "/usr/bin/firefox".into(),
             uid: 1000,
             expires_at: 17_000_000_600,
-            read_only: true,
+            read_only_guaranteed: false,
         });
         let resp = Response::ok(body);
         let j = serde_json::to_string(&resp).unwrap();
@@ -391,7 +389,7 @@ mod tests {
                 assert_eq!(m.target_browser, "firefox");
                 assert_eq!(m.target_exe, "/usr/bin/firefox");
                 assert_eq!(m.uid, 1000);
-                assert!(m.read_only);
+                assert!(!m.read_only_guaranteed);
             }
             other => panic!("expected MigrationAuthorized, got {other:?}"),
         }
@@ -429,10 +427,7 @@ mod tests {
             version: PROTOCOL_VERSION,
             op: RequestOp::SshLoadAuthorize {
                 path: "/home/u/.ssh/id_ed25519".into(),
-                ssh_add_exe: "/usr/bin/ssh-add".into(),
-                ssh_add_dev: 100,
-                ssh_add_ino: 200,
-                start_time: 9999,
+                ssh_add_pid: 12345,
             },
         };
         let json = serde_json::to_string(&req).unwrap();

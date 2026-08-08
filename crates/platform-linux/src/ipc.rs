@@ -79,7 +79,7 @@ impl IpcServer {
         let listener = UnixListener::bind(path)?;
         // Restrict to owner by default; root daemon can relax for a group later.
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660)).ok();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))?;
         Ok(Self {
             listener,
             _path: path.to_path_buf(),

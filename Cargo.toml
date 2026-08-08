@@ -12,6 +12,7 @@ members = [
     "apps/guardctl",
     "apps/guard-tui",
     "apps/guard-test-probe",
+    "apps/guard-notify",
 ]
 
 [workspace.package]

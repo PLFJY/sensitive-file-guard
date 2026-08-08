@@ -1,7 +1,7 @@
 //! Lease domain types.
 //!
 //! Two lease kinds:
-//! - `MigrationLease`: short, read-only, identity-scoped, time-limited grant
+//! - `MigrationAccessLease`: short, identity-scoped, time-limited grant
 //!   allowing one browser to read another browser's protected profile.
 //! - `SshLoadLease`: one-shot grant allowing the exact `ssh-add` invocation to
 //!   read a single protected SSH private key.
@@ -11,34 +11,42 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::identity::{ExeIdentity, StableIdentity};
+use crate::identity::{ExeIdentity, ProcessStableId, StableIdentity};
 use crate::resource::{BrowserId, ProfileId, ProtectedResourceId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LeaseId(pub u64);
 
-/// Read-only, time-limited, identity-scoped cross-browser migration grant.
+/// Lifecycle of a cross-browser migration capability.
 ///
-/// `target` is an **armed** `ExeIdentity` (exe file identity, no start time):
-/// the lease is created before the target browser reads the source profile and
-/// matches the next process — or any process in its tree — whose executable
-/// file identity equals it. This avoids permanent allow-listing while
-/// tolerating the target being launched after authorization.
+/// An armed lease does not grant access by itself. The Linux enforcement layer
+/// atomically binds it on first use to the exact target process instance. Once
+/// bound, only that process or descendants whose ancestry contains the same
+/// PID + start time + executable identity can use it. `Dead` is terminal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MigrationLease {
+pub enum MigrationLeaseState {
+    Armed { target: ExeIdentity },
+    Bound { root: ProcessStableId },
+    Dead,
+}
+
+/// Time-limited, process-tree-bound cross-browser migration access grant.
+///
+/// This is intentionally not called "read-only": Linux fanotify permission
+/// events do not expose the triggering process's original open flags, so V1
+/// cannot enforce a read-only invariant at this boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MigrationAccessLease {
     pub id: LeaseId,
     pub source_browser: BrowserId,
     pub source_profile: ProfileId,
     pub target_browser: BrowserId,
     /// OS user that authorized/requested the migration.
     pub uid: u32,
-    /// Armed executable-file identity of the target browser that may exercise
-    /// the lease (matched against the opener and its ancestor tree).
-    pub target: ExeIdentity,
+    pub state: MigrationLeaseState,
     /// Monotonic/epoch deadline (same clock as the `now` passed to `evaluate`).
     pub expires_at: u64,
     pub revoked: bool,
-    pub read_only: bool,
 }
 
 /// One-shot grant to load a single SSH private key into `ssh-agent`.
@@ -58,6 +66,6 @@ pub struct SshLoadLease {
 /// The set of active leases consulted by the policy engine.
 #[derive(Debug, Clone, Default)]
 pub struct LeaseSet {
-    pub migration: Vec<MigrationLease>,
+    pub migration: Vec<MigrationAccessLease>,
     pub ssh: Vec<SshLoadLease>,
 }

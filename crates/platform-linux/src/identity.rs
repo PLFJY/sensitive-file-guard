@@ -69,6 +69,15 @@ pub enum ResolveError {
     StatusParse { pid: i32, reason: &'static str },
 }
 
+/// Kernel-observed facts needed to authorize a stopped child safely.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoppedChildIdentity {
+    pub target: guard_core::identity::StableIdentity,
+    pub uid: u32,
+    pub gid: u32,
+    pub parent_pid: i32,
+}
+
 /// Pure trust classifier, unit-testable without real files.
 ///
 /// - `exe_owner_uid`: owner of the executable file
@@ -142,9 +151,112 @@ pub fn read_start_time(pid: i32) -> Result<u64, ResolveError> {
     Ok(read_stat(pid)?.0)
 }
 
+/// Build the identity that a stopped child will have after it execs a daemon-
+/// selected executable. The child contributes only kernel-observed invocation
+/// facts (PID/start time/UID/parent); executable path and inode come from the
+/// daemon's trusted path, never from IPC.
+pub fn verify_stopped_child_for_exec(
+    pid: i32,
+    expected_parent: i32,
+    expected_uid: u32,
+    expected_gid: u32,
+    trusted_exe: &Path,
+) -> Result<StoppedChildIdentity, String> {
+    let details = read_stat_details(pid).map_err(|e| e.to_string())?;
+    if details.ppid != expected_parent {
+        return Err(format!(
+            "pid {pid} parent is {}, expected IPC peer {expected_parent}",
+            details.ppid
+        ));
+    }
+    if details.state != 'T' && details.state != 't' {
+        return Err(format!(
+            "pid {pid} is not stopped (state={})",
+            details.state
+        ));
+    }
+    let (uid, gid) = read_uid_gid(pid).map_err(|e| e.to_string())?;
+    if uid != expected_uid || gid != expected_gid {
+        return Err(format!(
+            "pid {pid} credentials {uid}:{gid} do not match IPC peer {expected_uid}:{expected_gid}"
+        ));
+    }
+
+    use std::os::unix::fs::MetadataExt;
+    let canonical = fs::canonicalize(trusted_exe).map_err(|e| {
+        format!(
+            "canonicalize trusted executable {}: {e}",
+            trusted_exe.display()
+        )
+    })?;
+    let metadata = fs::metadata(&canonical)
+        .map_err(|e| format!("stat trusted executable {}: {e}", canonical.display()))?;
+    if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+        return Err(format!(
+            "trusted executable {} must be root-owned and not group/other-writable",
+            canonical.display()
+        ));
+    }
+
+    Ok(StoppedChildIdentity {
+        target: guard_core::identity::StableIdentity {
+            exe: canonical,
+            start_time: details.start_time,
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+        },
+        uid,
+        gid,
+        parent_pid: details.ppid,
+    })
+}
+
+/// Resolve the system `ssh-add` binary accepted by the daemon. User-selected
+/// binaries are deliberately excluded from the SSH-load capability.
+pub fn trusted_ssh_add_path() -> Result<PathBuf, String> {
+    for candidate in ["/usr/bin/ssh-add", "/bin/ssh-add"] {
+        let path = Path::new(candidate);
+        if path.is_file() {
+            let canonical = fs::canonicalize(path)
+                .map_err(|e| format!("canonicalize {}: {e}", path.display()))?;
+            use std::os::unix::fs::MetadataExt;
+            let metadata = fs::metadata(&canonical)
+                .map_err(|e| format!("stat {}: {e}", canonical.display()))?;
+            if metadata.uid() == 0 && metadata.mode() & 0o022 == 0 {
+                return Ok(canonical);
+            }
+        }
+    }
+    Err("no root-owned, non-writable system ssh-add found".into())
+}
+
+/// Read one environment value from a process without returning or logging the
+/// rest of its environment.
+pub fn read_process_env(pid: i32, key: &str) -> Result<Option<String>, String> {
+    let bytes = fs::read(format!("/proc/{pid}/environ"))
+        .map_err(|e| format!("reading /proc/{pid}/environ: {e}"))?;
+    let prefix = format!("{key}=");
+    Ok(bytes
+        .split(|byte| *byte == 0)
+        .filter_map(|entry| std::str::from_utf8(entry).ok())
+        .find_map(|entry| entry.strip_prefix(&prefix).map(str::to_owned)))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProcStatDetails {
+    state: char,
+    ppid: i32,
+    start_time: u64,
+}
+
 /// Read `/proc/<pid>/stat` and return `(starttime, ppid)`. Robust against
 /// `comm` fields that contain spaces or parentheses.
 fn read_stat(pid: i32) -> Result<(u64, i32), ResolveError> {
+    let details = read_stat_details(pid)?;
+    Ok((details.start_time, details.ppid))
+}
+
+fn read_stat_details(pid: i32) -> Result<ProcStatDetails, ResolveError> {
     let raw = fs::read_to_string(format!("/proc/{pid}/stat"))
         .map_err(|err| ResolveError::StatRead { pid, err })?;
     // `comm` is wrapped in parentheses and may contain spaces/parens, so split
@@ -162,6 +274,10 @@ fn read_stat(pid: i32) -> Result<(u64, i32), ResolveError> {
             reason: "too few fields",
         });
     }
+    let state = parts[0].chars().next().ok_or(ResolveError::StatParse {
+        pid,
+        reason: "state",
+    })?;
     let ppid: i32 = parts[1].parse().map_err(|_| ResolveError::StatParse {
         pid,
         reason: "ppid",
@@ -170,7 +286,11 @@ fn read_stat(pid: i32) -> Result<(u64, i32), ResolveError> {
         pid,
         reason: "starttime",
     })?;
-    Ok((starttime, ppid))
+    Ok(ProcStatDetails {
+        state,
+        ppid,
+        start_time: starttime,
+    })
 }
 
 fn read_exe(pid: i32) -> Result<PathBuf, ResolveError> {
@@ -294,6 +414,67 @@ mod tests {
     use std::path::PathBuf;
     use std::process::{Child, Command};
     use tempfile::tempdir;
+
+    struct ChildGuard(std::process::Child);
+
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            // SAFETY: the PID belongs to this Child; SIGCONT/SIGKILL are used
+            // only for deterministic test cleanup.
+            unsafe {
+                libc::kill(self.0.id() as i32, libc::SIGCONT);
+                libc::kill(self.0.id() as i32, libc::SIGKILL);
+            }
+            let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    fn stopped_child_identity_requires_parent_uid_gid_and_stop_state() {
+        let child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let guard = ChildGuard(child);
+        let pid = guard.0.id() as i32;
+        // SAFETY: pid is the live child created above.
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGSTOP) }, 0);
+        let mut status = 0;
+        // SAFETY: waitpid observes our direct child and writes one status int.
+        assert_eq!(
+            unsafe { libc::waitpid(pid, &mut status, libc::WUNTRACED) },
+            pid
+        );
+        assert!(libc::WIFSTOPPED(status));
+
+        let verified = verify_stopped_child_for_exec(
+            pid,
+            unsafe { libc::getpid() },
+            unsafe { libc::getuid() },
+            unsafe { libc::getgid() },
+            Path::new("/bin/true"),
+        )
+        .unwrap();
+        assert_eq!(verified.parent_pid, unsafe { libc::getpid() });
+        assert_eq!(verified.target.start_time, read_start_time(pid).unwrap());
+        assert_eq!(verified.target.exe, fs::canonicalize("/bin/true").unwrap());
+
+        assert!(verify_stopped_child_for_exec(
+            pid,
+            1,
+            unsafe { libc::getuid() },
+            unsafe { libc::getgid() },
+            Path::new("/bin/true"),
+        )
+        .unwrap_err()
+        .contains("expected IPC peer"));
+        assert!(verify_stopped_child_for_exec(
+            pid,
+            unsafe { libc::getpid() },
+            unsafe { libc::getuid() }.saturating_add(1),
+            unsafe { libc::getgid() },
+            Path::new("/bin/true"),
+        )
+        .unwrap_err()
+        .contains("do not match IPC peer"));
+    }
 
     /// RAII guard that kills the child so tests never leak sleeping processes.
     struct KillOnDrop(Option<Child>);

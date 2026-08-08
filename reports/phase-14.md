@@ -1,5 +1,9 @@
 # Phase 14 — systemd Install, Startup, and Recovery
 
+> Historical report, superseded by Phase 16 for IPC permissions. The installed
+> service now uses group `guardd-users`; sensitive mutations separately require
+> polkit authorization.
+
 ## Objective
 
 Make Linux V1 installable as a root system service: a systemd unit for

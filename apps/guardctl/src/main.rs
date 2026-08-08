@@ -434,18 +434,19 @@ fn print_leases(ls: &[guard_ipc::LeaseInfo]) {
         return;
     }
     println!(
-        "{:<6} {:<10} {:<6} {:<10} {:<10} {:<10} {:<10} {:<6} {:<4}",
-        "ID", "KIND", "UID", "SRC_BR", "TGT_BR", "RESOURCE", "EXPIRES", "REV", "USED"
+        "{:<6} {:<10} {:<6} {:<10} {:<10} {:<10} {:<8} {:<10} {:<6} {:<4}",
+        "ID", "KIND", "UID", "SRC_BR", "TGT_BR", "RESOURCE", "STATE", "EXPIRES", "REV", "USED"
     );
     for l in ls {
         println!(
-            "{:<6} {:<10} {:<6} {:<10} {:<10} {:<10} {:<10} {:<6} {:<4}",
+            "{:<6} {:<10} {:<6} {:<10} {:<10} {:<10} {:<8} {:<10} {:<6} {:<4}",
             l.id,
             l.kind,
             l.uid,
             l.source_browser.as_deref().unwrap_or("-"),
             l.target_browser.as_deref().unwrap_or("-"),
             l.resource.as_deref().unwrap_or("-"),
+            l.state.as_deref().unwrap_or("-"),
             l.expires_at,
             if l.revoked { "yes" } else { "no" },
             if l.used { "yes" } else { "no" },
@@ -473,7 +474,7 @@ fn print_migration_authorized(m: &guard_ipc::MigrationAuthorizedInfo) {
     println!("  target_exe       : {}", m.target_exe);
     println!("  uid              : {}", m.uid);
     println!("  expires_at       : {} (epoch secs)", m.expires_at);
-    println!("  read_only        : {}", m.read_only);
+    println!("  read-only guaranteed: {}", m.read_only_guaranteed);
 }
 
 fn print_ssh_protected(s: &guard_ipc::SshProtectedInfo) {
@@ -565,26 +566,23 @@ fn ipc_request(socket: &Path, op: RequestOp) -> anyhow::Result<Response> {
     Ok(resp)
 }
 
-/// Resolve the `ssh-add` binary: explicit `--ssh-add PATH` wins, otherwise
-/// search PATH for an executable named `ssh-add`.
+/// Resolve the same root-owned system `ssh-add` selected by the daemon. A
+/// caller-supplied path is accepted only when it canonicalizes to that exact
+/// executable; user-selected binaries cannot receive an SSH-load lease.
 fn resolve_ssh_add(ssh_add: Option<&Path>) -> anyhow::Result<PathBuf> {
+    let trusted = platform_linux::identity::trusted_ssh_add_path().map_err(anyhow::Error::msg)?;
     if let Some(p) = ssh_add {
-        return Ok(p.to_path_buf());
-    }
-    let path_env = std::env::var_os("PATH").ok_or_else(|| anyhow::anyhow!("PATH is not set"))?;
-    for dir in std::env::split_paths(&path_env) {
-        let candidate = dir.join("ssh-add");
-        if candidate.is_file() {
-            return Ok(candidate);
+        let requested = std::fs::canonicalize(p)
+            .map_err(|e| anyhow::anyhow!("canonicalize {}: {e}", p.display()))?;
+        if requested != trusted {
+            anyhow::bail!(
+                "--ssh-add {} is not the daemon-approved system executable {}",
+                requested.display(),
+                trusted.display()
+            );
         }
     }
-    anyhow::bail!("ssh-add binary not found in PATH; pass --ssh-add PATH")
-}
-
-fn stat_dev_ino(path: &Path) -> std::io::Result<(u64, u64)> {
-    use std::os::unix::fs::MetadataExt;
-    let md = std::fs::metadata(path)?;
-    Ok((md.dev(), md.ino()))
+    Ok(trusted)
 }
 
 /// fork() a child that raises SIGSTOP (so the parent can authorize the lease
@@ -715,37 +713,28 @@ fn run_ssh_load(
     if std::env::var_os("SSH_AUTH_SOCK").is_none() {
         anyhow::bail!("SSH_AUTH_SOCK is not set; start ssh-agent first");
     }
-    // 2. Resolve + canonicalize + stat the ssh-add binary.
+    // 2. Resolve + canonicalize the ssh-add binary (needed for the fork).
     let ssh_add_resolved = resolve_ssh_add(ssh_add)?;
     let ssh_add_canon = std::fs::canonicalize(&ssh_add_resolved)?;
-    let (ssh_add_dev, ssh_add_ino) = stat_dev_ino(&ssh_add_canon)?;
-    let ssh_add_exe = ssh_add_canon.to_string_lossy().into_owned();
 
     // 3. Fork ssh-add in a stopped state.
     let pid = spawn_stopped_ssh_add(&ssh_add_canon, key)?;
 
-    // 4. Wait for the stop + read start_time.
+    // 4. Wait for the stop signal.
     if let Err(e) = wait_for_stop(pid) {
         reap_child(pid);
         anyhow::bail!("waiting for ssh-add child to stop: {e}");
     }
-    let start_time = match platform_linux::identity::read_start_time(pid) {
-        Ok(t) => t,
-        Err(e) => {
-            reap_child(pid);
-            anyhow::bail!("reading start_time of ssh-add child: {e}");
-        }
-    };
 
-    // 5. Authorize the one-shot lease.
+    // 5. Authorize the one-shot lease. The daemon verifies the ssh-add
+    //    process identity from /proc itself — we send ONLY the PID.
+    //    (Hardening pass 1: closes the authorization bypass where a client
+    //    could declare any identity.)
     let resp = ipc_request(
         socket,
         RequestOp::SshLoadAuthorize {
             path: key.to_string_lossy().into_owned(),
-            ssh_add_exe: ssh_add_exe.clone(),
-            ssh_add_dev,
-            ssh_add_ino,
-            start_time,
+            ssh_add_pid: pid as u32,
         },
     )?;
     if !resp.ok {
@@ -850,7 +839,7 @@ mod tests {
             op: RequestOp::Status,
         };
         let json = serde_json::to_string(&req).unwrap();
-        assert!(json.contains("\"version\":1"));
+        assert!(json.contains(&format!("\"version\":{PROTOCOL_VERSION}")));
         assert!(json.contains("\"kind\":\"status\""));
     }
 
@@ -877,25 +866,24 @@ mod tests {
 
     #[test]
     fn ssh_load_authorize_request_serializes_with_identity_fields() {
-        // Phase 11: the request must carry the ssh-add file identity + the
-        // stopped child's start_time, and must NOT carry a uid (the daemon takes
-        // uid from peer creds) or any key contents.
+        // Hardening pass 1: the request carries ONLY the PID — the daemon
+        // verifies identity from /proc. No uid, no key contents, no
+        // client-declared identity fields.
         let req = Request {
             version: PROTOCOL_VERSION,
             op: RequestOp::SshLoadAuthorize {
                 path: "/home/u/.ssh/id_ed25519".into(),
-                ssh_add_exe: "/usr/bin/ssh-add".into(),
-                ssh_add_dev: 2049,
-                ssh_add_ino: 12345,
-                start_time: 998877,
+                ssh_add_pid: 12345,
             },
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"kind\":\"ssh_load_authorize\""));
-        assert!(json.contains("\"ssh_add_exe\":\"/usr/bin/ssh-add\""));
-        assert!(json.contains("\"ssh_add_dev\":2049"));
-        assert!(json.contains("\"ssh_add_ino\":12345"));
-        assert!(json.contains("\"start_time\":998877"));
+        assert!(json.contains("\"ssh_add_pid\":12345"));
+        // No client-declared identity fields.
+        assert!(!json.contains("\"ssh_add_exe\""));
+        assert!(!json.contains("\"ssh_add_dev\""));
+        assert!(!json.contains("\"ssh_add_ino\""));
+        assert!(!json.contains("\"start_time\""));
         // No uid field is sent; identity comes from peer creds.
         assert!(!json.contains("\"uid\""));
     }
@@ -917,10 +905,9 @@ mod tests {
     }
 
     #[test]
-    fn resolve_ssh_add_explicit_path_wins() {
-        // An explicit --ssh-add PATH is used verbatim (the caller canonicalizes
-        // later); PATH search is only the fallback.
-        let p = resolve_ssh_add(Some(Path::new("/opt/custom/ssh-add"))).unwrap();
-        assert_eq!(p, PathBuf::from("/opt/custom/ssh-add"));
+    fn resolve_ssh_add_accepts_only_daemon_trusted_binary() {
+        let trusted = platform_linux::identity::trusted_ssh_add_path().unwrap();
+        assert_eq!(resolve_ssh_add(Some(&trusted)).unwrap(), trusted);
+        assert!(resolve_ssh_add(Some(Path::new("/opt/custom/ssh-add"))).is_err());
     }
 }

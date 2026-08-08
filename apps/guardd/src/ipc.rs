@@ -17,6 +17,7 @@
 use std::io;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use guard_audit::AuditStore;
@@ -41,6 +42,16 @@ pub struct IpcState {
     /// the kernel `fanotify_mark` syscall is thread-safe, so sharing across the
     /// IPC thread is safe.
     pub group: Option<Arc<FanotifyGroup>>,
+    /// Production uses polkit against the kernel-authenticated peer process.
+    /// Tests bypass it explicitly; no production fallback exists.
+    pub authorization: SensitiveAuthorization,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum SensitiveAuthorization {
+    Polkit,
+    #[cfg(test)]
+    AllowForTests,
 }
 
 /// Run the accept loop. Blocks until the socket is closed or an unrecoverable
@@ -113,21 +124,9 @@ pub fn handle_request(state: &IpcState, creds: PeerCreds, op: RequestOp) -> Resp
             duration_secs,
         ),
         RequestOp::SshProtect { path } => handle_ssh_protect(state, creds, path),
-        RequestOp::SshLoadAuthorize {
-            path,
-            ssh_add_exe,
-            ssh_add_dev,
-            ssh_add_ino,
-            start_time,
-        } => handle_ssh_load_authorize(
-            state,
-            creds,
-            path,
-            ssh_add_exe,
-            ssh_add_dev,
-            ssh_add_ino,
-            start_time,
-        ),
+        RequestOp::SshLoadAuthorize { path, ssh_add_pid } => {
+            handle_ssh_load_authorize(state, creds, path, ssh_add_pid)
+        }
     }
 }
 
@@ -144,7 +143,7 @@ fn handle_status(state: &IpcState, creds: PeerCreds) -> Response {
     // - ACTIVE: enforcement is running normally.
     let status = if state.group.is_none() {
         "NOT_ENFORCING"
-    } else if audit_dropped > 0 || engine.unclassified > 0 {
+    } else if audit_dropped > 0 || engine.unclassified > 0 || engine.topology_degraded {
         "DEGRADED"
     } else {
         "ACTIVE"
@@ -279,6 +278,14 @@ fn handle_leases_list(state: &IpcState, creds: PeerCreds) -> Response {
             source_profile: Some(l.source_profile.0.clone()),
             target_browser: Some(l.target_browser.0.clone()),
             resource: None,
+            state: Some(
+                match &l.state {
+                    guard_core::lease::MigrationLeaseState::Armed { .. } => "armed",
+                    guard_core::lease::MigrationLeaseState::Bound { .. } => "bound",
+                    guard_core::lease::MigrationLeaseState::Dead => "dead",
+                }
+                .into(),
+            ),
             expires_at: l.expires_at,
             revoked: l.revoked,
             used: false,
@@ -296,6 +303,7 @@ fn handle_leases_list(state: &IpcState, creds: PeerCreds) -> Response {
             source_profile: None,
             target_browser: None,
             resource: Some(l.resource.0.clone()),
+            state: None,
             expires_at: l.expires_at,
             revoked: l.revoked,
             used: l.used,
@@ -355,6 +363,18 @@ fn handle_migration_authorize(
     // SECURITY: the authorizing uid is taken EXCLUSIVELY from kernel-verified
     // peer creds. A uid in JSON would be ignored — and there is no uid field
     // in `RequestOp::MigrationAuthorize` to begin with.
+    if let Err(error) = authorize_sensitive(
+        state,
+        creds,
+        "org.guardd.migration-authorize",
+        &[
+            ("source_browser", &source_browser),
+            ("source_profile", &source_profile),
+            ("target_browser", &target_browser),
+        ],
+    ) {
+        return Response::err(error);
+    }
     let mut engine = state.engine.lock().expect("engine mutex poisoned");
     match engine.authorize_migration(
         &source_browser,
@@ -371,7 +391,15 @@ fn handle_migration_authorize(
                 .migration
                 .iter()
                 .find(|l| l.id == lease_id)
-                .map(|l| l.target.exe.to_string_lossy().into_owned())
+                .map(|l| match &l.state {
+                    guard_core::lease::MigrationLeaseState::Armed { target } => {
+                        target.exe.to_string_lossy().into_owned()
+                    }
+                    guard_core::lease::MigrationLeaseState::Bound { root } => {
+                        root.exe.to_string_lossy().into_owned()
+                    }
+                    guard_core::lease::MigrationLeaseState::Dead => String::new(),
+                })
                 .unwrap_or_default();
             Response::ok(ResponseBody::MigrationAuthorized(MigrationAuthorizedInfo {
                 lease_id: lease_id.0.to_string(),
@@ -381,7 +409,7 @@ fn handle_migration_authorize(
                 target_exe,
                 uid: creds.uid,
                 expires_at,
-                read_only: true,
+                read_only_guaranteed: false,
             }))
         }
         Err(e) => Response::err(e),
@@ -389,8 +417,12 @@ fn handle_migration_authorize(
 }
 
 fn handle_ssh_protect(state: &IpcState, creds: PeerCreds, path: String) -> Response {
-    // Any authenticated peer may add protection (this only ever adds a
-    // fail-closed mark; it never grants access).
+    // SECURITY (hardening pass 1): only the file owner or root may add
+    // protection. Previously any authenticated peer could protect arbitrary
+    // files, creating a root-powered denial primitive (protect a file, then
+    // no one but the owner can read it). Now we require:
+    //   creds.uid == 0 (root), OR
+    //   creds.uid == res.owner_uid (file owner)
     let path_buf = PathBuf::from(&path);
     // Pre-validate the candidate name BEFORE requiring the fanotify group, so a
     // `.pub` / reserved-name request is rejected even when the daemon is not in
@@ -405,24 +437,41 @@ fn handle_ssh_protect(state: &IpcState, creds: PeerCreds, path: String) -> Respo
         Some(g) => Arc::clone(g),
         None => return Response::err("daemon not in enforcement mode (no fanotify group)"),
     };
-    let res = {
-        let mut engine = state.engine.lock().expect("engine mutex poisoned");
-        match engine.protect_ssh_key(&path_buf) {
-            Ok(r) => r,
-            Err(e) => return Response::err(format!("ssh protect failed: {e}")),
-        }
+    let res = match guard_ssh::enroll_key(&path_buf) {
+        Ok(resource) => resource,
+        Err(error) => return Response::err(format!("ssh protect failed: {error}")),
     };
-    // Add the kernel mark so subsequent opens fire FAN_OPEN_PERM. Ordering:
-    // registry first (done above), then mark. There is a microsecond window
-    // where the registry has the entry but the mark is not yet applied — an
-    // open in that window is not intercepted (fail-open at enrollment time
-    // only). This matches the documented recursive-mark race boundary.
+    // Authorization check: only the file owner or root may protect a file.
+    if creds.uid != 0 && creds.uid != res.owner_uid {
+        return Response::err(format!(
+            "permission denied: uid {} may not protect {} (owned by uid {}); only the file owner or root may add protection",
+            creds.uid,
+            res.path.display(),
+            res.owner_uid
+        ));
+    }
+    if let Err(error) = authorize_sensitive(
+        state,
+        creds,
+        "org.guardd.ssh-protect",
+        &[("path", &res.path.to_string_lossy())],
+    ) {
+        return Response::err(error);
+    }
+    // Mark before publishing the resource. An event in the tiny interval
+    // between these operations is unclassified and therefore denied; the old
+    // registry-first ordering had a fail-open enrollment window.
     if let Err(e) = group.mark_file(libc::FAN_OPEN_PERM, &res.path) {
         return Response::err(format!(
-            "ssh protect: enrolled {} but fanotify mark failed: {e}",
+            "ssh protect: fanotify mark failed for {}: {e}",
             res.path.display()
         ));
     }
+    state
+        .engine
+        .lock()
+        .expect("engine mutex poisoned")
+        .enroll_ssh_resource(res.clone());
     tracing::info!(
         path = %res.path.display(),
         owner_uid = res.owner_uid,
@@ -440,22 +489,43 @@ fn handle_ssh_load_authorize(
     state: &IpcState,
     creds: PeerCreds,
     path: String,
-    ssh_add_exe: String,
-    ssh_add_dev: u64,
-    ssh_add_ino: u64,
-    start_time: u64,
+    ssh_add_pid: u32,
 ) -> Response {
-    // SECURITY: uid is taken EXCLUSIVELY from kernel-verified peer creds.
-    let path_buf = PathBuf::from(&path);
-    let target = guard_core::identity::StableIdentity {
-        exe: PathBuf::from(&ssh_add_exe),
-        start_time,
-        dev: ssh_add_dev,
-        ino: ssh_add_ino,
+    let pid = ssh_add_pid as i32;
+    let trusted_ssh_add = match platform_linux::identity::trusted_ssh_add_path() {
+        Ok(path) => path,
+        Err(error) => return Response::err(error),
     };
+    let child = match platform_linux::identity::verify_stopped_child_for_exec(
+        pid,
+        creds.pid,
+        creds.uid,
+        creds.gid,
+        &trusted_ssh_add,
+    ) {
+        Ok(identity) => identity,
+        Err(error) => return Response::err(format!("invalid ssh-add child: {error}")),
+    };
+    let agent_socket = match validate_agent_socket(pid, creds.uid) {
+        Ok(path) => path,
+        Err(error) => return Response::err(error),
+    };
+    let path_buf = PathBuf::from(&path);
+    if let Err(error) = authorize_sensitive(
+        state,
+        creds,
+        "org.guardd.ssh-load",
+        &[
+            ("path", &path),
+            ("ssh_add", &trusted_ssh_add.to_string_lossy()),
+            ("agent_socket", &agent_socket.to_string_lossy()),
+        ],
+    ) {
+        return Response::err(error);
+    }
     let (lease_id, expires_at) = {
         let mut engine = state.engine.lock().expect("engine mutex poisoned");
-        match engine.authorize_ssh_load(&path_buf, creds.uid, target) {
+        match engine.authorize_ssh_load(&path_buf, creds.uid, child.target) {
             Ok(v) => v,
             Err(e) => return Response::err(e),
         }
@@ -464,8 +534,9 @@ fn handle_ssh_load_authorize(
         path = %path,
         lease_id = lease_id.0,
         peer_uid = creds.uid,
+        ssh_add_pid,
         expires_at,
-        "ssh load lease authorized"
+        "ssh load lease authorized (identity verified from /proc)"
     );
     Response::ok(ResponseBody::SshLoadAuthorized(SshLoadAuthorizedInfo {
         lease_id: lease_id.0.to_string(),
@@ -473,6 +544,71 @@ fn handle_ssh_load_authorize(
         uid: creds.uid,
         expires_at,
     }))
+}
+
+fn validate_agent_socket(pid: i32, uid: u32) -> Result<PathBuf, String> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let value = platform_linux::identity::read_process_env(pid, "SSH_AUTH_SOCK")?
+        .ok_or_else(|| format!("pid {pid} has no SSH_AUTH_SOCK"))?;
+    let path = PathBuf::from(value);
+    let metadata = std::fs::metadata(&path)
+        .map_err(|e| format!("stat SSH_AUTH_SOCK {}: {e}", path.display()))?;
+    if !metadata.file_type().is_socket() {
+        return Err(format!(
+            "SSH_AUTH_SOCK {} is not a Unix socket",
+            path.display()
+        ));
+    }
+    if metadata.uid() != uid {
+        return Err(format!(
+            "SSH_AUTH_SOCK {} is owned by uid {}, not requesting uid {uid}",
+            path.display(),
+            metadata.uid()
+        ));
+    }
+    Ok(path)
+}
+
+fn authorize_sensitive(
+    state: &IpcState,
+    creds: PeerCreds,
+    action: &str,
+    details: &[(&str, &str)],
+) -> Result<(), String> {
+    match state.authorization {
+        SensitiveAuthorization::Polkit => {}
+        #[cfg(test)]
+        SensitiveAuthorization::AllowForTests => return Ok(()),
+    }
+
+    if creds.uid == 0 {
+        return Ok(());
+    }
+    let start_time = platform_linux::identity::read_start_time(creds.pid)
+        .map_err(|e| format!("cannot verify authorization subject: {e}"))?;
+    let subject = format!("{},{},{}", creds.pid, start_time, creds.uid);
+    let mut command = Command::new("pkcheck");
+    command
+        .arg("--action-id")
+        .arg(action)
+        .arg("--process")
+        .arg(subject)
+        .arg("--allow-user-interaction")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    for (key, value) in details {
+        command.arg("--details").arg(key).arg(value);
+    }
+    match command.status() {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(format!(
+            "authorization denied for {action} (pkcheck status {status})"
+        )),
+        Err(error) => Err(format!(
+            "authorization unavailable for {action}: cannot execute pkcheck: {error}"
+        )),
+    }
 }
 
 fn event_to_info(ev: &guard_audit::AuditEvent) -> EventInfo {
@@ -514,7 +650,7 @@ mod tests {
     use super::*;
     use crate::enforce::{BrowserEnrollmentConfig, EnforcementConfig, EnforcementEngine};
     use guard_core::identity::TrustTier;
-    use guard_core::lease::{LeaseId, LeaseSet, MigrationLease};
+    use guard_core::lease::{LeaseId, LeaseSet, MigrationAccessLease, MigrationLeaseState};
     use guard_core::policy::{Decision, DenyReason};
     use guard_core::resource::{BrowserFamily, BrowserId, ProfileId, ProtectedResourceKind};
     use guard_test_fixtures::chromium::ChromiumProfile;
@@ -546,6 +682,7 @@ mod tests {
             audit: Arc::new(audit),
             version: "0.1.0-test".into(),
             group: None,
+            authorization: SensitiveAuthorization::AllowForTests,
         };
         (state, (p.root, audit_dir))
     }
@@ -792,20 +929,21 @@ mod tests {
         {
             let mut engine = state.engine.lock().unwrap();
             engine.leases = LeaseSet {
-                migration: vec![MigrationLease {
+                migration: vec![MigrationAccessLease {
                     id: LeaseId(1),
                     source_browser: BrowserId("chrome".into()),
                     source_profile: ProfileId("Default".into()),
                     target_browser: BrowserId("firefox".into()),
                     uid: 1000,
-                    target: guard_core::identity::ExeIdentity {
-                        exe: PathBuf::from("/usr/bin/firefox"),
-                        dev: 1,
-                        ino: 2,
+                    state: MigrationLeaseState::Armed {
+                        target: guard_core::identity::ExeIdentity {
+                            exe: PathBuf::from("/usr/bin/firefox"),
+                            dev: 1,
+                            ino: 2,
+                        },
                     },
                     expires_at: 999_999_999,
                     revoked: false,
-                    read_only: true,
                 }],
                 ssh: vec![],
             };
@@ -860,20 +998,21 @@ mod tests {
         {
             let mut engine = state.engine.lock().unwrap();
             engine.leases = LeaseSet {
-                migration: vec![MigrationLease {
+                migration: vec![MigrationAccessLease {
                     id: LeaseId(5),
                     source_browser: BrowserId("chrome".into()),
                     source_profile: ProfileId("Default".into()),
                     target_browser: BrowserId("firefox".into()),
                     uid: 1000,
-                    target: guard_core::identity::ExeIdentity {
-                        exe: PathBuf::from("/usr/bin/firefox"),
-                        dev: 1,
-                        ino: 2,
+                    state: MigrationLeaseState::Armed {
+                        target: guard_core::identity::ExeIdentity {
+                            exe: PathBuf::from("/usr/bin/firefox"),
+                            dev: 1,
+                            ino: 2,
+                        },
                     },
                     expires_at: 999_999_999,
                     revoked: false,
-                    read_only: true,
                 }],
                 ssh: vec![],
             };
@@ -973,6 +1112,7 @@ mod tests {
             audit: Arc::new(audit),
             version: "0.1.0-test".into(),
             group: None,
+            authorization: SensitiveAuthorization::AllowForTests,
         };
         (state, (chrome_p.root, ff_p.root, audit_dir))
     }
@@ -1004,7 +1144,10 @@ mod tests {
                 assert_eq!(m.source_browser, "chrome");
                 assert_eq!(m.source_profile, "Default");
                 assert_eq!(m.target_browser, "firefox");
-                assert!(m.read_only, "migration leases are read-only");
+                assert!(
+                    !m.read_only_guaranteed,
+                    "fanotify backend must not claim read-only enforcement"
+                );
                 assert!(!m.target_exe.is_empty(), "target exe must be resolved");
                 assert!(m.lease_id.parse::<u64>().is_ok());
                 // The lease is stored in the engine under the peer uid.
@@ -1016,7 +1159,7 @@ mod tests {
                     .find(|l| l.id.0.to_string() == m.lease_id)
                     .expect("lease stored");
                 assert_eq!(stored.uid, 1000);
-                assert!(stored.read_only);
+                assert!(matches!(stored.state, MigrationLeaseState::Armed { .. }));
             }
             other => panic!("expected MigrationAuthorized, got {other:?}"),
         }
@@ -1297,6 +1440,7 @@ mod tests {
             audit: Arc::clone(&state.audit),
             version: "0.1.0-test".into(),
             group: None,
+            authorization: SensitiveAuthorization::AllowForTests,
         };
         let sock_path = sock.clone();
         let server_handle = thread::spawn(move || {
@@ -1377,6 +1521,7 @@ mod tests {
             audit: Arc::clone(&state.audit),
             version: "0.1.0-test".into(),
             group: None,
+            authorization: SensitiveAuthorization::AllowForTests,
         };
         let sock_path = sock.clone();
         let server_handle = thread::spawn(move || {
@@ -1444,6 +1589,7 @@ mod tests {
             audit: Arc::clone(&state.audit),
             version: "0.1.0-test".into(),
             group: None,
+            authorization: SensitiveAuthorization::AllowForTests,
         };
         let sock_path = sock.clone();
         let server_handle = thread::spawn(move || {

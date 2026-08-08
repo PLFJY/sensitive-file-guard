@@ -8,7 +8,7 @@
 //! Baseline rules (see `00_GLOBAL_CONTRACT.md`):
 //! - trusted browser + own profile => Allow
 //! - trusted browser + another browser's profile => Deny unless valid
-//!   `MigrationLease` => otherwise `AllowByLease`
+//!   `MigrationAccessLease` => otherwise `AllowByLease`
 //! - unknown / non-browser + browser protected resource => Deny (a migration
 //!   lease may still cover a target-tree helper process even if the opener's own
 //!   browser field is unset)
@@ -16,13 +16,12 @@
 //! - SSH private key + exact valid `SshLoadLease` => `AllowByLease`
 //! - expired / revoked / used lease => Deny
 //! - cross-user (wrong UID) => Deny
-//! - read-only migration lease + write operation => Deny(LeaseScopeMismatch)
 //! - PID reuse / stable-identity mismatch => Deny
 
 use serde::{Deserialize, Serialize};
 
-use crate::identity::{ExeIdentity, ProcessIdentity};
-use crate::lease::{LeaseId, LeaseSet};
+use crate::identity::{AncestorSummary, ProcessIdentity, ProcessStableId};
+use crate::lease::{LeaseId, LeaseSet, MigrationLeaseState};
 use crate::resource::{ProtectedResource, ProtectedResourceKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,13 +58,13 @@ impl DenyReason {
             // The process exe is not in the trusted enrollment set.
             Self::NotTrustedIdentity => "identity_untrusted",
             // A different browser tried to read another browser's profile
-            // without a MigrationLease.
+            // without a migration access lease.
             Self::CrossBrowserWithoutLease => "migration_lease_required",
             // Raw read of a protected SSH private key without a SshLoadLease.
             Self::SshPrivateKeyRawRead => "ssh_private_key_raw_read_denied",
             Self::LeaseExpired => "lease_expired",
             Self::LeaseRevoked => "lease_revoked",
-            // A read-only MigrationLease was used for a write operation.
+            // Reserved for backends that can enforce a narrower lease scope.
             Self::LeaseScopeMismatch => "lease_scope_mismatch",
             // The process uid does not own the protected resource.
             Self::WrongUid => "wrong_uid",
@@ -79,8 +78,7 @@ impl DenyReason {
 }
 
 /// The intercepted operation. `Open` is the primary fanotify gate (read opens);
-/// `Write` is set when the open carries `O_WRONLY`/`O_RDWR` so a read-only
-/// `MigrationLease` can refuse writes; `Copy` is modeled for completeness.
+/// `Write` and `Copy` are modeled for backends that can distinguish them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AccessOperation {
     Open,
@@ -123,14 +121,8 @@ fn decide_browser(event: &AccessEvent, leases: &LeaseSet, now: u64) -> Decision 
     }
 
     // Cross-browser (or non-browser helper in the target's tree): require a
-    // valid MigrationLease. The lease is *armed* — bound to the target browser's
-    // ExeIdentity (exe file identity, no start time) — and matches if the opener
-    // OR any ancestor has that exe identity (process-tree scoping). This lets a
-    // target browser's helper/child process read the source profile under the
-    // lease while an unrelated process does not.
-    let opener_ident = proc.stable.exe_identity();
-    let ancestor_idents: Vec<ExeIdentity> =
-        proc.ancestors.iter().map(|a| a.exe_identity()).collect();
+    // valid MigrationAccessLease. Armed leases never authorize directly: the
+    // enforcement layer must first bind one to an exact process instance.
 
     let mut scope_match = false;
     for lease in &leases.migration {
@@ -144,26 +136,20 @@ fn decide_browser(event: &AccessEvent, leases: &LeaseSet, now: u64) -> Decision 
         }
         scope_match = true;
 
-        // Identity: opener OR an ancestor matches the armed target exe identity.
-        let opener_matches = opener_ident == lease.target;
-        let ancestor_matches = ancestor_idents.contains(&lease.target);
-        if !opener_matches && !ancestor_matches {
-            // Bound to a different executable identity. Keep scanning in case
-            // another lease matches, but remember the scope hit.
-            continue;
-        }
-
         if lease.revoked {
             return Decision::Deny(DenyReason::LeaseRevoked);
         }
         if now >= lease.expires_at {
             return Decision::Deny(DenyReason::LeaseExpired);
         }
-        // Read-only leases never grant writes to the source profile.
-        if lease.read_only && event.operation == AccessOperation::Write {
-            return Decision::Deny(DenyReason::LeaseScopeMismatch);
+        match &lease.state {
+            MigrationLeaseState::Armed { .. } => continue,
+            MigrationLeaseState::Bound { root } if process_is_in_tree(proc, root) => {
+                return Decision::AllowByLease(lease.id);
+            }
+            MigrationLeaseState::Bound { .. } => continue,
+            MigrationLeaseState::Dead => return Decision::Deny(DenyReason::LeaseRevoked),
         }
-        return Decision::AllowByLease(lease.id);
     }
 
     // No matching lease. Distinguish the deny reason for audit clarity.
@@ -177,6 +163,22 @@ fn decide_browser(event: &AccessEvent, leases: &LeaseSet, now: u64) -> Decision 
     } else {
         Decision::Deny(DenyReason::UnknownProcess)
     }
+}
+
+fn process_is_in_tree(process: &ProcessIdentity, root: &ProcessStableId) -> bool {
+    process.stable == *root
+        || process
+            .ancestors
+            .iter()
+            .any(|ancestor| ancestor_matches_root(ancestor, root))
+}
+
+fn ancestor_matches_root(ancestor: &AncestorSummary, root: &ProcessStableId) -> bool {
+    ancestor.pid == root.pid
+        && ancestor.start_time == root.start_time
+        && ancestor.exe == root.exe
+        && ancestor.exe_dev == root.exe_dev
+        && ancestor.exe_ino == root.exe_ino
 }
 
 fn decide_ssh(event: &AccessEvent, leases: &LeaseSet, now: u64) -> Decision {
@@ -221,7 +223,7 @@ mod tests {
     use crate::identity::{
         AncestorSummary, ExeIdentity, ProcessIdentity, ProcessStableId, StableIdentity, TrustTier,
     };
-    use crate::lease::{LeaseSet, MigrationLease, SshLoadLease};
+    use crate::lease::{LeaseSet, MigrationAccessLease, MigrationLeaseState, SshLoadLease};
     use crate::resource::{
         BrowserId, ProfileId, ProtectedResource, ProtectedResourceId, ProtectedResourceKind,
     };
@@ -327,17 +329,24 @@ mod tests {
         uid: u32,
         target: ExeIdentity,
         expires_at: u64,
-    ) -> MigrationLease {
-        MigrationLease {
+    ) -> MigrationAccessLease {
+        MigrationAccessLease {
             id: LeaseId(id),
             source_browser: BrowserId(source_b.into()),
             source_profile: ProfileId(source_p.into()),
             target_browser: BrowserId(target_b.into()),
             uid,
-            target,
+            state: MigrationLeaseState::Bound {
+                root: ProcessStableId {
+                    pid: 2,
+                    start_time: 200,
+                    exe: target.exe,
+                    exe_dev: target.dev,
+                    exe_ino: target.ino,
+                },
+            },
             expires_at,
             revoked: false,
-            read_only: true,
         }
     }
 
@@ -734,7 +743,7 @@ mod tests {
         );
     }
 
-    // --- Phase 08: read-only write denial + process-tree scoping ---
+    // --- process-tree scoping ---
 
     fn proc_with_ancestors(
         browser: Option<&str>,
@@ -756,21 +765,20 @@ mod tests {
     }
 
     #[test]
-    fn read_only_migration_lease_denies_write() {
+    fn armed_migration_lease_does_not_authorize_directly() {
         let res = browser_resource(
             ProtectedResourceKind::CookieStore,
             "chrome",
             "Default",
             1000,
         );
-        // firefox opening chrome cookies with a write (O_WRONLY/O_RDWR).
         let proc = browser_proc(
             Some("firefox"),
             TrustTier::SystemPackage,
             1000,
             stable(2, 200, "/usr/bin/firefox"),
         );
-        let lease = migration(
+        let mut lease = migration(
             10,
             "chrome",
             "Default",
@@ -779,26 +787,17 @@ mod tests {
             exe_ident("/usr/bin/firefox"),
             FUTURE,
         );
+        lease.state = MigrationLeaseState::Armed {
+            target: exe_ident("/usr/bin/firefox"),
+        };
         let ls = LeaseSet {
             migration: vec![lease],
             ssh: vec![],
         };
-        let mut ev = event(res, proc);
-        ev.operation = AccessOperation::Write;
         assert_eq!(
-            evaluate(&ev, &ls, NOW),
-            Decision::Deny(DenyReason::LeaseScopeMismatch),
-            "read-only lease must not grant writes"
-        );
-        // A read open under the same lease is allowed.
-        let ev_read = AccessEvent {
-            resource: ev.resource.clone(),
-            process: ev.process.clone(),
-            operation: AccessOperation::Open,
-        };
-        assert_eq!(
-            evaluate(&ev_read, &ls, NOW),
-            Decision::AllowByLease(LeaseId(10))
+            evaluate(&event(res, proc), &ls, NOW),
+            Decision::Deny(DenyReason::IdentityMismatch),
+            "only the enforcement layer may bind an armed lease"
         );
     }
 
