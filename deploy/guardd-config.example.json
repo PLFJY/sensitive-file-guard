@@ -1,8 +1,9 @@
 {
+  "enforcement_mode": "conservative",
   "browsers": [
     {
       "id": "chrome",
-      "family": "chromium",
+      "family": "Chromium",
       "profile_root": "/home/REPLACE_USER/.config/google-chrome",
       "owner_uid": 1000,
       "exe_paths": [
@@ -13,7 +14,7 @@
     },
     {
       "id": "firefox",
-      "family": "firefox",
+      "family": "Firefox",
       "profile_root": "/home/REPLACE_USER/.mozilla/firefox",
       "owner_uid": 1000,
       "exe_paths": [

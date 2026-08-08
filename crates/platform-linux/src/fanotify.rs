@@ -17,8 +17,8 @@ use std::path::Path;
 
 use libc::{
     fanotify_event_metadata, fanotify_init, fanotify_mark, fanotify_response, AT_FDCWD, FAN_ALLOW,
-    FAN_CLASS_CONTENT, FAN_CLOEXEC, FAN_DENY, FAN_EVENT_ON_CHILD, FAN_MARK_ADD, FAN_NOFD,
-    FAN_OPEN_PERM, FAN_Q_OVERFLOW, O_LARGEFILE, O_RDONLY,
+    FAN_CLASS_CONTENT, FAN_CLOEXEC, FAN_DENY, FAN_EVENT_ON_CHILD, FAN_MARK_ADD,
+    FAN_MARK_FILESYSTEM, FAN_NOFD, FAN_OPEN_PERM, FAN_Q_OVERFLOW, O_LARGEFILE, O_RDONLY,
 };
 
 /// Kernel UAPI version of `fanotify_event_metadata.vers`.
@@ -38,6 +38,18 @@ pub fn fd_identity(fd: RawFd) -> io::Result<(u64, u64)> {
         return Err(io::Error::last_os_error());
     }
     Ok((st.st_dev, st.st_ino))
+}
+
+/// Hardlink count of an event fd. Strict Mode uses this to keep the nlink=1
+/// unrelated fast path cheap while detecting aliases of protected names.
+pub fn fd_link_count(fd: RawFd) -> io::Result<u64> {
+    // SAFETY: `stat` is zeroed and fstat initializes it for a valid event fd.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: fd is a live event fd borrowed for this syscall.
+    if unsafe { libc::fstat(fd, &mut st) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(st.st_nlink)
 }
 
 /// The path an event fd refers to, via `/proc/self/fd/<fd>` readlink.
@@ -110,8 +122,40 @@ impl FanotifyGroup {
         Ok(())
     }
 
+    /// Mark every object on the filesystem containing `path`. This is the
+    /// Strict Mode boundary: a future inode is covered before its first open,
+    /// without waiting for userspace topology discovery.
+    pub fn mark_filesystem(&self, mask: u64, path: &Path) -> io::Result<()> {
+        let c = std::ffi::CString::new(path.to_string_lossy().as_bytes())
+            .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+        // SAFETY: self.fd is a valid fanotify group fd and `c` remains live for
+        // the syscall. Linux interprets `path` only to select its filesystem.
+        let rc = unsafe {
+            fanotify_mark(
+                self.fd,
+                FAN_MARK_ADD | FAN_MARK_FILESYSTEM,
+                mask,
+                AT_FDCWD,
+                c.as_ptr(),
+            )
+        };
+        if rc < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
     pub fn raw_fd(&self) -> RawFd {
         self.fd
+    }
+
+    /// Count live filesystem-scope marks from the kernel's fdinfo view. A
+    /// filesystem mark is rendered as `fanotify sdev:...`; inode and mount
+    /// marks use different prefixes. This lets status detect a mark removed by
+    /// filesystem lifecycle without trusting the startup counter forever.
+    pub fn filesystem_mark_count(&self) -> io::Result<usize> {
+        let fdinfo = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", self.fd))?;
+        Ok(count_filesystem_marks_from_fdinfo(&fdinfo))
     }
 
     /// Blocking read of one or more events into `buf`; returns bytes read.
@@ -144,6 +188,13 @@ impl FanotifyGroup {
         }
         Ok(())
     }
+}
+
+fn count_filesystem_marks_from_fdinfo(fdinfo: &str) -> usize {
+    fdinfo
+        .lines()
+        .filter(|line| line.starts_with("fanotify sdev:"))
+        .count()
 }
 
 impl Drop for FanotifyGroup {
@@ -308,5 +359,15 @@ mod tests {
             overflow: true,
         };
         assert!(!ov.has_fd());
+    }
+
+    #[test]
+    fn counts_only_filesystem_marks_from_fdinfo() {
+        let fdinfo = "fanotify flags:5 event-flags:0\n\
+                      fanotify ino:abc sdev:1 mflags:0 mask:1 ignored_mask:0\n\
+                      fanotify sdev:1 mflags:0 mask:10000 ignored_mask:0\n\
+                      fanotify mnt_id:2 mflags:0 mask:1 ignored_mask:0\n\
+                      fanotify sdev:3 mflags:0 mask:10000 ignored_mask:0\n";
+        assert_eq!(count_filesystem_marks_from_fdinfo(fdinfo), 2);
     }
 }

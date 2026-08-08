@@ -199,12 +199,36 @@ pub struct StatusInfo {
     /// Human-readable enforcement state (Phase 14): `"ACTIVE"`,
     /// `"DEGRADED"`, or `"NOT_ENFORCING"`.
     /// - `ACTIVE`: fanotify enforcement is running normally.
-    /// - `DEGRADED`: enforcement is running but audit events are being
-    ///   dropped or some decisions were unclassified.
+    /// - `DEGRADED`: enforcement is running but audit events were dropped,
+    ///   topology/classification failed, or the fanotify queue overflowed.
     /// - `NOT_ENFORCING`: the daemon is running without a fanotify group
     ///   (e.g. config-check mode, or the group failed to initialize).
     #[serde(default)]
     pub status: String,
+    #[serde(default = "default_enforcement_mode")]
+    pub mode: String,
+    #[serde(default)]
+    pub marked_filesystems: usize,
+    #[serde(default)]
+    pub required_filesystems: usize,
+    #[serde(default = "default_true")]
+    pub filesystem_marks_healthy: bool,
+    #[serde(default)]
+    pub strict_events_total: u64,
+    #[serde(default)]
+    pub strict_fast_allowed: u64,
+    #[serde(default)]
+    pub protected_events: u64,
+    #[serde(default)]
+    pub fanotify_overflows: u64,
+    #[serde(default)]
+    pub classifier_failures: u64,
+    #[serde(default)]
+    pub strict_alias_scans: u64,
+    #[serde(default)]
+    pub strict_alias_matches: u64,
+    #[serde(default)]
+    pub topology_degraded: bool,
     pub protected_files: usize,
     pub protected_trees: usize,
     pub browsers: usize,
@@ -214,6 +238,14 @@ pub struct StatusInfo {
     pub unclassified: u64,
     pub audit_dropped: u64,
     pub peer_uid: u32,
+}
+
+fn default_enforcement_mode() -> String {
+    "conservative".to_owned()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -475,6 +507,18 @@ mod tests {
             version: "0.1.0".into(),
             enforcement_active: true,
             status: "ACTIVE".into(),
+            mode: "strict-filesystem".into(),
+            marked_filesystems: 1,
+            required_filesystems: 1,
+            filesystem_marks_healthy: true,
+            strict_events_total: 10,
+            strict_fast_allowed: 8,
+            protected_events: 2,
+            fanotify_overflows: 0,
+            classifier_failures: 0,
+            strict_alias_scans: 3,
+            strict_alias_matches: 2,
+            topology_degraded: false,
             protected_files: 6,
             protected_trees: 2,
             browsers: 1,

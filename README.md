@@ -1,9 +1,10 @@
 # Sensitive Data Firewall (Linux V1)
 
-> **Current status: implementation-complete Alpha; privileged acceptance was
-> executed on the tested Arch host, but security acceptance remains pending
-> because the replacement-inode topology race is reproducibly readable. Do
-> not use real browser data or SSH private keys yet.**
+> **Current status: SECURITY-ACCEPTED ALPHA ON TESTED ARCH HOST when configured
+> with `strict-filesystem`.** Conservative mode remains available and retains
+> its measured replacement-inode race; it is not the security-accepted backend.
+> This is an Alpha with the explicit non-goals below, not a claim of protection
+> against root, browser compromise, or already-open descriptors.
 
 A narrow local capability firewall for sensitive files. It prevents
 unauthorized local processes from reading protected local secrets **before**
@@ -142,6 +143,29 @@ See [`deploy/guardd-config.example.json`](deploy/guardd-config.example.json)
 for a template. Replace `REPLACE_USER` with your username and set the correct
 `owner_uid`.
 
+Linux enforcement is explicit:
+
+```json
+{
+  "enforcement_mode": "strict-filesystem"
+}
+```
+
+- `conservative` (the compatibility default) marks discovered objects and
+  directories, then uses inotify rediscovery. It has lower overhead but a
+  measured first-open race for replacement inodes.
+- `strict-filesystem` installs `FAN_MARK_FILESYSTEM | FAN_OPEN_PERM` once per
+  distinct protected filesystem. It classifies new sensitive paths before the
+  first open completes. It is opt-in because it intercepts all opens on those
+  filesystems and has a measurable cost.
+
+`guardctl status` reports `mode`, observed/required filesystem-mark counts and
+kernel mark health, strict-event and fast-allow counters,
+protected/allowed/denied counts, queue overflows, audit
+drops, classifier failures, topology health, and hardlink-alias scans. Strict
+startup fails instead of reporting ACTIVE if any required profile/key
+filesystem cannot be marked.
+
 ## Logs
 
 ```sh
@@ -194,28 +218,47 @@ listeners received zero private-key bytes.
 
 ## Topology race measurement
 
-This synthetic-only stress harness quantifies the conservative watcher interval
-without redefining convergence as race-free enforcement:
+This synthetic-only stress harness compares the conservative watcher interval
+with strict first-open enforcement:
 
 ```sh
 sudo bash scripts/test-topology-race-stress-root.sh
+sudo ENFORCEMENT_MODE=strict-filesystem \
+  bash scripts/test-topology-race-stress-root.sh
 ```
 
-On the tested `/tmp` tmpfs, all 10,000 immediate replacement reads succeeded;
-the new inode became protected after p50/p95/p99/max
-1171/2225/2347/4039 microseconds. A benchmarked filesystem-scope Strict Mode is
-therefore required before security acceptance. See
-[`reports/phase-18.md`](reports/phase-18.md).
+On the tested `/tmp` tmpfs, the Phase 18 conservative measurement allowed all
+10,000 immediate replacement reads (1171/2225/2347/4039 microseconds
+p50/p95/p99/max to convergence). The Phase 19 conservative rerun again allowed
+10,000/10,000. Strict Mode denied 10,000/10,000 immediate reads with zero
+recoveries. A separate 10,000-iteration external-hardlink/replacement attack
+also had zero recoveries after the strict alias check was added.
+
+Run the broader strict and performance acceptance with:
+
+```sh
+sudo bash scripts/test-strict-filesystem-root.sh
+sudo bash scripts/test-strict-concurrency-root.sh
+sudo bash scripts/benchmark-strict-filesystem-root.sh
+```
+
+On this host, a 100,000-open unprotected workload on the marked ext4
+filesystem fell from about 900k opens/s without guardd to about 72.6k opens/s
+in Strict Mode (12.41x wall-time). The bounded 180,624-event concurrent run had
+zero fanotify overflows, audit drops, classifier failures, or deadlocks. See
+[`reports/phase-19.md`](reports/phase-19.md).
 
 ## Status
 
-Hardening Pass 2 is implemented. All mandatory privileged suites were actually
-run on the target Arch host; steady-state browser protection, the hardened SSH
-broker, real systemd recovery/polkit, audit-content scans, and desktop
-notifications passed. Linux V1 nevertheless remains **security-acceptance
-pending** because the topology stress harness recovered the synthetic Cookie
-canary during every immediate inode replacement attempt. See
+Hardening Pass 2 and Strict Filesystem Enforcement are implemented. Every
+mandatory privileged suite was actually run on the target Arch host;
+strict first-open/replacement/alias tests, steady-state browser protection, the
+hardened SSH broker, real systemd recovery/polkit, audit-content scans, desktop
+notifications, queue stress, and Rust quality gates passed. Linux V1 is
+**SECURITY-ACCEPTED ALPHA ON TESTED ARCH HOST in `strict-filesystem` mode**.
+Conservative mode is explicitly not promoted. See
 [`reports/phase-16.md`](reports/phase-16.md),
 [`reports/phase-17.md`](reports/phase-17.md), and
-[`reports/phase-18.md`](reports/phase-18.md), plus
+[`reports/phase-18.md`](reports/phase-18.md),
+[`reports/phase-19.md`](reports/phase-19.md), plus
 [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md).

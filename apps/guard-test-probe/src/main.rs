@@ -43,6 +43,31 @@ fn main() -> ExitCode {
             };
             do_topology_race(Path::new(&args[2]), Path::new(&args[3]), iterations)
         }
+        Some("open-bench") if args.len() == 4 => {
+            let iterations = match args[3].parse::<u64>() {
+                Ok(value) if value > 0 => value,
+                _ => {
+                    eprintln!("guard-test-probe: ITERATIONS must be a positive integer");
+                    return ExitCode::from(2);
+                }
+            };
+            do_open_bench(Path::new(&args[2]), iterations)
+        }
+        Some("alias-race") if args.len() == 6 => {
+            let iterations = match args[5].parse::<u64>() {
+                Ok(value) if value > 0 => value,
+                _ => {
+                    eprintln!("guard-test-probe: ITERATIONS must be a positive integer");
+                    return ExitCode::from(2);
+                }
+            };
+            do_alias_race(
+                Path::new(&args[2]),
+                Path::new(&args[3]),
+                Path::new(&args[4]),
+                iterations,
+            )
+        }
         _ => {
             print_usage();
             ExitCode::from(2)
@@ -63,7 +88,9 @@ fn print_usage() {
            hold-fd PATH READY_FILE\n\
            exfil-unix PATH SOCKET\n\
            sqlite-exfil-unix DATABASE SOCKET\n\
-           topology-race TARGET STAGING_DIR ITERATIONS"
+           topology-race TARGET STAGING_DIR ITERATIONS\n\
+           open-bench PATH ITERATIONS\n\
+           alias-race TARGET STAGING_DIR EXTERNAL_ALIAS ITERATIONS"
     );
 }
 
@@ -308,6 +335,98 @@ fn do_topology_race(target: &Path, staging_dir: &Path, iterations: u64) -> ExitC
     println!(
         "{{\"iterations\":{iterations},\"successful_unauthorized_reads\":{recovered},\"denied_reads\":{denied},\"other_errors\":{other_errors},\"time_to_protection_us\":{{\"samples\":{},\"p50\":{p50},\"p95\":{p95},\"p99\":{p99},\"max\":{maximum}}}}}",
         convergence_us.len()
+    );
+    if other_errors == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+/// Measure repeated open latency without printing file contents. The command
+/// intentionally performs no networking and reports only aggregate counters.
+fn do_open_bench(path: &Path, iterations: u64) -> ExitCode {
+    let overall = Instant::now();
+    let mut successful = 0_u64;
+    let mut denied = 0_u64;
+    let mut other_errors = 0_u64;
+    let mut latency_ns = Vec::with_capacity(iterations.min(1_000_000) as usize);
+
+    for _ in 0..iterations {
+        let started = Instant::now();
+        match File::open(path) {
+            Ok(file) => {
+                drop(file);
+                successful += 1;
+            }
+            Err(error) if is_access_denial(&error) => denied += 1,
+            Err(_) => other_errors += 1,
+        }
+        latency_ns.push(started.elapsed().as_nanos().min(u64::MAX as u128) as u64);
+    }
+
+    latency_ns.sort_unstable();
+    let elapsed_ns = overall.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+    let opens_per_sec = if elapsed_ns == 0 {
+        0
+    } else {
+        ((iterations as u128 * 1_000_000_000_u128) / elapsed_ns as u128) as u64
+    };
+    println!(
+        "{{\"iterations\":{iterations},\"successful\":{successful},\"denied\":{denied},\"other_errors\":{other_errors},\"elapsed_ns\":{elapsed_ns},\"opens_per_sec\":{opens_per_sec},\"latency_ns\":{{\"p50\":{},\"p95\":{},\"p99\":{},\"max\":{}}}}}",
+        percentile(&latency_ns, 50),
+        percentile(&latency_ns, 95),
+        percentile(&latency_ns, 99),
+        latency_ns.last().copied().unwrap_or(0),
+    );
+    if other_errors == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+/// Investigate the narrow alias case where a replacement inode is hardlinked
+/// outside the protected namespace before it is renamed into place. No bytes
+/// are printed; the command only reports whether the external alias opened.
+fn do_alias_race(
+    target: &Path,
+    staging_dir: &Path,
+    external_alias: &Path,
+    iterations: u64,
+) -> ExitCode {
+    if let Err(error) = std::fs::create_dir_all(staging_dir) {
+        return report_failure("create alias-race staging directory", staging_dir, &error);
+    }
+    let mut recovered = 0_u64;
+    let mut denied = 0_u64;
+    let mut other_errors = 0_u64;
+    for iteration in 0..iterations {
+        let replacement = staging_dir.join(format!(
+            ".sdf-alias-race-{}-{iteration}",
+            std::process::id()
+        ));
+        let payload = format!("SDF_CANARY_ALIAS_RACE_{iteration}");
+        if let Err(error) = std::fs::write(&replacement, payload.as_bytes()) {
+            return report_failure("write alias-race replacement", &replacement, &error);
+        }
+        let _ = std::fs::remove_file(external_alias);
+        if let Err(error) = std::fs::hard_link(&replacement, external_alias) {
+            return report_failure("create alias-race hardlink", external_alias, &error);
+        }
+        if let Err(error) = std::fs::rename(&replacement, target) {
+            return report_failure("rename alias-race replacement", target, &error);
+        }
+        match std::fs::read(external_alias) {
+            Ok(bytes) if bytes == payload.as_bytes() => recovered += 1,
+            Ok(_) => other_errors += 1,
+            Err(error) if is_access_denial(&error) => denied += 1,
+            Err(_) => other_errors += 1,
+        }
+    }
+    let _ = std::fs::remove_file(external_alias);
+    println!(
+        "{{\"iterations\":{iterations},\"successful_unauthorized_reads\":{recovered},\"denied_reads\":{denied},\"other_errors\":{other_errors}}}"
     );
     if other_errors == 0 {
         ExitCode::SUCCESS

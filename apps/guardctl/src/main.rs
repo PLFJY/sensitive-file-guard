@@ -312,6 +312,10 @@ fn print_human(resp: &Response) {
 
 fn print_status(s: &StatusInfo) {
     println!("guardd {} — {}", s.version, s.status);
+    println!("  mode            : {}", s.mode);
+    println!("  marked_filesystems: {}", s.marked_filesystems);
+    println!("  required_filesystems: {}", s.required_filesystems);
+    println!("  filesystem_marks_healthy: {}", s.filesystem_marks_healthy);
     println!("  protected_files : {}", s.protected_files);
     println!("  protected_trees : {}", s.protected_trees);
     println!("  browsers        : {}", s.browsers);
@@ -319,6 +323,14 @@ fn print_status(s: &StatusInfo) {
     println!("  allowed         : {}", s.allowed);
     println!("  denied          : {}", s.denied);
     println!("  unclassified    : {}", s.unclassified);
+    println!("  strict_events   : {}", s.strict_events_total);
+    println!("  strict_fast_allow: {}", s.strict_fast_allowed);
+    println!("  protected_events: {}", s.protected_events);
+    println!("  fanotify_overflows: {}", s.fanotify_overflows);
+    println!("  classifier_failures: {}", s.classifier_failures);
+    println!("  strict_alias_scans: {}", s.strict_alias_scans);
+    println!("  strict_alias_matches: {}", s.strict_alias_matches);
+    println!("  topology_degraded: {}", s.topology_degraded);
     println!("  audit_dropped   : {}", s.audit_dropped);
     println!("  peer_uid        : {}", s.peer_uid);
 }

@@ -11,6 +11,7 @@
 
 mod enforce;
 mod ipc;
+mod strict;
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -136,6 +137,32 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
 
     let engine = enforce::EnforcementEngine::from_config(&cfg)?;
 
+    // Open audit/config/state dependencies before installing a filesystem-wide
+    // permission mark. Strict Mode must not block startup waiting for an event
+    // loop which has not started yet.
+    let audit_path = cli
+        .audit_db
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("/var/lib/guardd/audit.db"));
+    let audit = match AuditStore::open(&audit_path) {
+        Ok(store) => Arc::new(store),
+        Err(error) => {
+            tracing::warn!(err = %error, path = %audit_path.display(), "audit store open failed; using in-memory fallback");
+            Arc::new(AuditStore::open(std::path::Path::new(":memory:"))?)
+        }
+    };
+
+    let backend_metrics = Arc::new(strict::BackendMetrics::new(cfg.enforcement_mode));
+    let strict_classifier = if cfg.enforcement_mode == enforce::EnforcementMode::StrictFilesystem {
+        Some(Arc::new(strict::StrictClassifier::new(
+            &cfg,
+            engine.inode_index(),
+            Arc::clone(&backend_metrics),
+        )?))
+    } else {
+        None
+    };
+
     // Start observing before the initial fanotify marking pass so a resource
     // replacement concurrent with startup is queued and triggers rediscovery.
     let topology_roots = cfg
@@ -152,9 +179,27 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
         .map_err(|e| anyhow::anyhow!("initializing browser topology watcher: {e}"))?;
 
     let group = fanotify::FanotifyGroup::new_content()?;
-    // Mark before wrapping in Arc<Mutex> — mark_files/mark_trees take &self.
-    let n_files = engine.mark_files(&group)?;
-    let n_dirs = engine.mark_trees(&group)?;
+    // Mark before wrapping in Arc<Mutex>. Conservative mode preserves the
+    // existing object/tree marks. Strict mode marks each distinct filesystem;
+    // any required mark failure aborts startup rather than claiming ACTIVE.
+    let (n_files, n_dirs, n_filesystems) = if let Some(classifier) = &strict_classifier {
+        for path in classifier.filesystem_paths() {
+            group
+                .mark_filesystem(libc::FAN_OPEN_PERM, path)
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "strict filesystem mark failed for {}: {error}",
+                        path.display()
+                    )
+                })?;
+        }
+        (0, 0, classifier.filesystem_paths().len())
+    } else {
+        (engine.mark_files(&group)?, engine.mark_trees(&group)?, 0)
+    };
+    backend_metrics
+        .marked_filesystems
+        .store(n_filesystems, std::sync::atomic::Ordering::Relaxed);
 
     // Wrap the fanotify group in Arc so the IPC `SshProtect` handler can add
     // runtime `FAN_OPEN_PERM` marks. `mark_file`/`read`/`respond` all take
@@ -168,6 +213,7 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
     // cover every enrolled profile root.
     let topology_engine = Arc::clone(&engine);
     let topology_group = Arc::clone(&group);
+    let topology_marks_objects = cfg.enforcement_mode == enforce::EnforcementMode::Conservative;
     let topology_handle = std::thread::Builder::new()
         .name("guardd-topology".into())
         .spawn(move || {
@@ -198,7 +244,7 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                 let refreshed = topology_engine
                     .lock()
                     .expect("engine mutex poisoned")
-                    .refresh_browser_resources(&topology_group);
+                    .refresh_browser_resources(&topology_group, topology_marks_objects);
                 match refreshed {
                     Ok((files, directories)) => {
                         topology_engine
@@ -226,19 +272,6 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
             }
         })?;
 
-    // Open the audit store (if a path was given or a default is appropriate).
-    let audit_path = cli
-        .audit_db
-        .clone()
-        .unwrap_or_else(|| PathBuf::from("/var/lib/guardd/audit.db"));
-    let audit = match AuditStore::open(&audit_path) {
-        Ok(s) => Arc::new(s),
-        Err(e) => {
-            tracing::warn!(err = %e, path = %audit_path.display(), "audit store open failed; using in-memory fallback");
-            Arc::new(AuditStore::open(std::path::Path::new(":memory:"))?)
-        }
-    };
-
     // Spawn the IPC server thread (if a socket path was given).
     let ipc_handle = if let Some(sock) = cli.ipc_socket.clone() {
         let state = ipc::IpcState {
@@ -248,6 +281,7 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
             group: Some(Arc::clone(&group)),
             authorization: ipc::SensitiveAuthorization::Polkit,
             ssh_agent_pins: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            backend_metrics: Arc::clone(&backend_metrics),
         };
         Some(
             std::thread::Builder::new()
@@ -271,11 +305,13 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
         (engine.registry().file_count(), engine.browser_exe_count())
     };
     println!(
-        "guardd: enforcement ACTIVE — browsers={} protected_files={} marked_files={} marked_tree_dirs={} browser_exes={} (fanotify fd={})",
+        "guardd: enforcement ACTIVE — mode={} browsers={} protected_files={} marked_files={} marked_tree_dirs={} marked_filesystems={} browser_exes={} (fanotify fd={})",
+        cfg.enforcement_mode.as_str(),
         cfg.browsers.len(),
         protected_files,
         n_files,
         n_dirs,
+        n_filesystems,
         browser_exes,
         group.raw_fd()
     );
@@ -285,15 +321,18 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
     }
     tracing::info!(
         browsers = cfg.browsers.len(),
+        mode = cfg.enforcement_mode.as_str(),
         protected_files,
         marked_files = n_files,
         marked_tree_dirs = n_dirs,
+        marked_filesystems = n_filesystems,
         ipc_socket = ?cli.ipc_socket,
         "enforcement active"
     );
 
     let mut buf = vec![0u8; 65536];
     let mut processed: u64 = 0;
+    let daemon_pid = std::process::id() as i32;
     loop {
         if signal::is_shutdown() {
             let eng = engine.lock().expect("engine");
@@ -319,6 +358,9 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
         let events = fanotify::parse_events(&buf[..n])?;
         for ev in events {
             if ev.overflow {
+                backend_metrics
+                    .fanotify_overflows
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 tracing::error!("fanotify queue overflow detected; events may have been dropped");
                 if cli.print_decisions {
                     eprintln!("guardd: OVERFLOW");
@@ -326,7 +368,55 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                 continue;
             }
 
-            let (decision, audit_record) = {
+            let (decision, audit_record) = if let Some(classifier) = &strict_classifier {
+                backend_metrics
+                    .strict_events_total
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // Kernel PID, not a process name, identifies guardd's own
+                // threads. Respond before any engine lock so topology refresh
+                // and audit/config/state I/O cannot recursively deadlock.
+                if ev.pid == daemon_pid {
+                    backend_metrics
+                        .strict_fast_allowed
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    (guard_core::policy::Decision::Allow, None)
+                } else {
+                    match classifier.classify_fd(ev.fd) {
+                        strict::StrictClassification::Protected(resource) => {
+                            backend_metrics
+                                .protected_events
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            engine
+                                .lock()
+                                .expect("engine")
+                                .decide_protected_with_context(
+                                    ev.pid,
+                                    resource,
+                                    "strict_inode_or_path",
+                                )
+                        }
+                        strict::StrictClassification::Unrelated => {
+                            backend_metrics
+                                .strict_fast_allowed
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            (guard_core::policy::Decision::Allow, None)
+                        }
+                        strict::StrictClassification::Error(error) => {
+                            backend_metrics
+                                .classifier_failures
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            engine.lock().expect("engine").unclassified += 1;
+                            tracing::error!(%error, pid = ev.pid, "strict event classification failed closed");
+                            (
+                                guard_core::policy::Decision::Deny(
+                                    guard_core::policy::DenyReason::UnknownProcess,
+                                ),
+                                None,
+                            )
+                        }
+                    }
+                }
+            } else {
                 let mut eng = engine.lock().expect("engine");
                 eng.decide_with_context(ev.pid, ev.fd)
             };

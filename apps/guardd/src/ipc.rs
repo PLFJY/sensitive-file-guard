@@ -53,6 +53,7 @@ pub struct IpcState {
     /// Root-protected hardlinks pin verified ssh-agent socket inodes until the
     /// corresponding one-shot lease is revoked/used/expired.
     pub ssh_agent_pins: Arc<Mutex<HashMap<String, PathBuf>>>,
+    pub backend_metrics: Arc<crate::strict::BackendMetrics>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -156,15 +157,34 @@ fn handle_request_with_connection(
 fn handle_status(state: &IpcState, creds: PeerCreds) -> Response {
     let engine = state.engine.lock().expect("engine mutex poisoned");
     let audit_dropped = state.audit.dropped();
+    let backend = state.backend_metrics.snapshot();
+    let required_filesystems = backend.marked_filesystems;
+    let (marked_filesystems, filesystem_marks_healthy) = if required_filesystems == 0 {
+        (0, true)
+    } else {
+        match state
+            .group
+            .as_ref()
+            .map(|group| group.filesystem_mark_count())
+        {
+            Some(Ok(observed)) => (observed, observed >= required_filesystems),
+            _ => (0, false),
+        }
+    };
     // Phase 14: compute a human-readable enforcement state.
     // - NOT_ENFORCING: no fanotify group (daemon running without enforcement).
-    // - DEGRADED: enforcement is active but audit events are being dropped or
-    //   some decisions were unclassified (fail-closed events indicate races
-    //   or missing marks).
+    // - DEGRADED: enforcement is active but audit events were dropped,
+    //   classification/topology failed, or the fanotify queue overflowed.
     // - ACTIVE: enforcement is running normally.
     let status = if state.group.is_none() {
         "NOT_ENFORCING"
-    } else if audit_dropped > 0 || engine.unclassified > 0 || engine.topology_degraded {
+    } else if audit_dropped > 0
+        || engine.unclassified > 0
+        || engine.topology_degraded
+        || backend.fanotify_overflows > 0
+        || backend.classifier_failures > 0
+        || !filesystem_marks_healthy
+    {
         "DEGRADED"
     } else {
         "ACTIVE"
@@ -173,6 +193,18 @@ fn handle_status(state: &IpcState, creds: PeerCreds) -> Response {
         version: state.version.clone(),
         enforcement_active: state.group.is_some(),
         status: status.to_string(),
+        mode: state.backend_metrics.mode.as_str().to_owned(),
+        marked_filesystems,
+        required_filesystems,
+        filesystem_marks_healthy,
+        strict_events_total: backend.strict_events_total,
+        strict_fast_allowed: backend.strict_fast_allowed,
+        protected_events: backend.protected_events,
+        fanotify_overflows: backend.fanotify_overflows,
+        classifier_failures: backend.classifier_failures,
+        strict_alias_scans: backend.strict_alias_scans,
+        strict_alias_matches: backend.strict_alias_matches,
+        topology_degraded: engine.topology_degraded,
         protected_files: engine.registry().file_count(),
         protected_trees: engine.registry().trees().len(),
         browsers: engine.browser_config().len(),
@@ -987,7 +1019,9 @@ mod tests {
     //! - lease revoke authorization
 
     use super::*;
-    use crate::enforce::{BrowserEnrollmentConfig, EnforcementConfig, EnforcementEngine};
+    use crate::enforce::{
+        BrowserEnrollmentConfig, EnforcementConfig, EnforcementEngine, EnforcementMode,
+    };
     use guard_core::identity::TrustTier;
     use guard_core::lease::{LeaseId, LeaseSet, MigrationAccessLease, MigrationLeaseState};
     use guard_core::policy::{Decision, DenyReason};
@@ -1107,6 +1141,7 @@ mod tests {
     fn make_state(uid: u32) -> (IpcState, (tempfile::TempDir, tempfile::TempDir)) {
         let p = ChromiumProfile::create("Default").unwrap();
         let cfg = EnforcementConfig {
+            enforcement_mode: EnforcementMode::Conservative,
             browsers: vec![BrowserEnrollmentConfig {
                 id: "chrome".into(),
                 family: BrowserFamily::Chromium,
@@ -1127,6 +1162,9 @@ mod tests {
             group: None,
             authorization: SensitiveAuthorization::AllowForTests,
             ssh_agent_pins: Arc::new(Mutex::new(HashMap::new())),
+            backend_metrics: Arc::new(crate::strict::BackendMetrics::new(
+                EnforcementMode::Conservative,
+            )),
         };
         (state, (p.root, audit_dir))
     }
@@ -1529,6 +1567,7 @@ mod tests {
         std::fs::set_permissions(&ff_exe, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let cfg = EnforcementConfig {
+            enforcement_mode: EnforcementMode::Conservative,
             browsers: vec![
                 BrowserEnrollmentConfig {
                     id: "chrome".into(),
@@ -1558,6 +1597,9 @@ mod tests {
             group: None,
             authorization: SensitiveAuthorization::AllowForTests,
             ssh_agent_pins: Arc::new(Mutex::new(HashMap::new())),
+            backend_metrics: Arc::new(crate::strict::BackendMetrics::new(
+                EnforcementMode::Conservative,
+            )),
         };
         (state, (chrome_p.root, ff_p.root, audit_dir))
     }
@@ -1887,6 +1929,7 @@ mod tests {
             group: None,
             authorization: SensitiveAuthorization::AllowForTests,
             ssh_agent_pins: Arc::clone(&state.ssh_agent_pins),
+            backend_metrics: Arc::clone(&state.backend_metrics),
         };
         let sock_path = sock.clone();
         let server_handle = thread::spawn(move || {
@@ -1969,6 +2012,7 @@ mod tests {
             group: None,
             authorization: SensitiveAuthorization::AllowForTests,
             ssh_agent_pins: Arc::clone(&state.ssh_agent_pins),
+            backend_metrics: Arc::clone(&state.backend_metrics),
         };
         let sock_path = sock.clone();
         let server_handle = thread::spawn(move || {
@@ -2038,6 +2082,7 @@ mod tests {
             group: None,
             authorization: SensitiveAuthorization::AllowForTests,
             ssh_agent_pins: Arc::clone(&state.ssh_agent_pins),
+            backend_metrics: Arc::clone(&state.backend_metrics),
         };
         let sock_path = sock.clone();
         let server_handle = thread::spawn(move || {

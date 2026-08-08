@@ -14,6 +14,11 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENFORCEMENT_MODE="${ENFORCEMENT_MODE:-conservative}"
+case "$ENFORCEMENT_MODE" in
+  conservative|strict-filesystem) ;;
+  *) echo "ERROR: ENFORCEMENT_MODE must be conservative or strict-filesystem"; exit 2 ;;
+esac
 GUARDD="$REPO/target/release/guardd"
 GUARDCTL="$REPO/target/release/guardctl"
 PROBE="$REPO/target/release/guard-test-probe"
@@ -166,12 +171,13 @@ find "$CHROME_ROOT" "$FIREFOX_PROFILE" -type f -exec chmod 0600 {} +
 
 CONFIG="$WORK/config.json"
 python3 - "$CONFIG" "$CHROME_ROOT" "$FIREFOX_PROFILE" "$CHROME_PROBE" \
-  "$FIREFOX_PROBE" "$TEST_UID" <<'PY'
+  "$FIREFOX_PROBE" "$TEST_UID" "$ENFORCEMENT_MODE" <<'PY'
 import json
 import sys
 
-path, chromium, firefox, chromium_exe, firefox_exe, uid = sys.argv[1:]
+path, chromium, firefox, chromium_exe, firefox_exe, uid, mode = sys.argv[1:]
 config = {
+    "enforcement_mode": mode,
     "browsers": [
         {
             "id": "synthetic-chromium",
@@ -538,12 +544,12 @@ if start_local_sink "$SINK_SOCKET" "$SINK_OUTPUT"; then
 fi
 
 echo "==> Replacement-inode and new nested-resource protection"
-REPLACEMENT_TMP="$CHROME_PROFILE/Network/Cookies.synthetic-replacement"
+REPLACEMENT_TMP="$RUNTIME/Cookies.synthetic-replacement"
 make_cookie_db "$REPLACEMENT_TMP" "$REPLACEMENT_CANARY"
 chown "$TEST_UID:$TEST_GID" "$REPLACEMENT_TMP"
 chmod 0600 "$REPLACEMENT_TMP"
 run_as_test_user mv -f "$REPLACEMENT_TMP" "$CHROME_DB"
-sleep 0.5
+if [ "$ENFORCEMENT_MODE" = conservative ]; then sleep 0.5; fi
 assert_firewall_denied "atomic replacement inode" "$REPLACEMENT_CANARY" \
   "$PROBE" sqlite "$CHROME_DB"
 
@@ -555,7 +561,7 @@ chmod 0700 "$NEW_TREE_SOURCE" "$NEW_TREE_SOURCE/nested"
 chmod 0600 "$NEW_TREE_SOURCE/nested/Session_2"
 run_as_test_user mv "$NEW_TREE_SOURCE" "$CHROME_PROFILE/Sessions/new"
 NEW_NESTED="$CHROME_PROFILE/Sessions/new/nested/Session_2"
-sleep 0.5
+if [ "$ENFORCEMENT_MODE" = conservative ]; then sleep 0.5; fi
 assert_firewall_denied "new nested session resource" "$CHROME_SESSION_CANARY" \
   "$PROBE" read "$NEW_NESTED"
 

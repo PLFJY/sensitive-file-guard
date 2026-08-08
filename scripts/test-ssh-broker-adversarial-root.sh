@@ -9,6 +9,11 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENFORCEMENT_MODE="${ENFORCEMENT_MODE:-conservative}"
+case "$ENFORCEMENT_MODE" in
+  conservative|strict-filesystem) ;;
+  *) echo "ERROR: ENFORCEMENT_MODE must be conservative or strict-filesystem"; exit 2 ;;
+esac
 GUARDD="$REPO/target/release/guardd"
 GUARDCTL="$REPO/target/release/guardctl"
 PROBE="$REPO/target/release/guard-test-probe"
@@ -73,6 +78,7 @@ export SSH_AUTH_SOCK="$AGENT_SOCKET"
 CONFIG="$WORK/config.json"
 printf '%s\n' \
   '{' \
+  "  \"enforcement_mode\": \"$ENFORCEMENT_MODE\"," \
   '  "browsers": [],' \
   '  "enrolled_exes": [],' \
   "  \"ssh_keys\": [\"$KEY\"]" \

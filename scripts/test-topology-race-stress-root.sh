@@ -10,6 +10,7 @@ fi
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ITERATIONS="${ITERATIONS:-10000}"
+ENFORCEMENT_MODE="${ENFORCEMENT_MODE:-conservative}"
 KEEP_WORK="${KEEP_WORK:-0}"
 WORK="$(mktemp -d -t guard-topology-race-XXXXXX)"
 DAEMON_PID=""
@@ -30,6 +31,10 @@ trap cleanup EXIT
 case "$ITERATIONS" in
   ''|*[!0-9]*|0) echo "ERROR: ITERATIONS must be a positive integer"; exit 2 ;;
 esac
+case "$ENFORCEMENT_MODE" in
+  conservative|strict-filesystem) ;;
+  *) echo "ERROR: ENFORCEMENT_MODE must be conservative or strict-filesystem"; exit 2 ;;
+esac
 
 echo "==> Building topology race probe and daemon"
 cargo build --manifest-path "$REPO/Cargo.toml" -p guardd -p guard-test-probe
@@ -46,6 +51,7 @@ printf '%s' 'SDF_CANARY_TOPOLOGY_INITIAL' > "$COOKIE"
 CONFIG="$WORK/config.json"
 printf '%s\n' \
   '{' \
+  "  \"enforcement_mode\": \"$ENFORCEMENT_MODE\"," \
   '  "browsers": [' \
   '    {' \
   '      "id": "synthetic-chromium",' \
@@ -101,6 +107,22 @@ if r['iterations'] != r['successful_unauthorized_reads'] + r['denied_reads']:
     raise SystemExit("measurement accounting mismatch")
 PY
 
+if [ "$ENFORCEMENT_MODE" = strict-filesystem ]; then
+  if python3 - "$RESULT" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1], encoding="utf-8"))
+raise SystemExit(0 if r["successful_unauthorized_reads"] == 0 and
+                        r["denied_reads"] == r["iterations"] and
+                        r["other_errors"] == 0 else 1)
+PY
+  then
+    echo "PASS: strict mode denied every immediate replacement read"
+  else
+    echo "FAIL: strict mode allowed at least one immediate replacement read"
+    exit 1
+  fi
+fi
+
 # The conservative model permits a bounded race, but must converge. The last
 # inode must become denied within two seconds after the stress run.
 CONVERGED=0
@@ -117,4 +139,8 @@ if [ "$CONVERGED" -ne 1 ]; then
 fi
 
 echo "PASS: empirical topology-race measurement completed and final inode converged"
-echo "NOTE: successful_unauthorized_reads is a measured known gap, not a test PASS claim."
+if [ "$ENFORCEMENT_MODE" = conservative ]; then
+  echo "NOTE: successful_unauthorized_reads is a measured known gap, not a test PASS claim."
+else
+  echo "NOTE: strict PASS requires zero successful unauthorized reads."
+fi

@@ -27,6 +27,7 @@
 use std::collections::HashMap;
 use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use guard_audit::AuditRecord;
@@ -55,6 +56,25 @@ pub const DEFAULT_SSH_LOAD_DURATION_SECS: u64 = 30;
 /// seconds; this caps a stuck `ssh-add` from keeping the lease alive.
 pub const MAX_SSH_LOAD_DURATION_SECS: u64 = 300;
 
+pub type InodeIndex = Arc<RwLock<HashMap<(u64, u64), ProtectedResource>>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum EnforcementMode {
+    #[default]
+    Conservative,
+    StrictFilesystem,
+}
+
+impl EnforcementMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Conservative => "conservative",
+            Self::StrictFilesystem => "strict-filesystem",
+        }
+    }
+}
+
 /// One browser enrollment from config. Drives BOTH resource discovery (which
 /// files are protected) and process identity (which exe is this browser). The
 /// `BrowserId` is config-supplied — no trust is inferred from a path name.
@@ -76,6 +96,8 @@ pub struct BrowserEnrollmentConfig {
 /// hash-enroll so they can reach `EnrolledUserWritable` trust.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnforcementConfig {
+    #[serde(default)]
+    pub enforcement_mode: EnforcementMode,
     pub browsers: Vec<BrowserEnrollmentConfig>,
     #[serde(default)]
     pub enrolled_exes: Vec<PathBuf>,
@@ -95,7 +117,7 @@ pub struct EnforcementEngine {
     browser_exes: HashMap<PathBuf, BrowserId>,
     /// `(st_dev, st_ino)` -> resource for concrete critical files. Catches
     /// hardlinks (same inode, different path) that path-based classify misses.
-    fd_index: HashMap<(u64, u64), ProtectedResource>,
+    fd_index: InodeIndex,
     /// PID -> `(start_time, identity)`. Validated against a fresh starttime read
     /// on each lookup so PID reuse invalidates the entry.
     identity_cache: HashMap<u32, (u64, ProcessIdentity)>,
@@ -183,7 +205,7 @@ impl EnforcementEngine {
             registry,
             enrollment,
             browser_exes,
-            fd_index,
+            fd_index: Arc::new(RwLock::new(fd_index)),
             identity_cache: HashMap::new(),
             leases: LeaseSet::default(),
             ssh_agent_bindings: HashMap::new(),
@@ -201,6 +223,10 @@ impl EnforcementEngine {
     }
     pub fn browser_exe_count(&self) -> usize {
         self.browser_exes.len()
+    }
+
+    pub fn inode_index(&self) -> InodeIndex {
+        Arc::clone(&self.fd_index)
     }
 
     /// Browser enrollment config (for IPC `browsers list`).
@@ -392,6 +418,7 @@ impl EnforcementEngine {
     pub fn refresh_browser_resources(
         &mut self,
         group: &fanotify::FanotifyGroup,
+        mark_objects: bool,
     ) -> anyhow::Result<(usize, usize)> {
         let ssh_resources: Vec<ProtectedResource> = self
             .registry
@@ -417,12 +444,18 @@ impl EnforcementEngine {
             registry.enroll_file(resource);
         }
 
-        let fd_index = merge_fd_index(&self.fd_index, &registry);
+        let fd_index = merge_fd_index(
+            &self.fd_index.read().expect("inode index lock poisoned"),
+            &registry,
+        );
         self.registry = registry;
-        self.fd_index = fd_index;
+        *self.fd_index.write().expect("inode index lock poisoned") = fd_index;
 
-        let files = self.mark_files(group)?;
-        let directories = self.mark_trees(group)?;
+        let (files, directories) = if mark_objects {
+            (self.mark_files(group)?, self.mark_trees(group)?)
+        } else {
+            (0, 0)
+        };
         Ok((files, directories))
     }
 
@@ -446,7 +479,10 @@ impl EnforcementEngine {
     /// Publish a pre-validated SSH resource after its kernel mark is active.
     pub fn enroll_ssh_resource(&mut self, res: ProtectedResource) {
         if let Ok(id) = stat_dev_ino(&res.path) {
-            self.fd_index.insert(id, res.clone());
+            self.fd_index
+                .write()
+                .expect("inode index lock poisoned")
+                .insert(id, res.clone());
         }
         self.registry.enroll_file(res);
     }
@@ -471,6 +507,18 @@ impl EnforcementEngine {
                 return (Decision::Deny(DenyReason::UnknownProcess), None);
             }
         };
+        self.decide_protected_with_context(pid, resource, classify_diag(fd))
+    }
+
+    /// Apply the existing policy to a resource already identified by Strict
+    /// Mode's filesystem-event classifier. Unrelated filesystem opens never
+    /// call this function and therefore avoid process resolution entirely.
+    pub fn decide_protected_with_context(
+        &mut self,
+        pid: i32,
+        resource: ProtectedResource,
+        classification: &'static str,
+    ) -> (Decision, Option<AuditRecord>) {
         let (process, resolve_diag) = match self.resolve_process(pid) {
             Some((id, diag)) => (id, diag),
             None => {
@@ -536,9 +584,7 @@ impl EnforcementEngine {
         }
         let backend_diag = format!(
             "{};classify={};trust={:?}",
-            resolve_diag,
-            classify_diag(fd),
-            process.trust_tier
+            resolve_diag, classification, process.trust_tier
         );
         let record = build_audit_record(&resource, Some(&process), decision, &backend_diag);
         (decision, Some(record))
@@ -598,7 +644,12 @@ impl EnforcementEngine {
     ///    symlinks via canonicalization and tree descendants via prefix match).
     fn classify_fd(&self, fd: RawFd) -> Option<ProtectedResource> {
         if let Ok(id) = fanotify::fd_identity(fd) {
-            if let Some(res) = self.fd_index.get(&id) {
+            if let Some(res) = self
+                .fd_index
+                .read()
+                .expect("inode index lock poisoned")
+                .get(&id)
+            {
                 return Some(res.clone());
             }
         }
@@ -858,6 +909,7 @@ mod tests {
             b.exe_paths.push(exe.to_path_buf());
         }
         EnforcementConfig {
+            enforcement_mode: EnforcementMode::Conservative,
             browsers: vec![b],
             enrolled_exes: vec![],
             ssh_keys: vec![],
@@ -872,6 +924,7 @@ mod tests {
     ) -> EnforcementConfig {
         let uid = unsafe { libc::getuid() };
         EnforcementConfig {
+            enforcement_mode: EnforcementMode::Conservative,
             browsers: vec![
                 BrowserEnrollmentConfig {
                     id: "chrome".into(),
@@ -1183,6 +1236,7 @@ mod tests {
     fn migration_config(chrome_root: &Path, ff_root: &Path, ff_exe: &Path) -> EnforcementConfig {
         let uid = unsafe { libc::getuid() };
         EnforcementConfig {
+            enforcement_mode: EnforcementMode::Conservative,
             browsers: vec![
                 BrowserEnrollmentConfig {
                     id: "chrome".into(),
@@ -1422,6 +1476,7 @@ mod tests {
 
     fn ssh_config(ssh_key: &Path) -> EnforcementConfig {
         EnforcementConfig {
+            enforcement_mode: EnforcementMode::Conservative,
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![ssh_key.to_path_buf()],
@@ -1444,6 +1499,7 @@ mod tests {
         let s = guard_test_fixtures::SshFixture::create().unwrap();
         // Empty config (no ssh_keys); enroll at runtime via protect_ssh_key.
         let cfg = EnforcementConfig {
+            enforcement_mode: EnforcementMode::Conservative,
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![],
@@ -1461,6 +1517,7 @@ mod tests {
     fn ssh_protect_rejects_pub_file() {
         let s = guard_test_fixtures::SshFixture::create().unwrap();
         let cfg = EnforcementConfig {
+            enforcement_mode: EnforcementMode::Conservative,
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![],
@@ -1474,6 +1531,7 @@ mod tests {
     fn ssh_protect_rejects_reserved_name() {
         let s = guard_test_fixtures::SshFixture::create().unwrap();
         let cfg = EnforcementConfig {
+            enforcement_mode: EnforcementMode::Conservative,
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![],
@@ -1778,6 +1836,7 @@ mod tests {
         // Authorizing a lease on a key that was never enrolled must error.
         let s = guard_test_fixtures::SshFixture::create().unwrap();
         let cfg = EnforcementConfig {
+            enforcement_mode: EnforcementMode::Conservative,
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![],
@@ -1878,7 +1937,8 @@ mod tests {
         }
         .enroll_into(&mut registry)
         .unwrap();
-        engine.fd_index = merge_fd_index(&engine.fd_index, &registry);
+        let refreshed = merge_fd_index(&engine.fd_index.read().expect("inode index"), &registry);
+        *engine.fd_index.write().expect("inode index") = refreshed;
         engine.registry = registry;
 
         let renamed_file = std::fs::File::open(&renamed).unwrap();
@@ -1913,6 +1973,7 @@ mod tests {
         std::fs::write(&cookies, b"synthetic").unwrap();
 
         let cfg = EnforcementConfig {
+            enforcement_mode: EnforcementMode::Conservative,
             browsers: vec![BrowserEnrollmentConfig {
                 id: "chrome".into(),
                 family: BrowserFamily::Chromium,

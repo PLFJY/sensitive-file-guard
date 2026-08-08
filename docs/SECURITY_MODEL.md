@@ -4,10 +4,10 @@ This document defines the guarantees, non-goals, and known limitations of the
 Linux V1 implementation of the Sensitive Data Firewall (`guardd`). It is the
 authoritative reference for what the firewall does and does not protect against.
 
-**Acceptance state:** implementation-complete Alpha; all required privileged
-suites were executed on the tested Arch host, but security acceptance remains
-pending because the conservative topology race was reproducibly readable in
-10,000/10,000 atomic-replacement iterations. Do not use real secrets yet.
+**Acceptance state:** **SECURITY-ACCEPTED ALPHA ON TESTED ARCH HOST only in
+`strict-filesystem` mode.** All required privileged suites were executed.
+Conservative mode remains implementation-complete but is not promoted because
+its replacement race remained readable in 10,000/10,000 iterations.
 
 ## Mission
 
@@ -24,10 +24,17 @@ When `guardd` is running in enforcement mode (`FAN_CLASS_CONTENT` +
 process is denied **before** the file descriptor is handed to userspace. The
 process receives `EPERM`; no bytes are read.
 
-### 2. Inode-based classification (hardlink-proof)
+### 2. Inode and hardlink-alias classification
 Protected files are indexed by `(st_dev, st_ino)` in the enforcement engine.
 A hardlink to a protected file (same inode, different path) is classified and
 denied. A rename of a protected file (same inode, new name) is still denied.
+In Strict Mode, an as-yet-unindexed event inode with `st_nlink > 1` triggers a
+synchronous metadata-only search of enrolled namespaces before allow. This
+closes the tested “hardlink outside the profile, then move the new inode over
+Cookies, then open the alias” first-open case without imposing that scan on the
+normal `st_nlink == 1` path. The 10,000-iteration alias stress had zero
+recoveries. This search can make an unrelated hardlinked-file open slower; it
+does not open protected contents.
 
 ### 3. Symlink resolution (symlink-proof)
 `classify_fd` resolves the fd's real path via `/proc/self/fd/<fd>` and
@@ -106,15 +113,15 @@ If `classify_fd` cannot determine whether a fd is protected (race, unmarked
 path, fd_path readlink failure), the decision is `Deny(UnclassifiedFd)` — the
 engine fails closed, not open.
 
-### 13. Dynamic resource rediscovery
+### 13. Conservative dynamic resource rediscovery
 An inotify watcher is established before initial fanotify marking and watches
 every directory below enrolled browser roots. Create, move, delete, and
 attribute changes trigger full rediscovery, inode-index reconstruction, and
 fanotify remarking. Replaced Cookie databases, new sidecars, new profiles, and
 new nested storage directories therefore eventually become protected without
 a daemon restart. This is a convergence property, not a race-free pre-open
-guarantee: the tested replacement interval was readable before the new mark
-was installed.
+guarantee: both 10,000-iteration conservative runs read every immediate
+replacement before the new mark was installed.
 
 ### 14. Migration capability lifecycle
 A `MigrationAccessLease` starts `Armed` for one enrolled executable identity.
@@ -123,6 +130,32 @@ access, the enforcement engine binds it to the exact browser root process
 (PID + start time + executable path/dev/inode). Only that process tree can use
 the capability; it becomes dead when the root process exits or the PID is
 reused.
+
+### 15. Strict filesystem first-open enforcement
+`strict-filesystem` deduplicates protected roots by filesystem device and
+installs `FAN_MARK_FILESYSTEM | FAN_OPEN_PERM` on every required filesystem.
+Every future regular-file open is therefore intercepted even if the inode did
+not exist during discovery. Classification is ordered as:
+
+1. known `(st_dev, st_ino)` resource;
+2. structural sensitive path below a configured browser root or exact
+   configured SSH-key path;
+3. exceptional multi-hardlink alias search;
+4. immediate unrelated allow.
+
+The unrelated path performs fstat, a small inode-index read, fd-path readlink,
+and structural prefix/name checks. It does not resolve process ancestry, hash
+executables, query packages or SQLite, or emit audit records. Process identity
+and policy are evaluated only for a protected candidate. The classifier covers
+Chromium Local State, Cookies sidecars/replacements, Login/Web Data, Sessions,
+Session Storage, Local Storage and IndexedDB, plus Firefox cookies sidecars,
+logins/key material, sessionstore-backups and storage descendants.
+
+Kernel-reported guardd PID events are allowed before the engine mutex. Audit,
+topology, config/state, startup and shutdown activity therefore cannot create
+the lock/open/permission-event deadlock. The strict startup sequence opens its
+audit dependency before installing filesystem marks. The executed startup,
+refresh, audit, topology, concurrency and shutdown tests observed no deadlock.
 
 ## Security-sensitive IPC authorization
 
@@ -212,60 +245,65 @@ unprotected.
 LSM (Linux Security Module) hooks or a kernel module that survives userspace
 daemon death. That is out of scope for V1.
 
-### Fanotify mount limitations
-The current implementation uses inode marks for individual critical files and
-recursive directory marks for storage trees. It does not currently use
-`FAN_MARK_MOUNT` or `FAN_MARK_FILESYSTEM`.
+### Conservative versus Strict Filesystem Mode
+Conservative mode preserves the original concrete-file and recursive-directory
+marks. Inotify rediscovery eventually marks replacements and new directories,
+but it is not a security boundary. The historical Phase 18 conservative run
+allowed 10,000/10,000 immediate reads and converged at
+1171/2225/2347/4039 microseconds p50/p95/p99/max. The Phase 19 rerun again
+allowed 10,000/10,000, with 1178/2205/2331/3412 microseconds convergence.
 
-### Recursive directory coverage
-The `mark_tree` / `mark_trees` strategy marks the tree root directory with
-`FAN_OPEN_PERM`. Fanotify on a directory mark intercepts opens of files
-**directly under** that directory. New subdirectories created after the mark
-may not be automatically covered unless `FAN_MARK_FILESYSTEM` is used.
+Strict Mode marks each distinct filesystem containing configured browser roots
+or configured SSH keys. It does not wait for inotify before classifying a new
+path. The executed tests denied the first open of Chromium Cookies and
+sidecars, Local State, session descendants, a new profile's Cookies, Firefox
+cookies, storage and sessionstore descendants. The 10,000 replacement loop had
+zero successful reads. Inotify remains for metadata/index maintenance and
+Conservative compatibility.
 
-The persistent topology watcher discovers and marks new directories. A
-create/move notification → rediscovery → fanotify mark race remains; the
-implementation does not claim race-free tree coverage. On the tested Arch host
-and `/tmp` tmpfs, an atomic Cookie replacement followed by an immediate read
-succeeded in 10,000/10,000 iterations. Protection converged with
-p50/p95/p99/max delays of 1171/2225/2347/4039 microseconds. These numbers are an
-empirical result, not a universal upper bound.
-
-This makes filesystem-scope permission monitoring a requirement for the next
-promotion candidate. A Strict Mode design should apply `FAN_MARK_FILESYSTEM`,
-classify every permission event before allowing unrelated objects, and be
-benchmarked for latency and queue overflow. It is not implemented in Linux V1.
-
-Configured SSH-key parent directories are watched as well, so configured keys
-are remarked after inode replacement. A key enrolled only at runtime is not yet
-added to the watch-root set; if its parent is otherwise unwatched, replacing
-that key requires `guardctl ssh protect` again.
+Strict Mode startup requires every configured root/key to exist and every
+deduplicated filesystem mark to succeed. Otherwise guardd exits without
+printing ACTIVE. Status re-reads the fanotify fd's kernel `fdinfo`, compares
+live `fanotify sdev:` entries with the required count, and reports DEGRADED if
+a filesystem mark is lost. Runtime-only `SshProtect` still adds an inode mark;
+it does not dynamically add a persistent strict filesystem namespace, so
+replacement of a runtime-only key on a previously unmarked filesystem requires
+reprotection.
 
 ### FAN_Q_OVERFLOW
 If the fanotify event queue overflows (too many events too fast), the kernel
 delivers a `FAN_Q_OVERFLOW` event. `guardd` detects this in `parse_events`,
-logs an `error!`, and continues processing. Overflow means some events may
-have been dropped — denied opens during the overflow window may not have been
-recorded in the audit log. The daemon does not crash on overflow.
+logs an error, increments `fanotify_overflows`, and reports `DEGRADED`. Queue
+overflow means guardd cannot prove every affected access was mediated; it is a
+security degradation, not merely missing audit. The daemon does not request an
+unlimited queue and does not hide overflow by claiming ACTIVE.
 
-**Mitigation:** the event buffer is 64KB (configurable). Under normal desktop
-load, overflow is unlikely. A deliberate flood (thousands of opens/sec) could
-trigger it — this is a denial-of-service consideration, not a bypass (the
-overflowed events are opens that were already processed by the kernel's
-fanotify permission check; overflow drops audit, not enforcement).
+The bounded acceptance run combined 160,000 unrelated opens, 20,000 owning
+browser opens, 300 denied/replacement opens, 400 IPC queries and topology/audit
+activity. It processed 180,624 strict events with zero fanotify overflows,
+audit drops, classifier failures, or deadlocks. This is evidence for the tested
+load, not a proof that an intentional resource-exhaustion attack cannot
+overflow the finite kernel queue.
 
 ### Bind-mount / alternate-mount behavior
-A file accessible via multiple mount points (bind mounts) has the same inode
-on the underlying filesystem. Fanotify marks are inode-based for `FAN_OPEN_PERM`,
-so a mark on one path protects the inode regardless of which mount point the
-open comes through. However, `fanotify_mark` with `FAN_MARK_MOUNT` or
-`FAN_MARK_FILESYSTEM` behaves differently across bind mounts — a mount mark
-only covers the specific mount, not bind-mounted aliases.
+`FAN_MARK_FILESYSTEM` covers the filesystem from all of its mount points. The
+root acceptance test created a bind alias and observed denial through it for an
+indexed protected inode. Creating mounts requires privilege outside the V1
+unprivileged-attacker model; root can remove marks or kill guardd directly.
+Cross-namespace/remount lifecycle combinations were not exhaustively tested.
+The disposable tmpfs lifecycle test did unmount and re-create one protected
+mount: the kernel filesystem-mark count fell to zero and status changed from
+ACTIVE to DEGRADED. Guardd does not automatically attach the old policy to a
+new superblock at the same path; restart is required to validate and mark it.
 
-**Recorded behavior:** for inode-based marks (the primary strategy for critical
-files), bind mounts do not bypass protection. For tree/mount marks, a bind
-mount to a different mount namespace may not be covered. This is an edge case
-that is documented but not specifically tested in V1.
+### Performance
+On the tested ext4 filesystem, 100,000 ordinary opens fell from about 900,425
+opens/s without guardd to 72,578 opens/s in Strict Mode (12.41x wall-time).
+An owning synthetic browser achieved 34,046 protected opens/s; an unauthorized
+probe was denied at 31,922 opens/s with 29.6/36.6/58.3/283.7 microseconds
+p50/p95/p99/max. A cached workspace `cargo check` measured 0.1269s absent,
+0.0607s conservative, and 0.0786s strict; those short runs are ordering/cache
+noise and are recorded only as a usability smoke test. Strict remains opt-in.
 
 ## Threat model summary
 
@@ -273,7 +311,7 @@ that is documented but not specifically tested in V1.
 | --- | --- | --- |
 | Unprivileged process reads browser cookies | **Yes** | `FAN_OPEN_PERM` deny before open |
 | Unprivileged process reads SSH private key | **Yes** | `FAN_OPEN_PERM` deny before open |
-| Hardlink to protected file | **Yes** | Inode-based classification |
+| Hardlink to protected file | **Yes** | Inode index; Strict also scans new multi-link aliases before allow |
 | Symlink to protected file | **Yes** | Canonical path resolution |
 | Relative path `..` traversal | **Yes** | Canonicalize resolves `..` |
 | Renamed protected file | **Yes** | Inode follows rename |
@@ -286,24 +324,30 @@ that is documented but not specifically tested in V1.
 | ssh-agent signing misuse | **No** | Agent authority not mediated |
 | Network exfiltration of in-memory secret | **No** | Not a network firewall |
 | Daemon crash window | **No** | Fail-open on daemon death (systemd restart mitigates) |
-| New nested dir before its mark | **No** | Documented and measured topology window |
+| New nested sensitive path, Strict | **Yes** | Filesystem mark + structural classifier; first attempt denied |
+| New nested dir, Conservative | **No** | Documented and measured topology window |
 | Replaced Cookie inode after watcher convergence | **Yes** | Rediscovered without restart |
-| Immediate read of a replacement Cookie inode | **No** | 10,000/10,000 reads succeeded in the tested stress run |
+| Immediate replacement Cookie, Conservative | **No** | 10,000/10,000 reads succeeded |
+| Immediate replacement Cookie, Strict | **Yes** | 0/10,000 successful reads |
+| New-inode external hardlink, Strict | **Yes** | 0/10,000 successful reads in targeted stress |
 
 ## Deployment recommendations
 
-1. **Start `guardd` before user sessions** (Phase 14 systemd unit with
+1. **Set `enforcement_mode` to `strict-filesystem`** for the accepted security
+   boundary. Conservative is the lower-overhead compatibility mode and retains
+   a known replacement race.
+2. **Start `guardd` before user sessions** (Phase 14 systemd unit with
    `DefaultDependencies=yes`, `Before=graphical.target`).
-2. **Use `Restart=always`** with a short `RestartSec` to minimize the
+3. **Use `Restart=always`** with a short `RestartSec` to minimize the
    crash-restart window.
-3. **Enroll SSH keys at startup** via config (`ssh_keys` array) so they are
+4. **Enroll SSH keys at startup** via config (`ssh_keys` array) so they are
    protected from boot, not only after a manual `guardctl ssh protect`.
-4. **Run `guardd` as root** (required for `FAN_CLASS_CONTENT` +
+5. **Run `guardd` as root** (required for `FAN_CLASS_CONTENT` +
    `CAP_SYS_ADMIN`). The daemon does not need to run as the user; it resolves
    process identity via `/proc` regardless of the target process's UID.
-5. **Audit log persistence** (Phase 07): the SQLite audit DB survives daemon
+6. **Audit log persistence** (Phase 07): the SQLite audit DB survives daemon
    restarts. Review `guardctl events` periodically.
-6. Put interactive users in `guardd-users` for socket transport. This does not
+7. Put interactive users in `guardd-users` for socket transport. This does not
    authorize mutations: migration and SSH policy changes separately require
    polkit. Log out and back in after installation so both the shell and the
    existing `systemd --user` manager receive the new supplementary group.
