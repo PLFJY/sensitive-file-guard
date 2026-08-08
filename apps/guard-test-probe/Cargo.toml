@@ -1,0 +1,9 @@
+[package]
+name = "guard-test-probe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# No network code. This binary only opens/reads/mmaps a path.
+[dependencies]
+libc = { workspace = true }

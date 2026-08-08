@@ -1,0 +1,18 @@
+[package]
+name = "guardctl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+guard-ipc.workspace = true
+guard-ssh.workspace = true
+platform-linux.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

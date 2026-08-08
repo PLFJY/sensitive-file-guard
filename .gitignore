@@ -1,0 +1,7 @@
+/target
+**/*.rs.bk
+*.pdb
+*.swp
+.DS_Store
+# never commit real secrets or generated reports of real data
+/reports/*.local.md

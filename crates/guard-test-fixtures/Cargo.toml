@@ -1,0 +1,14 @@
+[package]
+name = "guard-test-fixtures"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tempfile.workspace = true
+
+# Integration tests live at the workspace `tests/integration/` path to honor the
+# required layout; they are registered here because they exercise this crate.
+[[test]]
+name = "smoke"
+path = "../../tests/integration/smoke.rs"

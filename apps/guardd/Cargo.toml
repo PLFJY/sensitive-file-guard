@@ -1,0 +1,23 @@
+[package]
+name = "guardd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+guard-core.workspace = true
+guard-browser.workspace = true
+guard-ssh.workspace = true
+guard-ipc.workspace = true
+guard-audit.workspace = true
+platform-linux.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+clap.workspace = true
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+guard-test-fixtures.workspace = true
+tempfile.workspace = true

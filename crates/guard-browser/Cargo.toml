@@ -1,0 +1,13 @@
+[package]
+name = "guard-browser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+guard-core.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+guard-test-fixtures.workspace = true

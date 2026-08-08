@@ -1,0 +1,47 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/guard-core",
+    "crates/guard-browser",
+    "crates/guard-ssh",
+    "crates/guard-ipc",
+    "crates/guard-audit",
+    "crates/platform-linux",
+    "crates/guard-test-fixtures",
+    "apps/guardd",
+    "apps/guardctl",
+    "apps/guard-tui",
+    "apps/guard-test-probe",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+guard-core = { path = "crates/guard-core" }
+guard-browser = { path = "crates/guard-browser" }
+guard-ssh = { path = "crates/guard-ssh" }
+guard-ipc = { path = "crates/guard-ipc" }
+guard-audit = { path = "crates/guard-audit" }
+platform-linux = { path = "crates/platform-linux" }
+guard-test-fixtures = { path = "crates/guard-test-fixtures" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tempfile = "3"
+libc = "0.2"
+clap = { version = "4", features = ["derive"] }
+sha2 = "0.10"
+rusqlite = { version = "0.31", features = ["bundled"] }
+ratatui = "0.28"
+crossterm = "0.28"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

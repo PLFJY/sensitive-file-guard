@@ -1,0 +1,11 @@
+[package]
+name = "guard-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+thiserror.workspace = true

@@ -1,0 +1,16 @@
+[package]
+name = "guard-audit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+guard-core.workspace = true
+rusqlite.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+serde_json.workspace = true
