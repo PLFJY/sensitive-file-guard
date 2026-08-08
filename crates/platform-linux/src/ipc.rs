@@ -18,6 +18,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use libc::{getsockopt, socklen_t, ucred, SOL_SOCKET, SO_PEERCRED};
 
@@ -61,6 +62,100 @@ pub fn peer_credentials(stream: &UnixStream) -> io::Result<PeerCreds> {
         uid: cred.uid,
         gid: cred.gid,
     })
+}
+
+/// Connect to a filesystem Unix socket without allowing an unresponsive
+/// listener/backlog to stall guardd's IPC authorization loop indefinitely.
+///
+/// This deliberately supports pathname sockets only; `SSH_AUTH_SOCK` is a
+/// filesystem path in the broker contract. The returned stream remains
+/// nonblocking, which is sufficient for `SO_PEERCRED` inspection.
+pub fn connect_unix_timeout(path: &Path, timeout: Duration) -> io::Result<UnixStream> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let path_bytes = path.as_os_str().as_bytes();
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    if path_bytes.is_empty()
+        || path_bytes.contains(&0)
+        || path_bytes.len() >= address.sun_path.len()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Unix socket path is empty, contains NUL, or is too long",
+        ));
+    }
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (destination, source) in address.sun_path.iter_mut().zip(path_bytes) {
+        *destination = *source as libc::c_char;
+    }
+
+    // SAFETY: valid domain/type/protocol constants; ownership of a successful
+    // fd is immediately transferred to OwnedFd below.
+    let raw = unsafe {
+        libc::socket(
+            libc::AF_UNIX,
+            libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+            0,
+        )
+    };
+    if raw < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `raw` is a newly-created owned descriptor.
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    // SAFETY: address is initialized as sockaddr_un and the supplied length is
+    // accepted by Linux for pathname AF_UNIX sockets.
+    let rc = unsafe {
+        libc::connect(
+            fd.as_raw_fd(),
+            &address as *const libc::sockaddr_un as *const libc::sockaddr,
+            std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
+        )
+    };
+    if rc < 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::EINPROGRESS) {
+            return Err(error);
+        }
+        let timeout_ms = timeout.as_millis().min(i32::MAX as u128) as i32;
+        let mut poll_fd = libc::pollfd {
+            fd: fd.as_raw_fd(),
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        // SAFETY: poll_fd points to one initialized pollfd.
+        let ready = unsafe { libc::poll(&mut poll_fd, 1, timeout_ms) };
+        if ready < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if ready == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("connecting to {} timed out", path.display()),
+            ));
+        }
+        let mut socket_error: libc::c_int = 0;
+        let mut length = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        // SAFETY: fd is a socket and socket_error/length are valid outputs.
+        let option_rc = unsafe {
+            libc::getsockopt(
+                fd.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_ERROR,
+                &mut socket_error as *mut _ as *mut libc::c_void,
+                &mut length,
+            )
+        };
+        if option_rc < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if socket_error != 0 {
+            return Err(io::Error::from_raw_os_error(socket_error));
+        }
+    }
+
+    // SAFETY: fd is now a connected, uniquely-owned AF_UNIX stream socket.
+    Ok(unsafe { stream_from_owned_fd(fd) })
 }
 
 pub struct IpcServer {
@@ -239,6 +334,16 @@ mod tests {
             thread::sleep(Duration::from_millis(5));
         }
         panic!("socket never appeared: {}", path.display());
+    }
+
+    #[test]
+    fn timed_unix_connect_reaches_listener() {
+        let (path, _dir) = tmp_socket();
+        let listener = UnixListener::bind(&path).unwrap();
+        let client = connect_unix_timeout(&path, Duration::from_millis(100)).unwrap();
+        let (_server, _) = listener.accept().unwrap();
+        let credentials = peer_credentials(&client).unwrap();
+        assert!(credentials.pid > 0);
     }
 
     /// Minimal echo server: accept one conn, read a framed request, write the

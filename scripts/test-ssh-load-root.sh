@@ -76,21 +76,32 @@ PUB_KEY="$SSH_DIR/id_ed25519.pub"
 
 # --- isolated ssh-agent (NOT the dev's agent) ---
 AGENT_SOCK="$WORK/agent.sock"
-# Start one isolated agent on a controlled socket and capture its PID from the
-# printed environment. Do NOT eval the output (we set SSH_AUTH_SOCK ourselves).
-AGENT_OUT="$(ssh-agent -a "$AGENT_SOCK" -s 2>/dev/null || true)"
-SSH_AGENT_PID="$(printf '%s\n' "$AGENT_OUT" | sed -n 's/.*SSH_AGENT_PID=\([0-9]*\).*/\1/p' | head -n1 || true)"
-# Fall back to pgrep on the socket path if the PID was not parsed.
-if [ -z "${SSH_AGENT_PID:-}" ]; then
-  SSH_AGENT_PID="$(pgrep -f "ssh-agent -a $AGENT_SOCK" | head -n1 || true)"
-fi
+# Keep the disposable agent as this script's direct foreground-mode child.
+# This avoids parsing shell output and makes PID/lifecycle observation exact.
+ssh-agent -D -a "$AGENT_SOCK" > "$WORK/ssh-agent.log" 2>&1 &
+SSH_AGENT_PID=$!
 export SSH_AUTH_SOCK="$AGENT_SOCK"
 
-# Verify the agent is reachable.
-ssh-add -l >/dev/null 2>&1 || {
+for _ in $(seq 1 100); do
+  [ -S "$AGENT_SOCK" ] && break
+  kill -0 "$SSH_AGENT_PID" 2>/dev/null || {
+    echo "ERROR: isolated ssh-agent exited early"
+    sed -n '1,80p' "$WORK/ssh-agent.log"
+    exit 1
+  }
+  sleep 0.02
+done
+
+# Verify the agent is reachable. OpenSSH returns 1 for a reachable empty agent
+# and 2 when no agent connection is available.
+set +e
+ssh-add -l >/dev/null 2>&1
+AGENT_LIST_RC=$?
+set -e
+if [ "$AGENT_LIST_RC" -gt 1 ]; then
   echo "ERROR: isolated ssh-agent is not reachable at $AGENT_SOCK"
   exit 1
-}
+fi
 echo "isolated ssh-agent ready (pid=$SSH_AGENT_PID, sock=$AGENT_SOCK)"
 
 # --- enforcement config: protect the private key at startup ---

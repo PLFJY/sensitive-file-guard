@@ -1,8 +1,9 @@
 # Sensitive Data Firewall (Linux V1)
 
-> **Current status: implementation-complete Alpha; security acceptance is
-> pending privileged integration tests. Do not use real browser data or SSH
-> private keys yet.**
+> **Current status: implementation-complete Alpha; privileged acceptance was
+> executed on the tested Arch host, but security acceptance remains pending
+> because the replacement-inode topology race is reproducibly readable. Do
+> not use real browser data or SSH private keys yet.**
 
 A narrow local capability firewall for sensitive files. It prevents
 unauthorized local processes from reading protected local secrets **before**
@@ -168,11 +169,53 @@ access” notification and the delivered/expected totals must match. Use
 `KEEP_WORK=1` only when you intentionally want to retain the synthetic audit
 artifacts for inspection.
 
+The observed Arch result was `PASS=24 FAIL=0 BLOCKED=0`, including 15/15 mako
+deliveries. This is strong steady-state evidence, but it does not make the
+inotify rediscovery interval race-free.
+
+## Defensive SSH broker acceptance
+
+The SSH suite creates its own temporary HOME, ephemeral key, disposable system
+OpenSSH agent, same-UID fake listeners, and hostile loader environment. It
+never touches `~/.ssh` or an existing `SSH_AUTH_SOCK`:
+
+```sh
+sudo bash scripts/test-ssh-broker-adversarial-root.sh
+```
+
+The broker verifies both the stopped system `ssh-add` child and the connected
+agent's kernel credentials/stable executable identity. It pins the verified
+agent socket inode behind a root-controlled pathname, sanitizes the exec
+environment, binds the live `ssh-add` environment to that exact pin on the
+permission-event hot path, and grants one protected-key open for 30 seconds.
+The observed result was `PASS=29 FAIL=0 BLOCKED=0`; even a non-cooperative
+client that ignored the returned pin could not load the key, and the malicious
+listeners received zero private-key bytes.
+
+## Topology race measurement
+
+This synthetic-only stress harness quantifies the conservative watcher interval
+without redefining convergence as race-free enforcement:
+
+```sh
+sudo bash scripts/test-topology-race-stress-root.sh
+```
+
+On the tested `/tmp` tmpfs, all 10,000 immediate replacement reads succeeded;
+the new inode became protected after p50/p95/p99/max
+1171/2225/2347/4039 microseconds. A benchmarked filesystem-scope Strict Mode is
+therefore required before security acceptance. See
+[`reports/phase-18.md`](reports/phase-18.md).
+
 ## Status
 
-Hardening Pass 1 is implemented and its non-privileged gates pass. The nine
-root/CAP_SYS_ADMIN acceptance scripts have not been run in this environment;
-Linux V1 therefore remains **security-acceptance pending**. See
+Hardening Pass 2 is implemented. All mandatory privileged suites were actually
+run on the target Arch host; steady-state browser protection, the hardened SSH
+broker, real systemd recovery/polkit, audit-content scans, and desktop
+notifications passed. Linux V1 nevertheless remains **security-acceptance
+pending** because the topology stress harness recovered the synthetic Cookie
+canary during every immediate inode replacement attempt. See
 [`reports/phase-16.md`](reports/phase-16.md),
 [`reports/phase-17.md`](reports/phase-17.md), and
+[`reports/phase-18.md`](reports/phase-18.md), plus
 [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md).

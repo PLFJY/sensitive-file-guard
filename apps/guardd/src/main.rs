@@ -247,6 +247,7 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
             version: env!("CARGO_PKG_VERSION").to_string(),
             group: Some(Arc::clone(&group)),
             authorization: ipc::SensitiveAuthorization::Polkit,
+            ssh_agent_pins: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         };
         Some(
             std::thread::Builder::new()

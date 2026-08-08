@@ -10,7 +10,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const CANARY_PREFIX: &[u8] = b"SDF_CANARY_";
 const MAX_CANARY_LEN: usize = 256;
@@ -33,6 +33,16 @@ fn main() -> ExitCode {
         Some("sqlite-exfil-unix") if args.len() == 4 => {
             do_exfil_unix(Path::new(&args[2]), Path::new(&args[3]), true)
         }
+        Some("topology-race") if args.len() == 5 => {
+            let iterations = match args[4].parse::<u64>() {
+                Ok(value) if value > 0 => value,
+                _ => {
+                    eprintln!("guard-test-probe: ITERATIONS must be a positive integer");
+                    return ExitCode::from(2);
+                }
+            };
+            do_topology_race(Path::new(&args[2]), Path::new(&args[3]), iterations)
+        }
         _ => {
             print_usage();
             ExitCode::from(2)
@@ -52,7 +62,8 @@ fn print_usage() {
            proc-fd PID FD\n\
            hold-fd PATH READY_FILE\n\
            exfil-unix PATH SOCKET\n\
-           sqlite-exfil-unix DATABASE SOCKET"
+           sqlite-exfil-unix DATABASE SOCKET\n\
+           topology-race TARGET STAGING_DIR ITERATIONS"
     );
 }
 
@@ -226,6 +237,97 @@ fn do_exfil_unix(path: &Path, socket: &Path, sqlite: bool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Empirically measure the documented topology watcher -> fanotify remark
+/// interval. Every payload is a synthetic canary and remains local. Successful
+/// reads are counted but their bytes are never printed.
+fn do_topology_race(target: &Path, staging_dir: &Path, iterations: u64) -> ExitCode {
+    if let Err(error) = std::fs::create_dir_all(staging_dir) {
+        return report_failure(
+            "create topology-race staging directory",
+            staging_dir,
+            &error,
+        );
+    }
+    let mut recovered = 0_u64;
+    let mut denied = 0_u64;
+    let mut other_errors = 0_u64;
+    let mut convergence_us = Vec::new();
+
+    for iteration in 0..iterations {
+        let replacement = staging_dir.join(format!(
+            ".sdf-topology-race-{}-{iteration}",
+            std::process::id()
+        ));
+        let payload = format!("SDF_CANARY_TOPOLOGY_RACE_{iteration}");
+        if let Err(error) = std::fs::write(&replacement, payload.as_bytes()) {
+            return report_failure("write topology-race replacement", &replacement, &error);
+        }
+        if let Err(error) = std::fs::rename(&replacement, target) {
+            return report_failure("rename topology-race replacement", target, &error);
+        }
+
+        let started = Instant::now();
+        match std::fs::read(target) {
+            Ok(bytes) => {
+                if bytes != payload.as_bytes() {
+                    eprintln!("guard-test-probe: topology-race read unexpected synthetic payload");
+                    return ExitCode::FAILURE;
+                }
+                recovered += 1;
+                // Measure convergence only after a demonstrated immediate
+                // recovery. Bound the loop so a broken watcher cannot hang.
+                let deadline = started + Duration::from_secs(2);
+                loop {
+                    match std::fs::read(target) {
+                        Err(error) if is_access_denial(&error) => {
+                            convergence_us.push(started.elapsed().as_micros() as u64);
+                            break;
+                        }
+                        Err(_) => {
+                            other_errors += 1;
+                            break;
+                        }
+                        Ok(_) if Instant::now() < deadline => std::thread::yield_now(),
+                        Ok(_) => {
+                            other_errors += 1;
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(error) if is_access_denial(&error) => denied += 1,
+            Err(_) => other_errors += 1,
+        }
+    }
+
+    convergence_us.sort_unstable();
+    let p50 = percentile(&convergence_us, 50);
+    let p95 = percentile(&convergence_us, 95);
+    let p99 = percentile(&convergence_us, 99);
+    let maximum = convergence_us.last().copied().unwrap_or(0);
+    println!(
+        "{{\"iterations\":{iterations},\"successful_unauthorized_reads\":{recovered},\"denied_reads\":{denied},\"other_errors\":{other_errors},\"time_to_protection_us\":{{\"samples\":{},\"p50\":{p50},\"p95\":{p95},\"p99\":{p99},\"max\":{maximum}}}}}",
+        convergence_us.len()
+    );
+    if other_errors == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+fn is_access_denial(error: &std::io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(code) if code == libc::EACCES || code == libc::EPERM)
+}
+
+fn percentile(sorted: &[u64], percentile: usize) -> u64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let index = ((sorted.len() - 1) * percentile) / 100;
+    sorted[index]
+}
+
 fn read_sqlite_canary(path: &Path) -> rusqlite::Result<String> {
     let connection = rusqlite::Connection::open_with_flags(
         path,
@@ -308,5 +410,12 @@ mod tests {
             read_sqlite_canary(&database).expect("read canary"),
             "SDF_CANARY_SQLITE_TEST"
         );
+    }
+
+    #[test]
+    fn percentile_handles_empty_and_sorted_samples() {
+        assert_eq!(percentile(&[], 95), 0);
+        assert_eq!(percentile(&[10, 20, 30, 40, 50], 50), 30);
+        assert_eq!(percentile(&[10, 20, 30, 40, 50], 99), 40);
     }
 }

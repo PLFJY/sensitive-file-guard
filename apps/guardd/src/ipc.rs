@@ -14,10 +14,13 @@
 //! A `uid` field in JSON is never trusted — peer identity comes exclusively
 //! from `PeerCreds.uid`.
 
+use std::collections::HashMap;
 use std::io;
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use guard_audit::AuditStore;
@@ -29,7 +32,9 @@ use guard_ipc::{Request, RequestOp};
 use platform_linux::fanotify::FanotifyGroup;
 use platform_linux::ipc::{read_request, write_response, IpcServer, PeerCreds};
 
-use crate::enforce::EnforcementEngine;
+use crate::enforce::{EnforcementEngine, SshAgentBinding};
+
+static NEXT_AGENT_PIN: AtomicU64 = AtomicU64::new(1);
 
 /// Shared engine + audit state handed to the IPC server thread.
 pub struct IpcState {
@@ -45,6 +50,9 @@ pub struct IpcState {
     /// Production uses polkit against the kernel-authenticated peer process.
     /// Tests bypass it explicitly; no production fallback exists.
     pub authorization: SensitiveAuthorization,
+    /// Root-protected hardlinks pin verified ssh-agent socket inodes until the
+    /// corresponding one-shot lease is revoked/used/expired.
+    pub ssh_agent_pins: Arc<Mutex<HashMap<String, PathBuf>>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -88,19 +96,31 @@ fn handle_one_connection(state: &IpcState, stream: &mut UnixStream, creds: PeerC
                     req.version, PROTOCOL_VERSION
                 ))
             } else {
-                handle_request(state, creds, req.op)
+                handle_request_with_connection(state, creds, req.op, Some(stream.as_raw_fd()))
             }
         }
         Err(e) => Response::err(format!("malformed request: {e}")),
     };
     let resp_bytes = serde_json::to_vec(&response).unwrap_or_else(|_| b"{}".to_vec());
     if let Err(e) = write_response(stream, &resp_bytes) {
+        revoke_unreceived_capability(state, &response);
         tracing::warn!(err = %e, "IPC write_response failed");
     }
 }
 
 /// Dispatch a single request to its handler, enforcing peer-uid authorization.
+#[cfg(test)]
 pub fn handle_request(state: &IpcState, creds: PeerCreds, op: RequestOp) -> Response {
+    handle_request_with_connection(state, creds, op, None)
+}
+
+fn handle_request_with_connection(
+    state: &IpcState,
+    creds: PeerCreds,
+    op: RequestOp,
+    connection_fd: Option<RawFd>,
+) -> Response {
+    cleanup_terminal_agent_pins(state);
     match op {
         RequestOp::Status => handle_status(state, creds),
         RequestOp::ResourcesList => handle_resources_list(state, creds),
@@ -118,14 +138,15 @@ pub fn handle_request(state: &IpcState, creds: PeerCreds, op: RequestOp) -> Resp
         } => handle_migration_authorize(
             state,
             creds,
+            connection_fd,
             source_browser,
             source_profile,
             target_browser,
             duration_secs,
         ),
-        RequestOp::SshProtect { path } => handle_ssh_protect(state, creds, path),
+        RequestOp::SshProtect { path } => handle_ssh_protect(state, creds, connection_fd, path),
         RequestOp::SshLoadAuthorize { path, ssh_add_pid } => {
-            handle_ssh_load_authorize(state, creds, path, ssh_add_pid)
+            handle_ssh_load_authorize(state, creds, connection_fd, path, ssh_add_pid)
         }
     }
 }
@@ -332,6 +353,8 @@ fn handle_leases_revoke(state: &IpcState, creds: PeerCreds, lease_id: String) ->
     match owner_uid {
         Some(uid) if creds.uid == 0 || uid == creds.uid => {
             let found = engine.revoke_lease(&lease_id);
+            drop(engine);
+            remove_agent_pin(state, &lease_id);
             Response::ok(ResponseBody::LeaseRevoked { lease_id, found })
         }
         Some(_) => Response::err("permission denied: lease belongs to another user"),
@@ -355,6 +378,7 @@ fn handle_leases_revoke(state: &IpcState, creds: PeerCreds, lease_id: String) ->
 fn handle_migration_authorize(
     state: &IpcState,
     creds: PeerCreds,
+    connection_fd: Option<RawFd>,
     source_browser: String,
     source_profile: String,
     target_browser: String,
@@ -366,6 +390,7 @@ fn handle_migration_authorize(
     if let Err(error) = authorize_sensitive(
         state,
         creds,
+        connection_fd,
         "org.guardd.migration-authorize",
         &[
             ("source_browser", &source_browser),
@@ -416,7 +441,12 @@ fn handle_migration_authorize(
     }
 }
 
-fn handle_ssh_protect(state: &IpcState, creds: PeerCreds, path: String) -> Response {
+fn handle_ssh_protect(
+    state: &IpcState,
+    creds: PeerCreds,
+    connection_fd: Option<RawFd>,
+    path: String,
+) -> Response {
     // SECURITY (hardening pass 1): only the file owner or root may add
     // protection. Previously any authenticated peer could protect arbitrary
     // files, creating a root-powered denial primitive (protect a file, then
@@ -453,6 +483,7 @@ fn handle_ssh_protect(state: &IpcState, creds: PeerCreds, path: String) -> Respo
     if let Err(error) = authorize_sensitive(
         state,
         creds,
+        connection_fd,
         "org.guardd.ssh-protect",
         &[("path", &res.path.to_string_lossy())],
     ) {
@@ -488,6 +519,7 @@ fn handle_ssh_protect(state: &IpcState, creds: PeerCreds, path: String) -> Respo
 fn handle_ssh_load_authorize(
     state: &IpcState,
     creds: PeerCreds,
+    connection_fd: Option<RawFd>,
     path: String,
     ssh_add_pid: u32,
 ) -> Response {
@@ -506,52 +538,120 @@ fn handle_ssh_load_authorize(
         Ok(identity) => identity,
         Err(error) => return Response::err(format!("invalid ssh-add child: {error}")),
     };
-    let agent_socket = match validate_agent_socket(pid, creds.uid) {
-        Ok(path) => path,
+    let agent_before = match validate_agent_socket(pid, creds.uid) {
+        Ok(endpoint) => endpoint,
         Err(error) => return Response::err(error),
     };
     let path_buf = PathBuf::from(&path);
     if let Err(error) = authorize_sensitive(
         state,
         creds,
+        connection_fd,
         "org.guardd.ssh-load",
         &[
             ("path", &path),
             ("ssh_add", &trusted_ssh_add.to_string_lossy()),
-            ("agent_socket", &agent_socket.to_string_lossy()),
+            ("agent_socket", &agent_before.path.to_string_lossy()),
         ],
     ) {
         return Response::err(error);
     }
-    let (lease_id, expires_at) = {
-        let mut engine = state.engine.lock().expect("engine mutex poisoned");
-        match engine.authorize_ssh_load(&path_buf, creds.uid, child.target) {
-            Ok(v) => v,
-            Err(e) => return Response::err(e),
+    // Polkit may involve a human and take an arbitrary amount of time. Re-read
+    // every kernel-observed fact afterward; a dead/reparented/reused child or a
+    // replaced agent endpoint must not inherit the earlier approval.
+    let child_after = match platform_linux::identity::verify_stopped_child_for_exec(
+        pid,
+        creds.pid,
+        creds.uid,
+        creds.gid,
+        &trusted_ssh_add,
+    ) {
+        Ok(identity) if identity == child => identity,
+        Ok(_) => return Response::err("ssh-add child identity changed during authorization"),
+        Err(error) => {
+            return Response::err(format!(
+                "ssh-add child invalid after authorization: {error}"
+            ))
         }
     };
+    let agent_after = match validate_agent_socket(pid, creds.uid) {
+        Ok(endpoint) if endpoint == agent_before => endpoint,
+        Ok(_) => return Response::err("SSH_AUTH_SOCK endpoint changed during authorization"),
+        Err(error) => {
+            return Response::err(format!(
+                "SSH_AUTH_SOCK invalid after authorization: {error}"
+            ))
+        }
+    };
+    // Pin before publishing a lease. Until this succeeds there is no
+    // capability for a prematurely resumed child to race against; once the
+    // lease exists, the hot path also requires the live ssh-add environment
+    // to name this exact pinned endpoint.
+    let pin_token = NEXT_AGENT_PIN.fetch_add(1, Ordering::Relaxed);
+    let pinned_agent = match pin_verified_agent_endpoint(&agent_after, creds.uid, pin_token) {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            return Response::err(format!("cannot pin verified SSH agent endpoint: {error}"))
+        }
+    };
+    let (lease_id, expires_at) = {
+        let mut engine = state.engine.lock().expect("engine mutex poisoned");
+        match engine.authorize_ssh_load(
+            &path_buf,
+            creds.uid,
+            child_after.target,
+            SshAgentBinding::Verified(pinned_agent.path.clone()),
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = std::fs::remove_file(&pinned_agent.path);
+                return Response::err(error);
+            }
+        }
+    };
+    state
+        .ssh_agent_pins
+        .lock()
+        .expect("SSH agent pin mutex poisoned")
+        .insert(lease_id.0.to_string(), pinned_agent.path.clone());
     tracing::info!(
         path = %path,
         lease_id = lease_id.0,
         peer_uid = creds.uid,
         ssh_add_pid,
+        ssh_agent_pid = agent_after.peer.pid,
+        ssh_agent_start_time = agent_after.peer.start_time,
+        pinned_agent_socket = %pinned_agent.path.display(),
         expires_at,
-        "ssh load lease authorized (identity verified from /proc)"
+        "ssh load lease authorized (ssh-add and ssh-agent identities kernel-verified)"
     );
     Response::ok(ResponseBody::SshLoadAuthorized(SshLoadAuthorizedInfo {
         lease_id: lease_id.0.to_string(),
         path,
         uid: creds.uid,
         expires_at,
+        agent_socket: pinned_agent.path.to_string_lossy().into_owned(),
     }))
 }
 
-fn validate_agent_socket(pid: i32, uid: u32) -> Result<PathBuf, String> {
-    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VerifiedAgentEndpoint {
+    path: PathBuf,
+    dev: u64,
+    ino: u64,
+    peer: guard_core::identity::ProcessStableId,
+}
+
+fn validate_agent_socket(pid: i32, uid: u32) -> Result<VerifiedAgentEndpoint, String> {
     let value = platform_linux::identity::read_process_env(pid, "SSH_AUTH_SOCK")?
         .ok_or_else(|| format!("pid {pid} has no SSH_AUTH_SOCK"))?;
     let path = PathBuf::from(value);
-    let metadata = std::fs::metadata(&path)
+    validate_agent_endpoint(&path, uid)
+}
+
+fn validate_agent_endpoint(path: &Path, uid: u32) -> Result<VerifiedAgentEndpoint, String> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let metadata = std::fs::metadata(path)
         .map_err(|e| format!("stat SSH_AUTH_SOCK {}: {e}", path.display()))?;
     if !metadata.file_type().is_socket() {
         return Err(format!(
@@ -566,12 +666,157 @@ fn validate_agent_socket(pid: i32, uid: u32) -> Result<PathBuf, String> {
             metadata.uid()
         ));
     }
-    Ok(path)
+    let dev = metadata.dev();
+    let ino = metadata.ino();
+    let stream =
+        platform_linux::ipc::connect_unix_timeout(path, std::time::Duration::from_millis(500))
+            .map_err(|e| format!("connect SSH_AUTH_SOCK {}: {e}", path.display()))?;
+    let peer = platform_linux::ipc::peer_credentials(&stream)
+        .map_err(|e| format!("SO_PEERCRED for SSH_AUTH_SOCK {}: {e}", path.display()))?;
+    if peer.uid != uid {
+        return Err(format!(
+            "SSH_AUTH_SOCK peer uid {} does not match requesting uid {uid}",
+            peer.uid
+        ));
+    }
+    let trusted_agent = platform_linux::identity::trusted_ssh_agent_path()?;
+    let peer_identity =
+        platform_linux::identity::verify_trusted_process_executable(peer.pid, uid, &trusted_agent)
+            .map_err(|error| format!("untrusted SSH_AUTH_SOCK peer: {error}"))?;
+
+    // Detect pathname replacement during the connection/identity check.
+    let after = std::fs::metadata(path)
+        .map_err(|e| format!("re-stat SSH_AUTH_SOCK {}: {e}", path.display()))?;
+    if !after.file_type().is_socket() || after.dev() != dev || after.ino() != ino {
+        return Err(format!(
+            "SSH_AUTH_SOCK {} changed during endpoint verification",
+            path.display()
+        ));
+    }
+    Ok(VerifiedAgentEndpoint {
+        path: path.to_path_buf(),
+        dev,
+        ino,
+        peer: peer_identity,
+    })
+}
+
+/// Pin the verified socket inode behind a root-controlled directory on the
+/// same filesystem. ssh-add connects through this hardlink, so replacing the
+/// user-controlled original pathname after authorization cannot redirect the
+/// broker flow to a different listener.
+fn pin_verified_agent_endpoint(
+    endpoint: &VerifiedAgentEndpoint,
+    uid: u32,
+    pin_token: u64,
+) -> Result<VerifiedAgentEndpoint, String> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let pin_parent = trusted_pin_parent(&endpoint.path, endpoint.dev)?;
+    let pin_dir = pin_parent.join(".guardd-agent-pins");
+    match std::fs::create_dir(&pin_dir) {
+        Ok(()) => std::fs::set_permissions(&pin_dir, std::fs::Permissions::from_mode(0o711))
+            .map_err(|error| format!("chmod {}: {error}", pin_dir.display()))?,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(format!("create {}: {error}", pin_dir.display())),
+    }
+    let directory = std::fs::symlink_metadata(&pin_dir)
+        .map_err(|error| format!("stat {}: {error}", pin_dir.display()))?;
+    if !directory.is_dir() || directory.uid() != 0 || directory.mode() & 0o022 != 0 {
+        return Err(format!(
+            "pin directory {} must be a root-owned, non-writable directory",
+            pin_dir.display()
+        ));
+    }
+
+    let pin = pin_dir.join(format!("a-{uid}-{}-{pin_token}.sock", std::process::id()));
+    std::fs::hard_link(&endpoint.path, &pin).map_err(|error| {
+        format!(
+            "hardlink verified socket {} -> {}: {error}",
+            endpoint.path.display(),
+            pin.display()
+        )
+    })?;
+    let pinned = match validate_agent_endpoint(&pin, uid) {
+        Ok(value)
+            if value.dev == endpoint.dev
+                && value.ino == endpoint.ino
+                && value.peer == endpoint.peer =>
+        {
+            value
+        }
+        Ok(_) => {
+            let _ = std::fs::remove_file(&pin);
+            return Err("pinned socket identity differs from verified endpoint".into());
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(&pin);
+            return Err(error);
+        }
+    };
+    Ok(pinned)
+}
+
+fn trusted_pin_parent(socket: &Path, socket_dev: u64) -> Result<PathBuf, String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let mut candidate = socket.parent();
+    while let Some(path) = candidate {
+        let metadata = std::fs::metadata(path)
+            .map_err(|error| format!("stat socket ancestor {}: {error}", path.display()))?;
+        if metadata.dev() != socket_dev {
+            break;
+        }
+        let root_controlled = metadata.uid() == 0
+            && (metadata.mode() & 0o022 == 0 || metadata.mode() & libc::S_ISVTX != 0);
+        if root_controlled {
+            return Ok(path.to_path_buf());
+        }
+        candidate = path.parent();
+    }
+    Err(format!(
+        "no same-filesystem root-controlled ancestor for {}",
+        socket.display()
+    ))
+}
+
+fn cleanup_terminal_agent_pins(state: &IpcState) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let terminal: Vec<String> = {
+        let engine = state.engine.lock().expect("engine mutex poisoned");
+        engine
+            .leases()
+            .ssh
+            .iter()
+            .filter(|lease| lease.revoked || lease.used || now >= lease.expires_at)
+            .map(|lease| lease.id.0.to_string())
+            .collect()
+    };
+    for lease_id in terminal {
+        remove_agent_pin(state, &lease_id);
+    }
+}
+
+fn remove_agent_pin(state: &IpcState, lease_id: &str) {
+    let path = state
+        .ssh_agent_pins
+        .lock()
+        .expect("SSH agent pin mutex poisoned")
+        .remove(lease_id);
+    if let Some(path) = path {
+        if let Err(error) = std::fs::remove_file(&path) {
+            tracing::warn!(path = %path.display(), %error, "cannot remove SSH agent socket pin");
+        }
+    }
 }
 
 fn authorize_sensitive(
     state: &IpcState,
     creds: PeerCreds,
+    connection_fd: Option<RawFd>,
     action: &str,
     details: &[(&str, &str)],
 ) -> Result<(), String> {
@@ -581,12 +826,112 @@ fn authorize_sensitive(
         SensitiveAuthorization::AllowForTests => return Ok(()),
     }
 
+    if connection_fd.is_some_and(peer_connection_closed) {
+        return Err(format!(
+            "authorization cancelled for {action}: IPC connection closed"
+        ));
+    }
     if creds.uid == 0 {
         return Ok(());
     }
     let start_time = platform_linux::identity::read_start_time(creds.pid)
         .map_err(|e| format!("cannot verify authorization subject: {e}"))?;
     let subject = format!("{},{},{}", creds.pid, start_time, creds.uid);
+    let mut command = build_pkcheck_command(action, &subject, details);
+    let mut child = command.spawn().map_err(|error| {
+        format!("authorization unavailable for {action}: cannot execute pkcheck: {error}")
+    })?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => {
+                if connection_fd.is_some_and(peer_connection_closed) {
+                    return Err(format!(
+                        "authorization cancelled for {action}: IPC connection closed"
+                    ));
+                }
+                return Ok(());
+            }
+            Ok(Some(status)) => {
+                return Err(format!(
+                    "authorization denied for {action} (pkcheck status {status}; subject={subject})"
+                ))
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return Err(format!(
+                    "authorization unavailable for {action}: waiting for pkcheck: {error}"
+                ))
+            }
+        }
+
+        // Do not grant after the kernel-authenticated IPC peer exited or its
+        // PID was reused while a human authorization prompt was pending.
+        match platform_linux::identity::read_start_time(creds.pid) {
+            Ok(observed) if observed == start_time => {}
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "authorization cancelled for {action}: IPC peer exited or changed identity"
+                ));
+            }
+        }
+        if connection_fd.is_some_and(peer_connection_closed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "authorization cancelled for {action}: IPC connection closed"
+            ));
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "authorization timed out for {action} after 120 seconds"
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+fn peer_connection_closed(fd: RawFd) -> bool {
+    let mut poll_fd = libc::pollfd {
+        fd,
+        events: libc::POLLIN | libc::POLLRDHUP,
+        revents: 0,
+    };
+    // SAFETY: poll_fd describes one borrowed, live connection descriptor; a
+    // zero timeout performs a non-mutating liveness check.
+    let ready = unsafe { libc::poll(&mut poll_fd, 1, 0) };
+    if ready < 0 {
+        return std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR);
+    }
+    ready > 0
+        && poll_fd.revents & (libc::POLLRDHUP | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0
+}
+
+fn revoke_unreceived_capability(state: &IpcState, response: &Response) {
+    let lease_id = match response.body.as_ref() {
+        Some(ResponseBody::MigrationAuthorized(info)) => Some(info.lease_id.as_str()),
+        Some(ResponseBody::SshLoadAuthorized(info)) => Some(info.lease_id.as_str()),
+        _ => None,
+    };
+    if let Some(lease_id) = lease_id {
+        state
+            .engine
+            .lock()
+            .expect("engine mutex poisoned")
+            .revoke_lease(lease_id);
+        remove_agent_pin(state, lease_id);
+        tracing::warn!(
+            lease_id,
+            "revoked capability whose IPC response was not delivered"
+        );
+    }
+}
+
+fn build_pkcheck_command(action: &str, subject: &str, details: &[(&str, &str)]) -> Command {
     let mut command = Command::new("pkcheck");
     command
         .arg("--action-id")
@@ -598,17 +943,11 @@ fn authorize_sensitive(
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     for (key, value) in details {
-        command.arg("--details").arg(key).arg(value);
+        // pkcheck accepts `-d KEY VALUE` or `--details=KEY VALUE`; a bare
+        // three-argument `--details KEY VALUE` is rejected before polkit runs.
+        command.arg("-d").arg(key).arg(value);
     }
-    match command.status() {
-        Ok(status) if status.success() => Ok(()),
-        Ok(status) => Err(format!(
-            "authorization denied for {action} (pkcheck status {status})"
-        )),
-        Err(error) => Err(format!(
-            "authorization unavailable for {action}: cannot execute pkcheck: {error}"
-        )),
-    }
+    command
 }
 
 fn event_to_info(ev: &guard_audit::AuditEvent) -> EventInfo {
@@ -655,6 +994,110 @@ mod tests {
     use guard_core::resource::{BrowserFamily, BrowserId, ProfileId, ProtectedResourceKind};
     use guard_test_fixtures::chromium::ChromiumProfile;
     use std::path::PathBuf;
+    use std::process::{Child, Command};
+
+    struct ChildGuard(Option<Child>);
+
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            if let Some(mut child) = self.0.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    fn wait_for_path(path: &Path) {
+        for _ in 0..100 {
+            if path.exists() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("{} was not created", path.display());
+    }
+
+    #[test]
+    fn agent_endpoint_rejects_same_uid_fake_listener() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("fake-agent.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        // The peer credentials identify this test binary, not ssh-agent.
+        let error = validate_agent_endpoint(
+            &socket,
+            // SAFETY: getuid has no preconditions.
+            unsafe { libc::getuid() },
+        )
+        .unwrap_err();
+        assert!(error.contains("untrusted SSH_AUTH_SOCK peer"), "{error}");
+    }
+
+    #[test]
+    fn agent_endpoint_accepts_kernel_observed_system_ssh_agent() {
+        let trusted = platform_linux::identity::trusted_ssh_agent_path().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("agent.sock");
+        let child = Command::new(&trusted)
+            .arg("-D")
+            .arg("-a")
+            .arg(&socket)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let _guard = ChildGuard(Some(child));
+        wait_for_path(&socket);
+
+        let endpoint = match validate_agent_endpoint(
+            &socket,
+            // SAFETY: getuid has no preconditions.
+            unsafe { libc::getuid() },
+        ) {
+            Ok(endpoint) => endpoint,
+            Err(error)
+                if unsafe { libc::geteuid() } != 0 && error.contains("Permission denied") =>
+            {
+                // ssh-agent is non-dumpable; the root daemon can resolve its
+                // /proc identity and the privileged suite covers that path.
+                return;
+            }
+            Err(error) => panic!("trusted ssh-agent endpoint verification failed: {error}"),
+        };
+        assert_eq!(endpoint.peer.pid, pid);
+        assert_eq!(endpoint.peer.exe, trusted);
+    }
+
+    #[test]
+    fn pkcheck_details_use_the_supported_short_option_form() {
+        use std::ffi::OsStr;
+
+        let command = build_pkcheck_command(
+            "org.guardd.ssh-protect",
+            "123,456,1000",
+            &[("path", "/tmp/synthetic-key")],
+        );
+        let arguments: Vec<&OsStr> = command.get_args().collect();
+        assert!(arguments.windows(3).any(|window| {
+            window
+                == [
+                    OsStr::new("-d"),
+                    OsStr::new("path"),
+                    OsStr::new("/tmp/synthetic-key"),
+                ]
+        }));
+        assert!(!arguments.contains(&OsStr::new("--details")));
+    }
+
+    #[test]
+    fn ipc_connection_liveness_detects_peer_close() {
+        use std::os::fd::AsRawFd;
+
+        let (server, client) = UnixStream::pair().expect("socket pair");
+        assert!(!peer_connection_closed(server.as_raw_fd()));
+        drop(client);
+        assert!(peer_connection_closed(server.as_raw_fd()));
+    }
 
     /// Build an `IpcState` backed by a synthetic Chromium profile and an
     /// ephemeral SQLite audit db. Returns the state plus both tempdirs — the
@@ -683,6 +1126,7 @@ mod tests {
             version: "0.1.0-test".into(),
             group: None,
             authorization: SensitiveAuthorization::AllowForTests,
+            ssh_agent_pins: Arc::new(Mutex::new(HashMap::new())),
         };
         (state, (p.root, audit_dir))
     }
@@ -1113,6 +1557,7 @@ mod tests {
             version: "0.1.0-test".into(),
             group: None,
             authorization: SensitiveAuthorization::AllowForTests,
+            ssh_agent_pins: Arc::new(Mutex::new(HashMap::new())),
         };
         (state, (chrome_p.root, ff_p.root, audit_dir))
     }
@@ -1441,6 +1886,7 @@ mod tests {
             version: "0.1.0-test".into(),
             group: None,
             authorization: SensitiveAuthorization::AllowForTests,
+            ssh_agent_pins: Arc::clone(&state.ssh_agent_pins),
         };
         let sock_path = sock.clone();
         let server_handle = thread::spawn(move || {
@@ -1522,6 +1968,7 @@ mod tests {
             version: "0.1.0-test".into(),
             group: None,
             authorization: SensitiveAuthorization::AllowForTests,
+            ssh_agent_pins: Arc::clone(&state.ssh_agent_pins),
         };
         let sock_path = sock.clone();
         let server_handle = thread::spawn(move || {
@@ -1590,6 +2037,7 @@ mod tests {
             version: "0.1.0-test".into(),
             group: None,
             authorization: SensitiveAuthorization::AllowForTests,
+            ssh_agent_pins: Arc::clone(&state.ssh_agent_pins),
         };
         let sock_path = sock.clone();
         let server_handle = thread::spawn(move || {

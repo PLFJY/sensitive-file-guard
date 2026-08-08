@@ -182,17 +182,20 @@ fi
 
 if [ -n "$EVENT_ID" ]; then
   "$GUARDCTL" --socket "$SOCK" --json explain "$EVENT_ID" > "$WORK/explain.json" 2>/dev/null || true
-  # The JSON must contain a reason_code field (stable, machine-readable).
-  if grep -q '"reason_code"' "$WORK/explain.json" 2>/dev/null; then
-    # Verify the reason_code is one of the known stable codes (not empty).
-    CODE="$(grep -o '"reason_code":"[^"]*"' "$WORK/explain.json" | head -n1 | sed 's/.*:"//;s/"$//' || true)"
-    if [ -n "$CODE" ]; then
-      note_pass "guardctl explain --json has reason_code=$CODE"
-    else
-      note_fail "guardctl explain --json has reason_code but value is empty"
-    fi
+  # Parse the pretty-printed JSON structurally; whitespace is not part of the
+  # protocol and must not make the acceptance test report a false failure.
+  CODE="$(python3 - "$WORK/explain.json" <<'PY' || true
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+data = doc.get("data", doc) if isinstance(doc, dict) else {}
+if isinstance(data, dict):
+    print(data.get("reason_code") or "")
+PY
+)"
+  if [ -n "$CODE" ]; then
+    note_pass "guardctl explain --json has reason_code=$CODE"
   else
-    note_fail "guardctl explain --json missing reason_code field: $(cat "$WORK/explain.json")"
+    note_fail "guardctl explain --json missing/empty reason_code: $(cat "$WORK/explain.json")"
   fi
   # Also verify resource_kind_code is present.
   if grep -q '"resource_kind_code"' "$WORK/explain.json" 2>/dev/null; then

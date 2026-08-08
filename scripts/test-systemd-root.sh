@@ -59,6 +59,12 @@ cleanup() {
     systemctl stop guardd 2>/dev/null || true
     bash "$REPO/deploy/install.sh" --uninstall 2>/dev/null || true
   fi
+  # The installer intentionally preserves operator config. This suite's config
+  # is disposable, so remove it only when it still points into this WORK dir.
+  if [ -f /etc/guardd/config.json ] && grep -q "$WORK" /etc/guardd/config.json; then
+    unlink /etc/guardd/config.json 2>/dev/null || true
+    rmdir /etc/guardd 2>/dev/null || true
+  fi
   rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -211,6 +217,7 @@ echo "==> Test 7: stale socket recovery"
 systemctl stop guardd
 sleep 1
 # Create a stale socket file to simulate a crash that left the socket behind.
+install -d -m 0750 -o root -g guardd-users "$(dirname "$SOCK")"
 python3 -c "import socket, os; s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.bind('$SOCK'); s.close()" 2>/dev/null || true
 if [ -e "$SOCK" ]; then
   echo "    stale socket created at $SOCK"

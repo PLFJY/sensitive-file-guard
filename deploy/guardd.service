@@ -53,7 +53,12 @@ Environment=GUARDD_CONFIG=/etc/guardd/config.json
 NoNewPrivileges=false
 ProtectSystem=false
 ProtectHome=false
-PrivateTmp=true
+# SSH_AUTH_SOCK commonly lives under /tmp/ssh-*/agent.*. A private /tmp would
+# hide that kernel endpoint from guardd and make authoritative agent identity
+# verification impossible. guardd never treats pathname contents as trusted;
+# it connects, checks SO_PEERCRED, verifies /proc identity, and pins the socket
+# inode behind a root-controlled hardlink before authorizing ssh-add.
+PrivateTmp=false
 PrivateDevices=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
@@ -62,10 +67,16 @@ RestrictRealtime=true
 RestrictSUIDSGID=true
 LockPersonality=true
 
-# Capabilities: CAP_SYS_ADMIN is required and sufficient for fanotify.
-# No ambient capabilities needed when running as root.
+# Capabilities: CAP_SYS_ADMIN gates fanotify permission events;
+# CAP_SYS_PTRACE is required by ptrace_may_access to resolve /proc/<pid>/exe
+# for another UID on hardened kernels; CAP_DAC_READ_SEARCH reads protected
+# metadata, CAP_DAC_OVERRIDE connects to an owner-only ssh-agent socket,
+# CAP_FOWNER pins that verified user-owned socket inode behind a root-controlled
+# hardlink despite fs.protected_hardlinks, and CAP_KILL supports broker child
+# validation/cleanup.
+# No ambient capabilities are needed while the service runs as uid 0.
 AmbientCapabilities=
-CapabilityBoundingSet=CAP_SYS_ADMIN CAP_KILL CAP_DAC_READ_SEARCH
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_KILL CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE CAP_FOWNER
 
 # Resource limits: the daemon is lightweight but handle burst load.
 LimitNOFILE=4096

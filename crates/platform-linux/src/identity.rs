@@ -214,7 +214,18 @@ pub fn verify_stopped_child_for_exec(
 /// Resolve the system `ssh-add` binary accepted by the daemon. User-selected
 /// binaries are deliberately excluded from the SSH-load capability.
 pub fn trusted_ssh_add_path() -> Result<PathBuf, String> {
-    for candidate in ["/usr/bin/ssh-add", "/bin/ssh-add"] {
+    trusted_system_executable(&["/usr/bin/ssh-add", "/bin/ssh-add"], "ssh-add")
+}
+
+/// Resolve the system OpenSSH `ssh-agent` binary accepted as an agent endpoint.
+/// A same-UID listener implemented by any other executable is rejected even if
+/// it owns the socket pathname.
+pub fn trusted_ssh_agent_path() -> Result<PathBuf, String> {
+    trusted_system_executable(&["/usr/bin/ssh-agent", "/bin/ssh-agent"], "ssh-agent")
+}
+
+fn trusted_system_executable(candidates: &[&str], name: &str) -> Result<PathBuf, String> {
+    for candidate in candidates {
         let path = Path::new(candidate);
         if path.is_file() {
             let canonical = fs::canonicalize(path)
@@ -227,7 +238,66 @@ pub fn trusted_ssh_add_path() -> Result<PathBuf, String> {
             }
         }
     }
-    Err("no root-owned, non-writable system ssh-add found".into())
+    Err(format!("no root-owned, non-writable system {name} found"))
+}
+
+/// Verify a live process is the expected user's invocation of one exact,
+/// trusted system executable. The start time is sampled before and after exe
+/// resolution so PID exit/reuse during verification fails closed.
+pub fn verify_trusted_process_executable(
+    pid: i32,
+    expected_uid: u32,
+    trusted_exe: &Path,
+) -> Result<ProcessStableId, String> {
+    if pid <= 0 {
+        return Err(format!("invalid peer pid {pid}"));
+    }
+    let before = read_stat_details(pid).map_err(|e| e.to_string())?;
+    let (uid, _) = read_uid_gid(pid).map_err(|e| e.to_string())?;
+    if uid != expected_uid {
+        return Err(format!(
+            "process {pid} uid {uid} does not match requesting uid {expected_uid}"
+        ));
+    }
+
+    let expected = fs::canonicalize(trusted_exe).map_err(|e| {
+        format!(
+            "canonicalize trusted executable {}: {e}",
+            trusted_exe.display()
+        )
+    })?;
+    let observed = read_exe(pid).map_err(|e| e.to_string())?;
+    if observed != expected {
+        return Err(format!(
+            "process {pid} executable {} is not trusted {}",
+            observed.display(),
+            expected.display()
+        ));
+    }
+
+    use std::os::unix::fs::MetadataExt;
+    let metadata = fs::metadata(&expected)
+        .map_err(|e| format!("stat trusted executable {}: {e}", expected.display()))?;
+    if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+        return Err(format!(
+            "trusted executable {} must be root-owned and not group/other-writable",
+            expected.display()
+        ));
+    }
+    let after = read_stat_details(pid).map_err(|e| e.to_string())?;
+    if before.start_time != after.start_time {
+        return Err(format!(
+            "process {pid} changed identity during verification"
+        ));
+    }
+
+    Ok(ProcessStableId {
+        pid: pid as u32,
+        start_time: after.start_time,
+        exe: expected,
+        exe_dev: metadata.dev(),
+        exe_ino: metadata.ino(),
+    })
 }
 
 /// Read one environment value from a process without returning or logging the
@@ -474,6 +544,60 @@ mod tests {
         )
         .unwrap_err()
         .contains("do not match IPC peer"));
+    }
+
+    #[test]
+    fn trusted_process_verification_accepts_system_ssh_agent_only() {
+        let trusted = trusted_ssh_agent_path().unwrap();
+        let dir = tempdir().unwrap();
+        let socket = dir.path().join("agent.sock");
+        let child = Command::new(&trusted)
+            .arg("-D")
+            .arg("-a")
+            .arg(&socket)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let guard = ChildGuard(child);
+        let pid = guard.0.id() as i32;
+        for _ in 0..100 {
+            if socket.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(socket.exists(), "ssh-agent did not create its test socket");
+
+        let identity = match verify_trusted_process_executable(
+            pid,
+            // SAFETY: getuid has no preconditions.
+            unsafe { libc::getuid() },
+            &trusted,
+        ) {
+            Ok(identity) => identity,
+            Err(error)
+                if unsafe { libc::geteuid() } != 0 && error.contains("Permission denied") =>
+            {
+                // OpenSSH deliberately makes an agent process non-dumpable.
+                // On ptrace-restricted hosts only root guardd can resolve its
+                // /proc exe; the privileged acceptance suite proves success.
+                return;
+            }
+            Err(error) => panic!("trusted ssh-agent verification failed: {error}"),
+        };
+        assert_eq!(identity.pid, pid as u32);
+        assert_eq!(identity.exe, trusted);
+
+        let error = verify_trusted_process_executable(
+            // SAFETY: getpid has no preconditions.
+            unsafe { libc::getpid() },
+            // SAFETY: getuid has no preconditions.
+            unsafe { libc::getuid() },
+            &identity.exe,
+        )
+        .unwrap_err();
+        assert!(error.contains("is not trusted"));
     }
 
     /// RAII guard that kills the child so tests never leak sleeping processes.

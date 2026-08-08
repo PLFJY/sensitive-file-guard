@@ -178,12 +178,12 @@ mkdir -p "$WORK/subdir"
 # ===========================================================================
 echo "==> Test 5: rename after protection"
 RENAMED="$CHROME_UDD/Default/Network/renamed-cookies"
-cp "$COOKIES" "$RENAMED"
-# The copy has a new inode, so we re-enroll: actually the original is still
-# protected by inode. Let's test the original is still denied after we rename
-# the COPY (not the original — renaming the original would move the mark).
-# Simpler: just verify the original is still denied.
-assert_denied "original cookies still denied after rename" read "$COOKIES"
+mv "$COOKIES" "$RENAMED"
+assert_denied "renamed protected cookie inode" read "$RENAMED"
+# Move the same inode back for later cases; the fanotify inode mark follows it
+# in both directions.
+mv "$RENAMED" "$COOKIES"
+assert_denied "cookie inode still denied after rename-back" read "$COOKIES"
 
 # ===========================================================================
 # Test 6: SQLite WAL/SHM sidecar => denied

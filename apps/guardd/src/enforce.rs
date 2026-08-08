@@ -100,6 +100,10 @@ pub struct EnforcementEngine {
     /// on each lookup so PID reuse invalidates the entry.
     identity_cache: HashMap<u32, (u64, ProcessIdentity)>,
     pub(crate) leases: LeaseSet,
+    /// Lease -> root-pinned SSH agent socket required in the live ssh-add
+    /// environment. Kept in the Linux backend because environment inspection
+    /// is an OS enforcement fact, not a pure policy-domain concern.
+    ssh_agent_bindings: HashMap<LeaseId, PathBuf>,
     /// Monotonic lease-id counter (migration + ssh leases share this space).
     next_lease_id: u64,
     /// The browser enrollment config, retained for IPC `browsers list` queries.
@@ -182,6 +186,7 @@ impl EnforcementEngine {
             fd_index,
             identity_cache: HashMap::new(),
             leases: LeaseSet::default(),
+            ssh_agent_bindings: HashMap::new(),
             next_lease_id: 0,
             browser_config: cfg.browsers.clone(),
             allowed: 0,
@@ -228,6 +233,9 @@ impl EnforcementEngine {
                 l.revoked = true;
                 found = true;
             }
+        }
+        if found {
+            self.ssh_agent_bindings.remove(&id);
         }
         found
     }
@@ -304,6 +312,7 @@ impl EnforcementEngine {
         path: &Path,
         uid: u32,
         target: guard_core::identity::StableIdentity,
+        agent_binding: SshAgentBinding,
     ) -> Result<(LeaseId, u64), String> {
         // Validate the resource is a protected SSH private key owned by uid.
         let canon = std::fs::canonicalize(path)
@@ -340,6 +349,13 @@ impl EnforcementEngine {
             revoked: false,
             used: false,
         });
+        match agent_binding {
+            SshAgentBinding::Verified(path) => {
+                self.ssh_agent_bindings.insert(id, path);
+            }
+            #[cfg(test)]
+            SshAgentBinding::UncheckedForTests => {}
+        }
         Ok((id, expires_at))
     }
 
@@ -470,7 +486,7 @@ impl EnforcementEngine {
         };
         let now = now_secs();
         self.refresh_migration_states(&resource, &process);
-        let decision = evaluate(
+        let mut decision = evaluate(
             &AccessEvent {
                 resource: resource.clone(),
                 process: process.clone(),
@@ -479,6 +495,24 @@ impl EnforcementEngine {
             &self.leases,
             now,
         );
+        // A client controls the stopped child's original environment and can
+        // SIGCONT it without waiting for guardctl's response. Stable ssh-add
+        // identity alone is therefore insufficient: the exact live process
+        // must also use the daemon-pinned, preverified agent socket. Missing or
+        // unreadable environment state fails closed.
+        if let Decision::AllowByLease(id) = decision {
+            if resource.kind == ProtectedResourceKind::SshPrivateKey {
+                if let Some(expected) = self.ssh_agent_bindings.get(&id) {
+                    let observed = linux_identity::read_process_env(pid, "SSH_AUTH_SOCK")
+                        .ok()
+                        .flatten()
+                        .map(PathBuf::from);
+                    if observed.as_deref() != Some(expected.as_path()) {
+                        decision = Decision::Deny(DenyReason::IdentityMismatch);
+                    }
+                }
+            }
+        }
         match decision {
             Decision::Allow | Decision::AllowByLease(_) => self.allowed += 1,
             Decision::Deny(_) => self.denied += 1,
@@ -488,11 +522,16 @@ impl EnforcementEngine {
         // reads the key, the `used` flag prevents any further open — even by
         // the same process — from re-using it.
         if let Decision::AllowByLease(id) = decision {
+            let mut consumed = false;
             for l in &mut self.leases.ssh {
                 if l.id == id {
                     l.used = true;
+                    consumed = true;
                     break;
                 }
+            }
+            if consumed {
+                self.ssh_agent_bindings.remove(&id);
             }
         }
         let backend_diag = format!(
@@ -604,6 +643,16 @@ impl EnforcementEngine {
             .insert(pid as u32, (current_start, identity.clone()));
         Some((identity, "fresh_resolve"))
     }
+}
+
+/// Binding between a one-shot SSH lease and the only agent endpoint the
+/// matching ssh-add process may use. Production can construct only the
+/// verified form; unit tests that exercise the pure lease path use the
+/// explicitly test-only bypass.
+pub enum SshAgentBinding {
+    Verified(PathBuf),
+    #[cfg(test)]
+    UncheckedForTests,
 }
 
 fn merge_fd_index(
@@ -1538,7 +1587,12 @@ mod tests {
         let my_pid = std::process::id() as i32;
 
         let (lease_id, expires_at) = engine
-            .authorize_ssh_load(&s.private_key, my_uid, target)
+            .authorize_ssh_load(
+                &s.private_key,
+                my_uid,
+                target,
+                SshAgentBinding::UncheckedForTests,
+            )
             .expect("authorize");
         assert_eq!(lease_id.0, 1);
         assert!(expires_at > now_secs_for_test());
@@ -1586,7 +1640,12 @@ mod tests {
         let target = my_stable_identity(&mut engine);
         let my_pid = std::process::id() as i32;
         let (lease_id, _) = engine
-            .authorize_ssh_load(&s.private_key, my_uid, target)
+            .authorize_ssh_load(
+                &s.private_key,
+                my_uid,
+                target,
+                SshAgentBinding::UncheckedForTests,
+            )
             .expect("authorize");
 
         // First open: allowed, lease marked used.
@@ -1615,7 +1674,12 @@ mod tests {
         let target = my_stable_identity(&mut engine);
         let my_pid = std::process::id() as i32;
         let (lease_id, _) = engine
-            .authorize_ssh_load(&s.private_key, my_uid, target)
+            .authorize_ssh_load(
+                &s.private_key,
+                my_uid,
+                target,
+                SshAgentBinding::UncheckedForTests,
+            )
             .expect("authorize");
 
         assert!(engine.revoke_lease(&lease_id.0.to_string()));
@@ -1652,7 +1716,12 @@ mod tests {
         wrong_target.start_time = wrong_target.start_time.wrapping_add(1);
         let my_pid = std::process::id() as i32;
         let (lease_id, _) = engine
-            .authorize_ssh_load(&s.private_key, my_uid, wrong_target)
+            .authorize_ssh_load(
+                &s.private_key,
+                my_uid,
+                wrong_target,
+                SshAgentBinding::UncheckedForTests,
+            )
             .expect("authorize");
 
         let f = std::fs::File::open(&s.private_key).unwrap();
@@ -1687,7 +1756,12 @@ mod tests {
             ino: 8,
         };
         let err = engine
-            .authorize_ssh_load(&s.private_key, wrong_uid, target)
+            .authorize_ssh_load(
+                &s.private_key,
+                wrong_uid,
+                target,
+                SshAgentBinding::UncheckedForTests,
+            )
             .unwrap_err();
         assert!(
             err.contains("owned by uid"),
@@ -1717,7 +1791,12 @@ mod tests {
             ino: 8,
         };
         let err = engine
-            .authorize_ssh_load(&s.private_key, my_uid, target)
+            .authorize_ssh_load(
+                &s.private_key,
+                my_uid,
+                target,
+                SshAgentBinding::UncheckedForTests,
+            )
             .unwrap_err();
         assert!(
             err.contains("not a protected SSH private key"),

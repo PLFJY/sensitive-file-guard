@@ -4,8 +4,10 @@ This document defines the guarantees, non-goals, and known limitations of the
 Linux V1 implementation of the Sensitive Data Firewall (`guardd`). It is the
 authoritative reference for what the firewall does and does not protect against.
 
-**Acceptance state:** implementation-complete Alpha. Non-privileged tests pass;
-root/CAP_SYS_ADMIN acceptance remains pending. Do not use real secrets yet.
+**Acceptance state:** implementation-complete Alpha; all required privileged
+suites were executed on the tested Arch host, but security acceptance remains
+pending because the conservative topology race was reproducibly readable in
+10,000/10,000 atomic-replacement iterations. Do not use real secrets yet.
 
 ## Mission
 
@@ -72,8 +74,22 @@ The client cannot declare that identity. It submits only a stopped child PID;
 the daemon verifies that the child is the IPC peer's direct child, is stopped,
 has the same UID/GID, and combines its kernel start time with the daemon-chosen,
 root-owned system `ssh-add` inode. The child's `SSH_AUTH_SOCK` must name a Unix
-socket owned by the requesting UID. Polkit user authentication is required for
-non-root requests.
+socket owned by the requesting UID. The daemon connects to it, obtains the
+listener's `SO_PEERCRED`, and verifies the listener PID/start time/executable
+dev+inode against the root-owned, non-writable system OpenSSH `ssh-agent`.
+These facts and the stopped child are checked again after polkit.
+
+Before releasing the child, guardd hardlinks the verified socket inode below a
+root-controlled, non-writable directory on the same filesystem. The child gets
+only this pinned pathname, so replacing the user-controlled original pathname
+after approval cannot redirect cooperative `guardctl`. The permission-event
+hot path also reads the live `ssh-add` environment and requires
+`SSH_AUTH_SOCK` to equal that lease's pin. A malicious client that resumes the
+real system binary with the replaced original path is therefore denied. The
+child uses the absolute system `ssh-add` path and an exact environment
+containing only the pinned `SSH_AUTH_SOCK` and `LC_ALL=C`; loader and askpass
+injection variables are not inherited. Polkit user authorization is required
+for non-root requests.
 
 ### 10. No secret contents in audit logs
 Audit records contain metadata only (path, exe, uid, pid, decision, deny
@@ -95,8 +111,10 @@ An inotify watcher is established before initial fanotify marking and watches
 every directory below enrolled browser roots. Create, move, delete, and
 attribute changes trigger full rediscovery, inode-index reconstruction, and
 fanotify remarking. Replaced Cookie databases, new sidecars, new profiles, and
-new nested storage directories therefore do not remain unprotected until the
-next daemon restart.
+new nested storage directories therefore eventually become protected without
+a daemon restart. This is a convergence property, not a race-free pre-open
+guarantee: the tested replacement interval was readable before the new mark
+was installed.
 
 ### 14. Migration capability lifecycle
 A `MigrationAccessLease` starts `Armed` for one enrolled executable identity.
@@ -105,6 +123,25 @@ access, the enforcement engine binds it to the exact browser root process
 (PID + start time + executable path/dev/inode). Only that process tree can use
 the capability; it becomes dead when the root process exits or the PID is
 reused.
+
+## Security-sensitive IPC authorization
+
+The socket is a transport boundary, not an authorization grant. Its installed
+mode is `0660 root:guardd-users`; every connection gets kernel credentials from
+`SO_PEERCRED`.
+
+| Operation | Caller and independent verification | Capability and authorization |
+| --- | --- | --- |
+| `MigrationAuthorize` | peer UID/PID from `SO_PEERCRED`; source/profile/target must resolve to enrolled daemon configuration; peer start token must remain live | grants an armed, expiring process-tree capability; polkit for non-root |
+| `SshProtect` | root or `stat`-verified file owner; canonical regular-file candidate, name, owner, and successful fanotify mark checked | adds protection but no read capability; polkit for non-root |
+| `SshLoadAuthorize` | protected key owner; direct stopped child and trusted `ssh-add`; verified/pinned trusted `ssh-agent`; all kernel facts rechecked after authorization | grants one matching open for 30 seconds; polkit for non-root |
+| `LeasesRevoke` | lease owner or root; ownership comes from daemon state | removes privilege; no polkit, and cross-user revocation is denied |
+
+Polkit process subjects include PID, start time, and UID. While `pkcheck` is
+pending, guardd monitors the IPC process's start token and the accepted socket;
+it cancels if the peer exits, disconnects, or its PID is reused. A capability
+whose response cannot be delivered is revoked. Client-supplied paths and
+labels are never used as process identity.
 
 ## Non-goals
 
@@ -167,9 +204,9 @@ unprotected.** This is a fundamental property of fanotify: the marks live only
 as long as the group fd is open.
 
 **Mitigation (Phase 14):** the systemd unit is configured with `Restart=always`
-and a short `RestartSec`. The daemon also has a `--watchdog` option (if
-implemented) or relies on systemd's `WatchdogSec` for crash detection. During
-the restart window, files are unprotected.
+and `RestartSec=2`. The privileged systemd suite observed automatic restart and
+mark reconstruction after `SIGKILL`. During that restart interval, files are
+unprotected.
 
 **This is fail-open, not fail-closed.** A fail-closed design would require
 LSM (Linux Security Module) hooks or a kernel module that survives userspace
@@ -186,10 +223,18 @@ The `mark_tree` / `mark_trees` strategy marks the tree root directory with
 **directly under** that directory. New subdirectories created after the mark
 may not be automatically covered unless `FAN_MARK_FILESYSTEM` is used.
 
-The persistent topology watcher discovers and marks new directories. A small
+The persistent topology watcher discovers and marks new directories. A
 create/move notification → rediscovery → fanotify mark race remains; the
-implementation does not claim race-free tree coverage. Strict filesystem-scope
-permission monitoring remains future work.
+implementation does not claim race-free tree coverage. On the tested Arch host
+and `/tmp` tmpfs, an atomic Cookie replacement followed by an immediate read
+succeeded in 10,000/10,000 iterations. Protection converged with
+p50/p95/p99/max delays of 1171/2225/2347/4039 microseconds. These numbers are an
+empirical result, not a universal upper bound.
+
+This makes filesystem-scope permission monitoring a requirement for the next
+promotion candidate. A Strict Mode design should apply `FAN_MARK_FILESYSTEM`,
+classify every permission event before allowing unrelated objects, and be
+benchmarked for latency and queue overflow. It is not implemented in Linux V1.
 
 Configured SSH-key parent directories are watched as well, so configured keys
 are remarked after inode replacement. A key enrolled only at runtime is not yet
@@ -241,8 +286,9 @@ that is documented but not specifically tested in V1.
 | ssh-agent signing misuse | **No** | Agent authority not mediated |
 | Network exfiltration of in-memory secret | **No** | Not a network firewall |
 | Daemon crash window | **No** | Fail-open on daemon death (systemd restart mitigates) |
-| New nested dir race before mark | **No** | Documented tree-mark race window |
-| Replaced Cookie inode remains unprotected until restart | **Yes** | Topology watcher rediscovers and remarks; bounded watcher→mark race remains |
+| New nested dir before its mark | **No** | Documented and measured topology window |
+| Replaced Cookie inode after watcher convergence | **Yes** | Rediscovered without restart |
+| Immediate read of a replacement Cookie inode | **No** | 10,000/10,000 reads succeeded in the tested stress run |
 
 ## Deployment recommendations
 
@@ -259,4 +305,6 @@ that is documented but not specifically tested in V1.
    restarts. Review `guardctl events` periodically.
 6. Put interactive users in `guardd-users` for socket transport. This does not
    authorize mutations: migration and SSH policy changes separately require
-   polkit. Desktop notifications run as `guard-notify` in the user's session.
+   polkit. Log out and back in after installation so both the shell and the
+   existing `systemd --user` manager receive the new supplementary group.
+   Desktop notifications run as `guard-notify` in the user's session.

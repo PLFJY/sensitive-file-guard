@@ -492,6 +492,7 @@ fn print_ssh_load_authorized(s: &guard_ipc::SshLoadAuthorizedInfo) {
     println!("  path             : {}", s.path);
     println!("  uid              : {}", s.uid);
     println!("  expires_at       : {} (epoch secs)", s.expires_at);
+    println!("  verified agent   : {}", s.agent_socket);
     println!("  one-shot: revoked when ssh-add exits or the lease is used.");
 }
 
@@ -543,15 +544,16 @@ fn run_ssh_suggest(dir: Option<&Path>) -> anyhow::Result<()> {
 //      exec, so the value read now equals what guardd will read later)
 //   5. parent sends SshLoadAuthorize; if denied, kill the child (never let it
 //      exec ssh-add without a lease)
-//   6. parent SIGCONT the child -> child execv's ssh-add -> ssh-add opens the
+//   6. parent SIGCONT the child -> child execve's ssh-add with a minimal
+//      environment -> ssh-add opens the
 //      key -> fanotify fires -> guardd matches the StableIdentity lease ->
 //      AllowByLease -> guardd marks the lease `used`
 //   7. parent waitpid for ssh-add to exit
 //   8. parent revokes the lease (best-effort; `used` + timeout already prevent
 //      reuse)
 //
-// No key bytes are ever sent over IPC. The lease carries only the path + the
-// ssh-add file identity + start_time.
+// No key bytes are ever sent over IPC. The capability binds only metadata:
+// key path, ssh-add file identity/start_time, and guardd's pinned agent path.
 
 /// Send a single IPC request and return the parsed response.
 fn ipc_request(socket: &Path, op: RequestOp) -> anyhow::Result<Response> {
@@ -586,39 +588,146 @@ fn resolve_ssh_add(ssh_add: Option<&Path>) -> anyhow::Result<PathBuf> {
 }
 
 /// fork() a child that raises SIGSTOP (so the parent can authorize the lease
-/// first) and then execv's `ssh-add <key>`. Returns the child PID.
+/// first) and then execve's `ssh-add <key>` with a minimal environment. Returns
+/// the child PID.
 ///
 /// SAFETY: `fork` is called in a single-threaded CLI before any threads spawn.
-/// The child calls only async-signal-safe functions (`raise`, `execv`, `_exit`)
-/// before `execv` replaces the image.
-fn spawn_stopped_ssh_add(ssh_add: &Path, key: &Path) -> std::io::Result<libc::pid_t> {
+/// The child calls only async-signal-safe functions (`raise`, `execve`, `_exit`)
+/// before `execve` replaces the image.
+const SSH_AUTH_SOCK_ENV_PREFIX: &[u8] = b"SSH_AUTH_SOCK=";
+const SSH_ADD_LOCALE_ENV: &str = "LC_ALL=C";
+
+struct StoppedSshAdd {
+    pid: libc::pid_t,
+    agent_path_writer: Option<std::os::fd::OwnedFd>,
+}
+
+fn spawn_stopped_ssh_add(ssh_add: &Path, key: &Path) -> std::io::Result<StoppedSshAdd> {
+    use std::os::fd::FromRawFd;
     use std::os::unix::ffi::OsStrExt;
     let ssh_add_c = std::ffi::CString::new(ssh_add.as_os_str().as_bytes())
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
     let key_c = std::ffi::CString::new(key.as_os_str().as_bytes())
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    let argv: [*const libc::c_char; 3] = [ssh_add_c.as_ptr(), key_c.as_ptr(), std::ptr::null()];
+    let lc_all = std::ffi::CString::new(SSH_ADD_LOCALE_ENV).expect("static CString");
+    let mut pipe_fds = [-1; 2];
+    // SAFETY: pipe_fds points to two writable integers.
+    if unsafe { libc::pipe2(pipe_fds.as_mut_ptr(), libc::O_CLOEXEC) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
     let pid = unsafe { libc::fork() };
     if pid < 0 {
+        // SAFETY: both descriptors were created by pipe2 and remain owned.
+        unsafe {
+            libc::close(pipe_fds[0]);
+            libc::close(pipe_fds[1]);
+        }
         return Err(std::io::Error::last_os_error());
     }
     if pid == 0 {
         // Child.
         unsafe {
+            libc::close(pipe_fds[1]);
             // Stop self so the parent can read start_time + authorize the lease
             // BEFORE we exec ssh-add (which would open the protected key).
             libc::raise(libc::SIGSTOP);
-            // Resumed by parent's SIGCONT. execv replaces the image with
+            // After authorization, the parent supplies guardd's root-pinned
+            // agent socket pathname through this private pipe. Build envp in a
+            // fixed stack buffer: no allocator or non-async-signal-safe Rust
+            // code runs in the post-fork child.
+            let prefix = SSH_AUTH_SOCK_ENV_PREFIX;
+            let mut agent_environment = [0 as libc::c_char; 128];
+            for (index, byte) in prefix.iter().enumerate() {
+                agent_environment[index] = *byte as libc::c_char;
+            }
+            let mut used = prefix.len();
+            loop {
+                let remaining = agent_environment.len() - used - 1;
+                if remaining == 0 {
+                    libc::_exit(126);
+                }
+                let count = libc::read(
+                    pipe_fds[0],
+                    agent_environment.as_mut_ptr().add(used).cast(),
+                    remaining,
+                );
+                if count == 0 {
+                    break;
+                }
+                if count < 0 {
+                    if *libc::__errno_location() == libc::EINTR {
+                        continue;
+                    }
+                    libc::_exit(126);
+                }
+                used += count as usize;
+            }
+            libc::close(pipe_fds[0]);
+            if used == prefix.len() {
+                libc::_exit(126);
+            }
+            agent_environment[used] = 0;
+            let envp = [
+                agent_environment.as_ptr(),
+                lc_all.as_ptr(),
+                std::ptr::null(),
+            ];
+            // Resumed by parent's SIGCONT. execve replaces the image with
             // ssh-add; PID + start_time are unchanged so the lease still
-            // matches. argv = ["ssh-add", "<key>"].
-            let argv: [*const libc::c_char; 3] =
-                [ssh_add_c.as_ptr(), key_c.as_ptr(), std::ptr::null()];
-            libc::execv(ssh_add_c.as_ptr(), argv.as_ptr());
-            // execv only returns on failure. _exit (not exit) avoids flushing
+            // matches. The explicit envp excludes loader/runtime injection
+            // variables such as LD_PRELOAD, LD_AUDIT, and GLIBC_TUNABLES.
+            libc::execve(ssh_add_c.as_ptr(), argv.as_ptr(), envp.as_ptr());
+            // execve only returns on failure. _exit (not exit) avoids flushing
             // the parent's stdio buffers twice; 127 is the shell convention.
             libc::_exit(127);
         }
     }
-    Ok(pid)
+    // Parent owns only the write end. Closing it after writing produces EOF in
+    // the resumed child before execve.
+    unsafe { libc::close(pipe_fds[0]) };
+    // SAFETY: the parent uniquely owns the live write descriptor.
+    let writer = unsafe { std::os::fd::OwnedFd::from_raw_fd(pipe_fds[1]) };
+    Ok(StoppedSshAdd {
+        pid,
+        agent_path_writer: Some(writer),
+    })
+}
+
+#[cfg(test)]
+fn sanitized_ssh_add_environment(agent_socket: &std::ffi::OsStr) -> std::io::Result<Vec<String>> {
+    use std::os::unix::ffi::OsStrExt;
+    let socket = std::str::from_utf8(agent_socket.as_bytes())
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    Ok(vec![
+        format!(
+            "{}{socket}",
+            std::str::from_utf8(SSH_AUTH_SOCK_ENV_PREFIX).unwrap()
+        ),
+        SSH_ADD_LOCALE_ENV.to_owned(),
+    ])
+}
+
+fn provide_verified_agent_socket(child: &mut StoppedSshAdd, path: &Path) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::ffi::OsStrExt;
+
+    let bytes = path.as_os_str().as_bytes();
+    if bytes.is_empty() || bytes.len() > 107 || bytes.contains(&0) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "verified SSH agent socket path is invalid or too long",
+        ));
+    }
+    let writer = child.agent_path_writer.take().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "verified SSH agent socket was already supplied",
+        )
+    })?;
+    let mut file = std::fs::File::from(writer);
+    file.write_all(bytes)?;
+    file.flush()
 }
 
 /// Block until `pid` is stopped (SIGSTOP). Errors if the child exited before
@@ -710,15 +819,15 @@ fn run_ssh_load(
     json: bool,
 ) -> anyhow::Result<()> {
     // 1. ssh-add needs a reachable agent socket.
-    if std::env::var_os("SSH_AUTH_SOCK").is_none() {
-        anyhow::bail!("SSH_AUTH_SOCK is not set; start ssh-agent first");
-    }
+    let _agent_socket = std::env::var_os("SSH_AUTH_SOCK")
+        .ok_or_else(|| anyhow::anyhow!("SSH_AUTH_SOCK is not set; start ssh-agent first"))?;
     // 2. Resolve + canonicalize the ssh-add binary (needed for the fork).
     let ssh_add_resolved = resolve_ssh_add(ssh_add)?;
     let ssh_add_canon = std::fs::canonicalize(&ssh_add_resolved)?;
 
     // 3. Fork ssh-add in a stopped state.
-    let pid = spawn_stopped_ssh_add(&ssh_add_canon, key)?;
+    let mut child = spawn_stopped_ssh_add(&ssh_add_canon, key)?;
+    let pid = child.pid;
 
     // 4. Wait for the stop signal.
     if let Err(e) = wait_for_stop(pid) {
@@ -730,27 +839,35 @@ fn run_ssh_load(
     //    process identity from /proc itself — we send ONLY the PID.
     //    (Hardening pass 1: closes the authorization bypass where a client
     //    could declare any identity.)
-    let resp = ipc_request(
+    let resp = match ipc_request(
         socket,
         RequestOp::SshLoadAuthorize {
             path: key.to_string_lossy().into_owned(),
             ssh_add_pid: pid as u32,
         },
-    )?;
+    ) {
+        Ok(response) => response,
+        Err(error) => {
+            // A transport failure must not strand a stopped child which could
+            // later be resumed outside this broker flow.
+            reap_child(pid);
+            return Err(error.context("requesting SSH load authorization"));
+        }
+    };
     if !resp.ok {
         // Never let the stopped child exec ssh-add without a lease.
         reap_child(pid);
         let msg = resp.error.unwrap_or_else(|| "unknown daemon error".into());
         anyhow::bail!("daemon refused to authorize SSH load lease: {msg}");
     }
-    let lease_id = match resp.body {
+    let (lease_id, pinned_agent_socket) = match resp.body {
         Some(ResponseBody::SshLoadAuthorized(info)) => {
             if json {
                 println!("{}", serde_json::to_string_pretty(&info)?);
             } else {
                 print_ssh_load_authorized(&info);
             }
-            info.lease_id
+            (info.lease_id, PathBuf::from(info.agent_socket))
         }
         _ => {
             reap_child(pid);
@@ -758,30 +875,36 @@ fn run_ssh_load(
         }
     };
 
-    // 6. Continue the child so it execs ssh-add and reads the key once.
+    // 6. Supply the root-pinned, kernel-verified agent pathname. The child
+    // cannot inherit or choose a replacement path after authorization.
+    if let Err(error) = provide_verified_agent_socket(&mut child, &pinned_agent_socket) {
+        reap_child(pid);
+        revoke_lease_best_effort(socket, &lease_id);
+        anyhow::bail!("supplying verified SSH agent socket to ssh-add: {error}");
+    }
+
+    // 7. Continue the child so it execs ssh-add and reads the key once.
     if let Err(e) = continue_child(pid) {
         reap_child(pid);
+        revoke_lease_best_effort(socket, &lease_id);
         anyhow::bail!("continuing ssh-add child: {e}");
     }
 
-    // 7. Wait for ssh-add to exit.
+    // 8. Wait for ssh-add to exit.
     let exit_code = match waitpid_exit(pid) {
         Ok(c) => c,
         Err(e) => {
+            reap_child(pid);
+            revoke_lease_best_effort(socket, &lease_id);
             anyhow::bail!("waiting for ssh-add to exit: {e}");
         }
     };
 
-    // 8. Revoke the lease (best-effort cleanup; the one-shot `used` flag and
+    // 9. Revoke the lease (best-effort cleanup; the one-shot `used` flag and
     //    the timeout already prevent reuse).
-    let _ = ipc_request(
-        socket,
-        RequestOp::LeasesRevoke {
-            lease_id: lease_id.clone(),
-        },
-    );
+    revoke_lease_best_effort(socket, &lease_id);
 
-    // 9. Report. ssh-add prints the key comment/fingerprint to stdout (its
+    // 10. Report. ssh-add prints the key comment/fingerprint to stdout (its
     //    normal behavior); no key bytes are exposed by guardctl itself.
     if exit_code == 0 {
         if !json {
@@ -798,6 +921,15 @@ fn run_ssh_load(
             lease = lease_id
         )
     }
+}
+
+fn revoke_lease_best_effort(socket: &Path, lease_id: &str) {
+    let _ = ipc_request(
+        socket,
+        RequestOp::LeasesRevoke {
+            lease_id: lease_id.to_owned(),
+        },
+    );
 }
 
 fn decision_short(s: &str) -> &str {
@@ -891,13 +1023,14 @@ mod tests {
     #[test]
     fn ssh_load_authorized_response_parses() {
         // The daemon replies with a lease id + expiry; no key contents.
-        let body_json = r#"{"kind":"ssh_load_authorized","data":{"lease_id":"7","path":"/home/u/.ssh/id_ed25519","uid":1000,"expires_at":1700000100}}"#;
+        let body_json = r#"{"kind":"ssh_load_authorized","data":{"lease_id":"7","path":"/home/u/.ssh/id_ed25519","uid":1000,"expires_at":1700000100,"agent_socket":"/tmp/.guardd-agent-pins/a-1000-7.sock"}}"#;
         let body: guard_ipc::ResponseBody = serde_json::from_str(body_json).unwrap();
         match body {
             guard_ipc::ResponseBody::SshLoadAuthorized(info) => {
                 assert_eq!(info.lease_id, "7");
                 assert_eq!(info.uid, 1000);
                 assert_eq!(info.expires_at, 1700000100);
+                assert!(info.agent_socket.contains(".guardd-agent-pins"));
                 assert!(!info.path.is_empty());
             }
             _ => panic!("expected SshLoadAuthorized"),
@@ -909,5 +1042,34 @@ mod tests {
         let trusted = platform_linux::identity::trusted_ssh_add_path().unwrap();
         assert_eq!(resolve_ssh_add(Some(&trusted)).unwrap(), trusted);
         assert!(resolve_ssh_add(Some(Path::new("/opt/custom/ssh-add"))).is_err());
+    }
+
+    #[test]
+    fn ssh_add_exec_environment_is_minimal_and_drops_injection_variables() {
+        // The child receives this exact envp; ambient variables (including
+        // loader hooks) are never copied from guardctl's environment.
+        let environment =
+            sanitized_ssh_add_environment(std::ffi::OsStr::new("/tmp/test-agent.sock")).unwrap();
+        let values: Vec<&str> = environment.iter().map(String::as_str).collect();
+        assert_eq!(values, ["SSH_AUTH_SOCK=/tmp/test-agent.sock", "LC_ALL=C"]);
+
+        for forbidden in [
+            "LD_PRELOAD",
+            "LD_LIBRARY_PATH",
+            "LD_AUDIT",
+            "LD_DEBUG",
+            "LD_PROFILE",
+            "GLIBC_TUNABLES",
+            "SSH_ASKPASS",
+            "PATH",
+            "HOME",
+        ] {
+            assert!(
+                values
+                    .iter()
+                    .all(|value| !value.starts_with(&format!("{forbidden}="))),
+                "{forbidden} must not enter ssh-add's execve environment"
+            );
+        }
     }
 }

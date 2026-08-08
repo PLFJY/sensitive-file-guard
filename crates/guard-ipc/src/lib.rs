@@ -172,6 +172,9 @@ pub struct SshLoadAuthorizedInfo {
     pub path: String,
     pub uid: u32,
     pub expires_at: u64,
+    /// Root-pinned hardlink to the verified agent socket. Supplying this path
+    /// to ssh-add prevents same-UID pathname replacement after authorization.
+    pub agent_socket: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -446,6 +449,7 @@ mod tests {
             path: "/home/u/.ssh/id_ed25519".into(),
             uid: 1000,
             expires_at: 17_000_000_030,
+            agent_socket: "/tmp/.guardd-agent-pins/a-1000-5.sock".into(),
         });
         let resp = Response::ok(body);
         let j = serde_json::to_string(&resp).unwrap();
@@ -457,6 +461,7 @@ mod tests {
                 assert_eq!(s.path, "/home/u/.ssh/id_ed25519");
                 assert_eq!(s.uid, 1000);
                 assert!(s.expires_at > 0);
+                assert!(s.agent_socket.contains(".guardd-agent-pins"));
                 assert!(!j.contains("\"content\""));
                 assert!(!j.contains("\"key_bytes\""));
             }
