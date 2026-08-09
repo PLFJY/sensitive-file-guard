@@ -67,7 +67,7 @@ pkgver() {
 }
 ```
 
-Dependencies are `glibc`, `polkit`, and `systemd`; `libnotify` and `openssh`
+Dependencies are `glibc`, `libgcc`, `polkit`, and `systemd`; `libnotify` and `openssh`
 are correctly optional because `guard-notify` invokes `notify-send` and the SSH
 agent workflow is optional. `rusqlite` remains bundled, so no system SQLite
 dependency was added. Build dependencies are `cargo`, `git`, and `rust`.
@@ -104,14 +104,21 @@ systemctl --user enable --now guard-notify
 | `namcap PKGBUILD` | PASS (no output / zero exit). |
 | `bash -n deploy/install.sh scripts/test-systemd-root.sh scripts/test-strict-filesystem-root.sh` | PASS. |
 | Staged `package()` file-list and forbidden-content inspection | PASS; exactly the listed production assets, with no `target/`, fixtures, secrets, audit DB, caches, or `/home/plfjy` path. |
-| Clean `makepkg -f --noconfirm` archive | BLOCKED. The VCS source is the public remote's last commit, which cannot include this uncommitted Phase 20 work. The initial attempted build also exposed a local makepkg-injected `rust-lld` flag that omitted bundled SQLite symbols; PKGBUILD now clears those user-local Rust flags and the exact frozen build command passed against the fetched source. No package archive or `namcap`-on-archive result is claimed. |
+| Clean `makepkg -C -f --noconfirm` archive | PASS; built `sensitive-file-guard-git-0.1.0.r6.g2425da7-1-x86_64.pkg.tar.zst` from the fetched VCS source. |
+| `namcap` on the generated archive | PASS with two reviewed warnings: it cannot infer that `polkit` and `systemd` are required by the packaged policy and units. Both remain deliberate runtime dependencies. |
+| Generated archive file-list and forbidden-content inspection | PASS; only the four production binaries and declared service, policy, example, documentation, and license assets. No build tree, fixtures, audit DB, cache, developer path, real browser path, or SSH path. |
+| Install generated package with `sudo` | BLOCKED; `sudo -n true` returned `sudo: a password is required`, so no system package installation was attempted. |
 
 The package build command is:
 
 ```sh
-env -u CARGO_ENCODED_RUSTFLAGS -u RUSTFLAGS \
-  cargo build --frozen --release --workspace --exclude guard-test-probe
+cargo build --frozen --release --workspace --exclude guard-test-probe
 ```
+
+Arch's package-wide GCC LTO conflicts with the bundled static SQLite archive
+when Rust performs the final `rust-lld` link. The PKGBUILD therefore uses
+`options=('!lto')`; makepkg hardening flags remain in effect. This is a build
+compatibility setting, not a runtime security exception.
 
 ## Rust quality gates
 
@@ -157,5 +164,4 @@ root-test scripts, `LICENSE-MIT`, `LICENSE-APACHE`, and `packaging/aur/`.
 3. Strict filesystem performance and fanotify's documented fail-open/crash,
    pre-open descriptor, rename-only, queue-overflow, and root-compromise
    boundaries remain unchanged from Phase 19/19.1.
-4. A clean AUR archive must be rerun after these files are committed to the
-   upstream VCS source used by `makepkg`; publication remains a human action.
+4. AUR publication and any privileged package installation remain human actions.

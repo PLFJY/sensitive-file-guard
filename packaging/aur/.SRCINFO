@@ -1,6 +1,6 @@
 pkgbase = sensitive-file-guard-git
 	pkgdesc = Pre-open local access firewall for browser authentication data and SSH private keys
-	pkgver = 0.1.0.r5.g1f64316
+	pkgver = 0.1.0.r6.g2425da7
 	pkgrel = 1
 	url = https://github.com/PLFJY/sensitive-file-guard
 	arch = x86_64
@@ -10,12 +10,14 @@ pkgbase = sensitive-file-guard-git
 	makedepends = git
 	makedepends = rust
 	depends = glibc
+	depends = libgcc
 	depends = polkit
 	depends = systemd
 	optdepends = libnotify: desktop notifications via notify-send
 	optdepends = openssh: ssh-agent and ssh-add functionality
 	provides = sensitive-file-guard
 	conflicts = sensitive-file-guard
+	options = !lto
 	source = git+https://github.com/PLFJY/sensitive-file-guard.git
 	sha256sums = SKIP
 

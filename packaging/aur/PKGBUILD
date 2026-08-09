@@ -1,14 +1,15 @@
 # Maintainer: PLFJY <https://github.com/PLFJY>
 
 pkgname=sensitive-file-guard-git
-pkgver=0.1.0.r5.g1f64316
+pkgver=0.1.0.r6.g2425da7
 pkgrel=1
 pkgdesc='Pre-open local access firewall for browser authentication data and SSH private keys'
 arch=('x86_64')
 url='https://github.com/PLFJY/sensitive-file-guard'
 license=('MIT' 'Apache-2.0')
-depends=('glibc' 'polkit' 'systemd')
+depends=('glibc' 'libgcc' 'polkit' 'systemd')
 makedepends=('cargo' 'git' 'rust')
+options=('!lto')
 optdepends=(
   'libnotify: desktop notifications via notify-send'
   'openssh: ssh-agent and ssh-add functionality'
@@ -28,17 +29,15 @@ pkgver() {
 
 build() {
   cd "$srcdir/sensitive-file-guard"
-  # The repository links rusqlite's bundled SQLite statically.  Some local
-  # makepkg configurations inject a Rust lld selection that drops that archive;
-  # do not inherit those user-local Rust flags into this reproducible build.
-  env -u CARGO_ENCODED_RUSTFLAGS -u RUSTFLAGS \
-    cargo build --frozen --release --workspace --exclude guard-test-probe
+  # libsqlite3-sys compiles bundled SQLite as a static C archive. Arch's GCC
+  # LTO archive cannot be linked by Rust's lld final linker, so package-wide
+  # LTO is disabled above while normal makepkg hardening flags remain enabled.
+  cargo build --frozen --release --workspace --exclude guard-test-probe
 }
 
 check() {
   cd "$srcdir/sensitive-file-guard"
-  env -u CARGO_ENCODED_RUSTFLAGS -u RUSTFLAGS \
-    cargo test --frozen --workspace --all-features
+  cargo test --frozen --workspace --all-features
 }
 
 package() {
