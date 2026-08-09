@@ -1,31 +1,6 @@
 {
-  "enforcement_mode": "conservative",
-  "browsers": [
-    {
-      "id": "chrome",
-      "family": "Chromium",
-      "profile_root": "/home/REPLACE_USER/.config/google-chrome",
-      "owner_uid": 1000,
-      "exe_paths": [
-        "/opt/google/chrome/chrome",
-        "/usr/bin/google-chrome",
-        "/usr/bin/google-chrome-stable"
-      ]
-    },
-    {
-      "id": "firefox",
-      "family": "Firefox",
-      "profile_root": "/home/REPLACE_USER/.mozilla/firefox",
-      "owner_uid": 1000,
-      "exe_paths": [
-        "/usr/bin/firefox",
-        "/usr/lib/firefox/firefox"
-      ]
-    }
-  ],
+  "enforcement_mode": "strict-filesystem",
+  "browsers": [],
   "enrolled_exes": [],
-  "ssh_keys": [
-    "/home/REPLACE_USER/.ssh/id_ed25519",
-    "/home/REPLACE_USER/.ssh/id_rsa"
-  ]
+  "ssh_keys": []
 }

@@ -1,0 +1,73 @@
+# Maintainer: PLFJY <https://github.com/PLFJY>
+
+pkgname=sensitive-file-guard-git
+pkgver=0.1.0.r5.g1f64316
+pkgrel=1
+pkgdesc='Pre-open local access firewall for browser authentication data and SSH private keys'
+arch=('x86_64')
+url='https://github.com/PLFJY/sensitive-file-guard'
+license=('MIT' 'Apache-2.0')
+depends=('glibc' 'polkit' 'systemd')
+makedepends=('cargo' 'git' 'rust')
+optdepends=(
+  'libnotify: desktop notifications via notify-send'
+  'openssh: ssh-agent and ssh-add functionality'
+)
+provides=('sensitive-file-guard')
+conflicts=('sensitive-file-guard')
+source=('git+https://github.com/PLFJY/sensitive-file-guard.git')
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$srcdir/sensitive-file-guard"
+  printf '%s.r%s.g%s' \
+    "$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)" \
+    "$(git rev-list --count HEAD)" \
+    "$(git rev-parse --short=7 HEAD)"
+}
+
+build() {
+  cd "$srcdir/sensitive-file-guard"
+  # The repository links rusqlite's bundled SQLite statically.  Some local
+  # makepkg configurations inject a Rust lld selection that drops that archive;
+  # do not inherit those user-local Rust flags into this reproducible build.
+  env -u CARGO_ENCODED_RUSTFLAGS -u RUSTFLAGS \
+    cargo build --frozen --release --workspace --exclude guard-test-probe
+}
+
+check() {
+  cd "$srcdir/sensitive-file-guard"
+  env -u CARGO_ENCODED_RUSTFLAGS -u RUSTFLAGS \
+    cargo test --frozen --workspace --all-features
+}
+
+package() {
+  cd "$srcdir/sensitive-file-guard"
+
+  for binary in guardd guardctl guard-tui guard-notify; do
+    install -Dm755 "target/release/$binary" "$pkgdir/usr/bin/$binary"
+  done
+
+  sed 's|@GUARDD_BINDIR@|/usr/bin|g' deploy/guardd.service \
+    > "$srcdir/guardd.service"
+  sed 's|@GUARDD_BINDIR@|/usr/bin|g' deploy/guard-notify.service \
+    > "$srcdir/guard-notify.service"
+  install -Dm644 "$srcdir/guardd.service" \
+    "$pkgdir/usr/lib/systemd/system/guardd.service"
+  install -Dm644 "$srcdir/guard-notify.service" \
+    "$pkgdir/usr/lib/systemd/user/guard-notify.service"
+  install -Dm644 deploy/org.guardd.policy \
+    "$pkgdir/usr/share/polkit-1/actions/org.guardd.policy"
+  install -Dm644 deploy/guardd-users.sysusers \
+    "$pkgdir/usr/lib/sysusers.d/sensitive-file-guard.conf"
+
+  # An example is intentionally not installed under /etc: it has no guessed
+  # user, UID, profile, or SSH key and must be deliberately copied and edited.
+  install -Dm644 deploy/guardd-config.example.json \
+    "$pkgdir/usr/share/guardd/guardd-config.example.json"
+  for document in README.md docs/INSTALL_LINUX.md docs/SECURITY_MODEL.md; do
+    install -Dm644 "$document" "$pkgdir/usr/share/doc/sensitive-file-guard/$(basename "$document")"
+  done
+  install -Dm644 LICENSE-MIT "$pkgdir/usr/share/licenses/$pkgname/LICENSE-MIT"
+  install -Dm644 LICENSE-APACHE "$pkgdir/usr/share/licenses/$pkgname/LICENSE-APACHE"
+}

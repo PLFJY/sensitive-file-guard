@@ -5,7 +5,8 @@ PartOf=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/guard-notify
+# Substituted at install/package build time; see deploy/guardd.service.
+ExecStart=@GUARDD_BINDIR@/guard-notify
 Restart=on-failure
 RestartSec=2
 NoNewPrivileges=true

@@ -1,0 +1,5 @@
+# makepkg work and output directories; never part of an AUR source package.
+pkg/
+src/
+sensitive-file-guard/
+*.pkg.tar.*

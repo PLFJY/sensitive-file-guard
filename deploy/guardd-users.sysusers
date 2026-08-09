@@ -1,0 +1,3 @@
+# Created by the Arch package through systemd-sysusers. Package installation
+# never chooses a desktop user or modifies supplementary group membership.
+g guardd-users -

@@ -238,6 +238,28 @@ such as an LSM or a sandbox around a daemon-controlled migration process.
 
 ## Linux-specific behavior
 
+### Browser executable portability and sandboxes
+Browser authorization is an explicit enrollment of a configured profile root
+and the canonical executable identity observed through `/proc/<pid>/exe` plus
+`st_dev`/`st_ino`. Native package layouts differ across distributions, so the
+deployment helper suggests only existing canonical final executable paths; it
+does not treat `/usr/bin` launchers, `argv[0]`, a basename, or package metadata
+as an identity. Omitting `owner_uid` is safe only for an existing profile root:
+guardd stats that root and fails if it cannot.
+
+Native Firefox and Debian Firefox ESR are ordinary Firefox-family enrollments
+with separately configured executable/profile pairs. Typical ESR values are
+`/usr/lib/firefox-esr/firefox-esr` and `~/.mozilla/firefox-esr`; no Debian
+package-name exception exists. Brave, Edge, Vivaldi, and custom browser builds
+remain available through the same explicit configuration mechanism.
+
+Snap and Flatpak browser installations are not security-accepted in Linux V1.
+Their application mount namespaces can make host `/proc/<pid>/exe` identity
+and filesystem-mark/profile visibility differ from the application view. This
+has not been equivalently privileged-tested, so discovery reports these forms
+instead of enrolling them. Trusting a Snap name, Flatpak ID, or process name
+would violate the process-identity invariant and is forbidden.
+
 ### Fail-open on daemon close
 When `guardd` exits (crash, SIGTERM, SIGKILL), the fanotify group fd is closed
 by the kernel. All `FAN_OPEN_PERM` marks are removed. **Files become

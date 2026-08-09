@@ -77,51 +77,34 @@ out of a sensitive pathname without any open occurring while it has that name.
 Binaries: `guardd` (daemon), `guardctl` (control), `guard-tui` (terminal UI),
 and `guard-notify` (unprivileged user-session notification presenter).
 
-## Build
+## Install
+
+The main guide is [Linux installation and deployment](docs/INSTALL_LINUX.md).
+It covers the supported systemd baseline, Arch/Debian/Ubuntu/Fedora dependency
+commands, native browser discovery, configuration, service operation, updates,
+and removal.
+
+**Security-accepted Alpha: `strict-filesystem` on the tested Arch host.**
+Other mainstream systemd-based distributions are expected to work with native
+browser packages but have not received equivalent privileged acceptance
+testing. Snap and Flatpak browsers are currently unsupported for the
+security-accepted path.
+
+### Short source quick-start
 
 ```sh
+# As your normal user, from a source checkout:
 cargo build --release
-```
-
-Binaries are placed in `target/release/`: `guardd`, `guardctl`, `guard-tui`,
-`guard-notify`, `guard-test-probe`.
-
-## Install (systemd service)
-
-```sh
-# 1. Build release binaries.
-cargo build --release
-
-# 2. Install as a systemd service (run as root).
 sudo deploy/install.sh
-
-# The installer adds the invoking sudo user to guardd-users. Log out/in once
-# so the new group is present in the user session.
-
-# 3. Edit the config — set your browser profile_root and ssh_keys.
-sudo vi /etc/guardd/config.json
-
-# 4. Start the service.
-sudo systemctl start guardd
-
-# 5. Verify enforcement is active.
-guardctl status
-# Expected: "guardd <version> — ACTIVE"
-
-# 6. (Optional) enable auto-start on boot.
-sudo systemctl enable guardd   # already done by install.sh
-
-# 7. Desktop notifications run in the user session, never in root guardd.
-systemctl --user daemon-reload
+guardctl browser discover
+sudoedit /etc/guardd/config.json
+sudo systemctl enable --now guardd
 systemctl --user enable --now guard-notify
+guardctl status
 ```
 
-### Uninstall
-
-```sh
-sudo deploy/install.sh --uninstall
-# Config (/etc/guardd/) and audit DB (/var/lib/guardd/) are preserved.
-```
+The installer installs already-built binaries; it does not build as root,
+enable, or start the daemon. Its empty strict-mode configuration is intentional.
 
 ## Run (without systemd)
 
@@ -142,8 +125,10 @@ target/release/guard-tui /run/guardd/guardd.sock
 ## Config
 
 See [`deploy/guardd-config.example.json`](deploy/guardd-config.example.json)
-for a template. Replace `REPLACE_USER` with your username and set the correct
-`owner_uid`.
+for a deliberately empty strict-mode template. It contains no username, UID,
+profile, or guessed SSH-key path. Use `guardctl browser discover` to produce
+reviewable native-browser entries. Omit `owner_uid` to have guardd stat the
+existing profile root; it fails rather than silently substituting UID 0.
 
 Linux enforcement is explicit:
 
@@ -153,7 +138,7 @@ Linux enforcement is explicit:
 }
 ```
 
-- `conservative` (the compatibility default) marks discovered objects and
+- `conservative` is a compatibility mode that marks discovered objects and
   directories, then uses inotify rediscovery. It has lower overhead but a
   measured first-open race for replacement inodes.
 - `strict-filesystem` installs `FAN_MARK_FILESYSTEM | FAN_OPEN_PERM` once per

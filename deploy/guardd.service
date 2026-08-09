@@ -14,14 +14,16 @@
 # window. See docs/SECURITY_MODEL.md §Fail-open on daemon close.
 [Unit]
 Description=Sensitive Data Firewall daemon (guardd)
-Documentation=file:///usr/share/doc/guardd/README.md
 After=local-fs.target
 Before=graphical.target
 DefaultDependencies=yes
 
 [Service]
 Type=simple
-ExecStart=/usr/local/sbin/guardd --enforce-browser-config /etc/guardd/config.json --ipc-socket /run/guardd/guardd.sock --audit-db /var/lib/guardd/audit.db
+# `@GUARDD_BINDIR@` is substituted at install/package build time.  The
+# repository carries one security-reviewed unit; source installs use
+# /usr/local/bin and distribution packages use /usr/bin.
+ExecStart=@GUARDD_BINDIR@/guardd --enforce-browser-config /etc/guardd/config.json --ipc-socket /run/guardd/guardd.sock --audit-db /var/lib/guardd/audit.db
 Restart=always
 RestartSec=2
 # Give the daemon 10s to start; if it fails to initialize, systemd restarts it.

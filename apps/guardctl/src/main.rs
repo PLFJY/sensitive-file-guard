@@ -16,6 +16,7 @@ use guard_ipc::{
     Request, RequestOp, Response, ResponseBody, StatusInfo, MAX_REQUEST_BYTES, PROTOCOL_VERSION,
 };
 use platform_linux::ipc::IpcClient;
+use serde::Serialize;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -51,6 +52,13 @@ enum Command {
     Browsers {
         #[command(subcommand)]
         action: BrowsersAction,
+    },
+    /// Discover existing native browser profile/executable pairs. This is a
+    /// local suggestion command and does not contact guardd.
+    #[command(name = "browser")]
+    Browser {
+        #[command(subcommand)]
+        action: BrowserAction,
     },
     /// List recent authorization events.
     Events {
@@ -96,6 +104,18 @@ enum ResourcesAction {
 enum BrowsersAction {
     /// List enrolled browsers.
     List,
+}
+
+#[derive(Subcommand, Debug)]
+enum BrowserAction {
+    /// Print only existing native profile roots and canonical executable paths.
+    /// Snap and Flatpak locations are reported separately as unsupported for
+    /// this Alpha; this output is never an authorization decision.
+    Discover {
+        /// Home directory to inspect (default: this process's HOME).
+        #[arg(long, value_name = "PATH")]
+        home: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -192,6 +212,12 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
     {
         return run_ssh_suggest(dir.as_deref());
     }
+    if let Command::Browser {
+        action: BrowserAction::Discover { home },
+    } = &cli.command
+    {
+        return run_browser_discover(home.as_deref());
+    }
     // `ssh load` runs a multi-step brokered flow (authorize -> continue child
     // -> revoke) that does not fit the single-request dispatch below.
     if let Command::Ssh {
@@ -209,6 +235,9 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
         Command::Browsers {
             action: BrowsersAction::List,
         } => RequestOp::BrowsersList,
+        Command::Browser {
+            action: BrowserAction::Discover { .. },
+        } => unreachable!("browser discover handled before IPC dispatch"),
         Command::Events { limit } => RequestOp::Events { limit: *limit },
         Command::Explain { event_id } => RequestOp::Explain {
             event_id: *event_id,
@@ -285,6 +314,181 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
         print_human(&resp);
     }
     Ok(())
+}
+
+/// Native layouts selected from maintained distribution package file layouts,
+/// not from package-manager metadata or a process name.  Each executable entry
+/// is the final ELF executable expected from `/proc/<pid>/exe`, rather than a
+/// `/usr/bin` launcher script.  A user can always configure a different
+/// canonical path explicitly.
+#[derive(Clone, Copy)]
+struct NativeBrowserLayout {
+    id: &'static str,
+    family: &'static str,
+    profile_relative: &'static str,
+    executable_candidates: &'static [&'static str],
+}
+
+const NATIVE_BROWSER_LAYOUTS: &[NativeBrowserLayout] = &[
+    NativeBrowserLayout {
+        id: "firefox",
+        family: "Firefox",
+        profile_relative: ".mozilla/firefox",
+        executable_candidates: &["/usr/lib/firefox/firefox", "/usr/lib64/firefox/firefox"],
+    },
+    NativeBrowserLayout {
+        id: "firefox-esr",
+        family: "Firefox",
+        profile_relative: ".mozilla/firefox-esr",
+        executable_candidates: &[
+            "/usr/lib/firefox-esr/firefox-esr",
+            "/usr/lib64/firefox-esr/firefox-esr",
+        ],
+    },
+    NativeBrowserLayout {
+        id: "chromium",
+        family: "Chromium",
+        profile_relative: ".config/chromium",
+        executable_candidates: &[
+            "/usr/lib/chromium/chromium",
+            "/usr/lib/chromium-browser/chromium-browser",
+            "/usr/lib64/chromium-browser/chromium-browser",
+        ],
+    },
+    NativeBrowserLayout {
+        id: "google-chrome",
+        family: "Chromium",
+        profile_relative: ".config/google-chrome",
+        executable_candidates: &["/opt/google/chrome/chrome"],
+    },
+    NativeBrowserLayout {
+        id: "brave",
+        family: "Chromium",
+        profile_relative: ".config/BraveSoftware/Brave-Browser",
+        executable_candidates: &["/opt/brave.com/brave/brave"],
+    },
+    NativeBrowserLayout {
+        id: "microsoft-edge",
+        family: "Chromium",
+        profile_relative: ".config/microsoft-edge",
+        executable_candidates: &["/opt/microsoft/msedge/msedge"],
+    },
+    NativeBrowserLayout {
+        id: "vivaldi",
+        family: "Chromium",
+        profile_relative: ".config/vivaldi",
+        executable_candidates: &["/opt/vivaldi/vivaldi"],
+    },
+];
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct BrowserSuggestion {
+    id: String,
+    family: String,
+    profile_root: String,
+    exe_paths: Vec<String>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct UnsupportedSandboxedBrowser {
+    kind: String,
+    profile_root: String,
+    reason: String,
+}
+
+#[derive(Debug, Serialize)]
+struct BrowserDiscovery {
+    browsers: Vec<BrowserSuggestion>,
+    unsupported_sandboxed: Vec<UnsupportedSandboxedBrowser>,
+}
+
+fn run_browser_discover(home: Option<&Path>) -> anyhow::Result<()> {
+    let home = match home {
+        Some(home) => home.to_path_buf(),
+        None => std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow::anyhow!("HOME is unset; pass --home PATH"))?,
+    };
+    if !home.is_dir() {
+        anyhow::bail!(
+            "home directory {} does not exist or is not a directory",
+            home.display()
+        );
+    }
+    let result = discover_browsers(&home, NATIVE_BROWSER_LAYOUTS);
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    eprintln!(
+        "guardctl: review this suggestion before copying it into config.json; \
+         configured canonical executable identity, not this command or a browser name, authorizes a browser."
+    );
+    Ok(())
+}
+
+fn discover_browsers(home: &Path, layouts: &[NativeBrowserLayout]) -> BrowserDiscovery {
+    let mut browsers = Vec::new();
+    for layout in layouts {
+        let profile_root = home.join(layout.profile_relative);
+        if !profile_root.is_dir() {
+            continue;
+        }
+        let exe_paths: Vec<String> = layout
+            .executable_candidates
+            .iter()
+            .filter_map(|candidate| canonical_executable(Path::new(candidate)))
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect();
+        if !exe_paths.is_empty() {
+            browsers.push(BrowserSuggestion {
+                id: layout.id.to_owned(),
+                family: layout.family.to_owned(),
+                profile_root: profile_root.to_string_lossy().into_owned(),
+                exe_paths,
+            });
+        }
+    }
+
+    // These paths are intentionally only reported.  The current resolver sees
+    // host `/proc/<pid>/exe`, while sandbox mount namespaces and profile mounts
+    // can present a different executable/device/inode or hide filesystem marks.
+    // Treating a desktop ID, package name, or launcher name as a substitute
+    // would violate the identity model.
+    let sandboxed = [
+        (
+            "snap-firefox",
+            home.join("snap/firefox/common/.mozilla/firefox"),
+        ),
+        (
+            "flatpak-firefox",
+            home.join(".var/app/org.mozilla.firefox/.mozilla/firefox"),
+        ),
+        (
+            "flatpak-chromium",
+            home.join(".var/app/org.chromium.Chromium/config/chromium"),
+        ),
+    ]
+    .into_iter()
+    .filter(|(_, profile_root)| profile_root.is_dir())
+    .map(|(kind, profile_root)| UnsupportedSandboxedBrowser {
+        kind: kind.to_owned(),
+        profile_root: profile_root.to_string_lossy().into_owned(),
+        reason: "sandbox namespace and filesystem-mark visibility are not security-accepted in Linux V1; use a native package".to_owned(),
+    })
+    .collect();
+
+    BrowserDiscovery {
+        browsers,
+        unsupported_sandboxed: sandboxed,
+    }
+}
+
+fn canonical_executable(path: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let metadata = std::fs::metadata(path).ok()?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+        return None;
+    }
+    std::fs::canonicalize(path).ok()
 }
 
 fn print_human(resp: &Response) {
@@ -968,6 +1172,75 @@ mod tests {
     //! integration script.
 
     use super::*;
+
+    #[test]
+    fn discovery_represents_native_firefox_and_debian_esr_without_launcher_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(home.join(".mozilla/firefox")).unwrap();
+        std::fs::create_dir_all(home.join(".mozilla/firefox-esr")).unwrap();
+        assert!(Path::new("/bin/sh").is_file());
+        let layouts = [
+            NativeBrowserLayout {
+                id: "firefox",
+                family: "Firefox",
+                profile_relative: ".mozilla/firefox",
+                executable_candidates: &["/bin/sh"],
+            },
+            NativeBrowserLayout {
+                id: "firefox-esr",
+                family: "Firefox",
+                profile_relative: ".mozilla/firefox-esr",
+                executable_candidates: &["/bin/sh"],
+            },
+        ];
+        let found = discover_browsers(&home, &layouts);
+        assert_eq!(found.browsers.len(), 2);
+        assert_eq!(found.browsers[0].id, "firefox");
+        assert_eq!(found.browsers[1].id, "firefox-esr");
+        assert_eq!(
+            found.browsers[1].profile_root,
+            home.join(".mozilla/firefox-esr").display().to_string()
+        );
+    }
+
+    #[test]
+    fn discovery_does_not_turn_a_fake_named_firefox_into_a_candidate() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(home.join(".mozilla/firefox")).unwrap();
+        let fake = temp.path().join("firefox");
+        std::fs::write(&fake, b"synthetic executable").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(Path::new("/bin/sh").is_file());
+        let layouts = [NativeBrowserLayout {
+            id: "firefox",
+            family: "Firefox",
+            profile_relative: ".mozilla/firefox",
+            executable_candidates: &["/bin/sh"],
+        }];
+
+        let found = discover_browsers(&home, &layouts);
+        assert_eq!(
+            found.browsers[0].exe_paths,
+            vec![std::fs::canonicalize("/bin/sh")
+                .unwrap()
+                .display()
+                .to_string()]
+        );
+        assert_ne!(found.browsers[0].exe_paths[0], fake.display().to_string());
+    }
+
+    #[test]
+    fn discovery_reports_sandboxed_profiles_without_emitting_a_trustable_browser() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        std::fs::create_dir_all(home.join("snap/firefox/common/.mozilla/firefox")).unwrap();
+        let found = discover_browsers(home, &[]);
+        assert!(found.browsers.is_empty());
+        assert_eq!(found.unsupported_sandboxed[0].kind, "snap-firefox");
+    }
 
     #[test]
     fn decision_short_categorizes_variants() {

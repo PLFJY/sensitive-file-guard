@@ -9,11 +9,17 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CARGO_BIN="$(command -v cargo)"
-(cd "$REPO" && "$CARGO_BIN" build -p guardd -p guardctl -p guard-test-probe)
+# Build these debug artifacts as the normal user before this root-only test.
+# The privileged assertion must not create a root Cargo cache.
 GUARDD="$REPO/target/debug/guardd"
 GUARDCTL="$REPO/target/debug/guardctl"
 PROBE="$REPO/target/debug/guard-test-probe"
+for artifact in "$GUARDD" "$GUARDCTL" "$PROBE"; do
+  [ -x "$artifact" ] || {
+    echo "ERROR: missing $artifact; run cargo build -p guardd -p guardctl -p guard-test-probe as the normal user first"
+    exit 2
+  }
+done
 
 PASS=0
 FAIL=0

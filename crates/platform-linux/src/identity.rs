@@ -28,10 +28,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use guard_core::identity::{AncestorSummary, ProcessIdentity, ProcessStableId, TrustTier};
-use guard_core::resource::BrowserId;
-
 use crate::enrollment::EnrollmentStore;
+use guard_core::identity::{AncestorSummary, ProcessIdentity, ProcessStableId, TrustTier};
 
 /// Maximum ancestor depth collected for audit context. Bounded so a pathological
 /// ancestry cannot stall the hot path.
@@ -456,23 +454,6 @@ fn stat_dev_ino(path: &Path) -> std::io::Result<(u64, u64)> {
     Ok((md.dev(), md.ino()))
 }
 
-/// Best-effort default browser classifier from exe basename. Phase 05 replaces
-/// this with the full discovery registry; kept here only so callers can wire a
-/// `BrowserId` onto a resolved identity for tests / early enforcement.
-pub fn default_browser_classifier(exe: &Path) -> Option<BrowserId> {
-    let base = exe.file_name()?.to_str()?.to_ascii_lowercase();
-    let id = match base.as_str() {
-        "chrome" | "google-chrome" | "google-chrome-stable" => "chrome",
-        "chromium" | "chromium-browser" => "chromium",
-        "brave" | "brave-browser" => "brave",
-        "microsoft-edge" | "msedge" => "edge",
-        "firefox" | "firefox-esr" => "firefox",
-        "zen-browser" | "zen" => "zen",
-        _ => return None,
-    };
-    Some(BrowserId(id.into()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -768,21 +749,5 @@ mod tests {
         // the walker must stop gracefully (no panic).
         let ancestors = collect_ancestors(2_000_000);
         assert!(ancestors.len() <= MAX_ANCESTOR_DEPTH);
-    }
-
-    #[test]
-    fn default_browser_classifier_maps_known_basenames() {
-        assert_eq!(
-            default_browser_classifier(Path::new("/usr/bin/firefox")),
-            Some(BrowserId("firefox".into()))
-        );
-        assert_eq!(
-            default_browser_classifier(Path::new("/opt/google/chrome/chrome")),
-            Some(BrowserId("chrome".into()))
-        );
-        assert_eq!(
-            default_browser_classifier(Path::new("/usr/bin/python3")),
-            None
-        );
     }
 }

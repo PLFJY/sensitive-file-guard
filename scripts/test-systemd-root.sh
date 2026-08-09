@@ -45,11 +45,13 @@ if ! command -v systemctl >/dev/null 2>&1; then
   exit 2
 fi
 
-echo "==> Building release binaries"
-cd "$REPO"
-cargo build --release 2>&1 | grep -E '(Finished|error)' || true
+echo "==> Checking unprivileged pre-built release binaries"
+# Deployment must never populate root's Cargo home. Build before invoking this
+# root-only integration script: `cargo build --release` as the desktop user.
 test -x "$REPO/target/release/guardd" || { echo "guardd build failed"; exit 1; }
 test -x "$REPO/target/release/guardctl" || { echo "guardctl build failed"; exit 1; }
+test -x "$REPO/target/release/guard-tui" || { echo "guard-tui build failed"; exit 1; }
+test -x "$REPO/target/release/guard-notify" || { echo "guard-notify build failed"; exit 1; }
 test -x "$PROBE" || { echo "guard-test-probe build failed"; exit 1; }
 
 WORK="$(mktemp -d -t guard-systemd-XXXXXX)"
@@ -103,9 +105,9 @@ CLEANUP_UNIT=true
 # Overwrite the config with our test config.
 install -m 0640 "$WORK/config.json" /etc/guardd/config.json
 if systemctl is-enabled guardd >/dev/null 2>&1; then
-  note_pass "service installed and enabled"
+  note_fail "service must not be enabled by installer before configuration review"
 else
-  note_fail "service not enabled after install"
+  note_pass "service installed but not enabled before configuration review"
 fi
 
 # ===========================================================================

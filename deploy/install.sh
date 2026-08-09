@@ -5,10 +5,10 @@
 #   sudo deploy/install.sh              # install
 #   sudo deploy/install.sh --uninstall  # uninstall
 #
-# This script copies the release binaries + systemd unit + config into
-# conventional system locations and enables the service. It does NOT start
-# the service automatically — run `systemctl start guardd` after verifying
-# the config.
+# Build as an unprivileged user first with `cargo build --release`, then run
+# this script with sudo.  It installs already-built artifacts and deliberately
+# does not enable or start the daemon: an empty strict config must be completed
+# for the intended desktop user first.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -17,8 +17,11 @@ UNIT_DST="/etc/systemd/system/guardd.service"
 GUARDD_BIN="$REPO/target/release/guardd"
 GUARDCTL_BIN="$REPO/target/release/guardctl"
 GUARD_NOTIFY_BIN="$REPO/target/release/guard-notify"
-GUARDD_DST="/usr/local/sbin/guardd"
+BIN_DIR="/usr/local/bin"
+GUARDD_DST="$BIN_DIR/guardd"
 GUARDCTL_DST="/usr/local/bin/guardctl"
+GUARD_TUI_BIN="$REPO/target/release/guard-tui"
+GUARD_TUI_DST="$BIN_DIR/guard-tui"
 GUARD_NOTIFY_DST="/usr/local/bin/guard-notify"
 NOTIFY_UNIT_SRC="$REPO/deploy/guard-notify.service"
 NOTIFY_UNIT_DST="/usr/local/lib/systemd/user/guard-notify.service"
@@ -49,8 +52,8 @@ if [ "$UNINSTALL" = true ]; then
   rm -f "$NOTIFY_UNIT_DST"
   rm -f "$POLKIT_DST"
   systemctl daemon-reload
-  rm -f "$GUARDD_DST" "$GUARDCTL_DST" "$GUARD_NOTIFY_DST"
-  echo "    Removed: $UNIT_DST, $NOTIFY_UNIT_DST, $POLKIT_DST, $GUARDD_DST, $GUARDCTL_DST, $GUARD_NOTIFY_DST"
+  rm -f "$GUARDD_DST" "$GUARDCTL_DST" "$GUARD_TUI_DST" "$GUARD_NOTIFY_DST"
+  echo "    Removed: $UNIT_DST, $NOTIFY_UNIT_DST, $POLKIT_DST, $GUARDD_DST, $GUARDCTL_DST, $GUARD_TUI_DST, $GUARD_NOTIFY_DST"
   echo "    Preserved: $CONFIG_DIR (edit to remove), $STATE_DIR (audit DB)"
   echo "==> Uninstall complete"
   exit 0
@@ -74,16 +77,23 @@ if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
   echo "    Added $SUDO_USER to $ACCESS_GROUP (log out/in before using the socket)"
 fi
 
-# 1. Build the exact checked-out source; never install stale release binaries.
-echo "    Building release binaries..."
-cd "$REPO"
-cargo build --release
+# Never compile as root: doing so pollutes root's Cargo home and makes the
+# result depend on a privileged toolchain. Refuse stale/missing artifacts.
+for artifact in "$GUARDD_BIN" "$GUARDCTL_BIN" "$GUARD_TUI_BIN" "$GUARD_NOTIFY_BIN"; do
+  if [ ! -x "$artifact" ]; then
+    echo "ERROR: missing release artifact: $artifact"
+    echo "Build first as your normal user: cargo build --release"
+    exit 2
+  fi
+done
 
-# 2. Install binaries.
+# Install binaries.
+mkdir -p "$BIN_DIR"
 install -m 0755 "$GUARDD_BIN" "$GUARDD_DST"
 install -m 0755 "$GUARDCTL_BIN" "$GUARDCTL_DST"
+install -m 0755 "$GUARD_TUI_BIN" "$GUARD_TUI_DST"
 install -m 0755 "$GUARD_NOTIFY_BIN" "$GUARD_NOTIFY_DST"
-echo "    Installed: $GUARDD_DST, $GUARDCTL_DST, $GUARD_NOTIFY_DST"
+echo "    Installed: $GUARDD_DST, $GUARDCTL_DST, $GUARD_TUI_DST, $GUARD_NOTIFY_DST"
 
 # 3. Install config (don't overwrite existing).
 mkdir -p "$CONFIG_DIR"
@@ -99,22 +109,23 @@ mkdir -p "$STATE_DIR"
 chmod 0700 "$STATE_DIR"
 echo "    Ready: $STATE_DIR (audit DB)"
 
-# 5. Install systemd unit.
-install -m 0644 "$UNIT_SRC" "$UNIT_DST"
+# Install one reviewed unit template with an installation-time absolute path.
+# This is not a runtime shell indirection and keeps source/package hardening
+# identical.
+sed "s|@GUARDD_BINDIR@|$BIN_DIR|g" "$UNIT_SRC" > "$UNIT_DST"
+chmod 0644 "$UNIT_DST"
 mkdir -p "$(dirname "$NOTIFY_UNIT_DST")"
-install -m 0644 "$NOTIFY_UNIT_SRC" "$NOTIFY_UNIT_DST"
+sed "s|@GUARDD_BINDIR@|$BIN_DIR|g" "$NOTIFY_UNIT_SRC" > "$NOTIFY_UNIT_DST"
+chmod 0644 "$NOTIFY_UNIT_DST"
 install -m 0644 "$POLKIT_SRC" "$POLKIT_DST"
 systemctl daemon-reload
 echo "    Installed: $UNIT_DST, $POLKIT_DST"
 
-# 6. Enable (but don't start — let the user verify config first).
-systemctl enable guardd
-echo "    Enabled: guardd.service (not started yet)"
-
 echo
 echo "==> Install complete. Next steps:"
-echo "    1. Edit $CONFIG_DST — set your browser profile_root + ssh_keys"
-echo "    2. Start:  sudo systemctl start guardd"
-echo "    3. Verify: guardctl status"
-echo "    4. Logs:   journalctl -u guardd -f"
-echo "    5. Desktop notifications (as your user): systemctl --user daemon-reload && systemctl --user enable --now guard-notify"
+echo "    1. Inspect browser paths: guardctl browser discover"
+echo "    2. Edit $CONFIG_DST with existing profile roots and emitted exe_paths"
+echo "    3. Optionally choose an existing key: guardctl ssh suggest"
+echo "    4. Start: sudo systemctl enable --now guardd"
+echo "    5. Verify: guardctl status"
+echo "    6. Desktop notifications (as your user): systemctl --user daemon-reload && systemctl --user enable --now guard-notify"

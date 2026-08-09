@@ -150,7 +150,13 @@ impl EnforcementEngine {
             let browser_id = BrowserId(b.id.clone());
             let owner_uid = match b.owner_uid {
                 Some(u) => u,
-                None => stat_owner(&b.profile_root).unwrap_or(0),
+                None => stat_owner(&b.profile_root).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "browser {} omits owner_uid, but profile root {} cannot be stat-ed",
+                        b.id,
+                        b.profile_root.display()
+                    )
+                })?,
             };
             let custom = CustomProfile {
                 browser: browser_id.clone(),
