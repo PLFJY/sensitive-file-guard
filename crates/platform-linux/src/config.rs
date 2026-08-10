@@ -7,6 +7,9 @@
 use std::path::{Path, PathBuf};
 
 use guard_core::resource::{BrowserFamily, BrowserId};
+use guard_core::{
+    DEFAULT_SSH_BEHAVIOR_WINDOW_SECS, MAX_SSH_BEHAVIOR_WINDOW_SECS, MIN_SSH_BEHAVIOR_WINDOW_SECS,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -46,6 +49,14 @@ pub struct EnforcementConfig {
     pub enrolled_exes: Vec<PathBuf>,
     #[serde(default)]
     pub ssh_keys: Vec<PathBuf>,
+    /// The short monotonic correlation window for SSH read-to-network
+    /// containment. Browser authorization is intentionally unaffected.
+    #[serde(default = "default_ssh_behavior_window_secs")]
+    pub ssh_behavior_window_secs: u64,
+}
+
+const fn default_ssh_behavior_window_secs() -> u64 {
+    DEFAULT_SSH_BEHAVIOR_WINDOW_SECS
 }
 
 impl EnforcementConfig {
@@ -80,6 +91,15 @@ impl EnforcementConfig {
             if !path.is_absolute() {
                 anyhow::bail!("configured path must be absolute: {}", path.display());
             }
+        }
+        if !(MIN_SSH_BEHAVIOR_WINDOW_SECS..=MAX_SSH_BEHAVIOR_WINDOW_SECS)
+            .contains(&self.ssh_behavior_window_secs)
+        {
+            anyhow::bail!(
+                "ssh_behavior_window_secs must be between {} and {}",
+                MIN_SSH_BEHAVIOR_WINDOW_SECS,
+                MAX_SSH_BEHAVIOR_WINDOW_SECS
+            );
         }
         Ok(())
     }
@@ -266,4 +286,39 @@ pub fn family_name(family: BrowserFamily) -> &'static str {
 
 pub fn browser_id(id: &str) -> BrowserId {
     BrowserId(id.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(window: u64) -> EnforcementConfig {
+        EnforcementConfig {
+            enforcement_mode: EnforcementMode::Conservative,
+            browsers: Vec::new(),
+            enrolled_exes: vec![PathBuf::from("/synthetic/exe")],
+            ssh_keys: Vec::new(),
+            ssh_behavior_window_secs: window,
+        }
+    }
+
+    #[test]
+    fn ssh_behavior_window_is_bounded() {
+        assert!(config(1).validate().is_ok());
+        assert!(config(60).validate().is_ok());
+        assert!(config(0).validate().is_err());
+        assert!(config(61).validate().is_err());
+    }
+
+    #[test]
+    fn omitted_window_deserializes_to_ten_seconds() {
+        let config: EnforcementConfig = serde_json::from_str(
+            r#"{"browsers":[],"enrolled_exes":["/synthetic/exe"],"ssh_keys":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.ssh_behavior_window_secs,
+            DEFAULT_SSH_BEHAVIOR_WINDOW_SECS
+        );
+    }
 }

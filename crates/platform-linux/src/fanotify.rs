@@ -1,4 +1,5 @@
-//! fanotify permission-event interception (`FAN_OPEN_PERM`).
+//! fanotify permission-event interception (`FAN_OPEN_PERM` and narrow
+//! `FAN_ACCESS_PERM` use for SSH keys).
 //!
 //! This module wraps the Linux fanotify UAPI:
 //! - `fanotify_init` with `FAN_CLASS_CONTENT` (permission-capable). Requires
@@ -16,9 +17,10 @@ use std::os::unix::io::RawFd;
 use std::path::Path;
 
 use libc::{
-    fanotify_event_metadata, fanotify_init, fanotify_mark, fanotify_response, AT_FDCWD, FAN_ALLOW,
-    FAN_CLASS_CONTENT, FAN_CLOEXEC, FAN_DENY, FAN_EVENT_ON_CHILD, FAN_MARK_ADD,
-    FAN_MARK_FILESYSTEM, FAN_NOFD, FAN_OPEN_PERM, FAN_Q_OVERFLOW, O_LARGEFILE, O_RDONLY,
+    fanotify_event_metadata, fanotify_init, fanotify_mark, fanotify_response, AT_FDCWD,
+    FAN_ACCESS_PERM, FAN_ALLOW, FAN_CLASS_CONTENT, FAN_CLOEXEC, FAN_DENY, FAN_EVENT_ON_CHILD,
+    FAN_MARK_ADD, FAN_MARK_FILESYSTEM, FAN_NOFD, FAN_OPEN_PERM, FAN_Q_OVERFLOW, O_LARGEFILE,
+    O_RDONLY,
 };
 
 /// Kernel UAPI version of `fanotify_event_metadata.vers`.
@@ -77,6 +79,13 @@ pub struct ParsedEvent {
 impl ParsedEvent {
     pub fn is_open_perm(&self) -> bool {
         (self.mask & FAN_OPEN_PERM) != 0
+    }
+
+    /// True for the narrow SSH read gate.  Browser resources remain on the
+    /// existing open-permission path; this must never be installed as a broad
+    /// filesystem mark because it would serialize ordinary file reads.
+    pub fn is_access_perm(&self) -> bool {
+        (self.mask & FAN_ACCESS_PERM) != 0
     }
 
     /// True if this event carries a real fd that must be responded to + closed.
@@ -300,6 +309,14 @@ mod tests {
         assert!(evs[0].is_open_perm());
         assert!(!evs[0].overflow);
         assert_eq!(evs[1].pid, 4321);
+    }
+
+    #[test]
+    fn distinguishes_narrow_access_permission_events() {
+        let buf = make_event(3, FAN_ACCESS_PERM, 100, 1234, hdr_size());
+        let event = parse_events(&buf).unwrap().pop().unwrap();
+        assert!(event.is_access_perm());
+        assert!(!event.is_open_perm());
     }
 
     #[test]

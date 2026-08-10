@@ -58,6 +58,17 @@ pub enum RequestOp {
     LeasesRevoke {
         lease_id: String,
     },
+    IncidentsList,
+    IncidentGet {
+        id: String,
+    },
+    /// Resolution is deliberately a fixed incident ID + fixed action. The
+    /// daemon applies a non-cached polkit boundary; same-UID IPC access alone
+    /// is never authority to unblock a process.
+    IncidentResolve {
+        id: String,
+        action: IncidentResolutionAction,
+    },
     ConfigCheck,
     /// Authorize a cross-browser migration access lease. The
     /// daemon binds the lease to the target browser's armed `ExeIdentity` and
@@ -71,8 +82,8 @@ pub enum RequestOp {
     },
     /// Enroll a single SSH private key at runtime (Phase 10). The daemon
     /// canonicalizes + stats `path`, refuses `.pub` / reserved names, enrolls
-    /// it as a `SshPrivateKey` resource, and adds the fanotify `FAN_OPEN_PERM`
-    /// mark so subsequent opens are intercepted. `path` is the only argument;
+    /// it as a `SshPrivateKey` resource, and adds a narrow fanotify
+    /// `FAN_ACCESS_PERM` mark so actual read attempts are intercepted. `path` is the only argument;
     /// no key contents are ever sent.
     SshProtect {
         path: String,
@@ -136,6 +147,9 @@ pub enum ResponseBody {
     Resources(Vec<ResourceInfo>),
     Browsers(Vec<BrowserInfo>),
     Events(Vec<EventInfo>),
+    Incidents(Vec<SshIncidentInfo>),
+    Incident(Box<SshIncidentInfo>),
+    IncidentResolved(SshIncidentInfo),
     // Boxed: `EventInfo` is ~328 bytes; boxing keeps the enum small on the
     // hot path (status/events queries) where this variant is never used.
     Explain(Box<EventInfo>),
@@ -153,6 +167,36 @@ pub enum ResponseBody {
     SshProtected(SshProtectedInfo),
     /// Result of `SshLoadAuthorize`: the one-shot lease id and its expiry.
     SshLoadAuthorized(SshLoadAuthorizedInfo),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IncidentResolutionAction {
+    AllowNetwork,
+    StopAndQuarantine,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SshIncidentInfo {
+    pub id: String,
+    pub uid: u32,
+    pub key_path: String,
+    pub process_exe: String,
+    pub pid: u32,
+    pub start_time: u64,
+    pub parent_pid: Option<u32>,
+    pub parent_exe: Option<String>,
+    pub first_sensitive_read_ms: u64,
+    pub last_sensitive_read_ms: u64,
+    pub observe_until_ms: u64,
+    pub state: String,
+    pub blocked_network_attempts: u64,
+    pub first_network_ms: Option<u64>,
+    pub destination_ip: Option<String>,
+    pub destination_port: Option<u16>,
+    pub protocol: Option<String>,
+    pub resolution: Option<String>,
+    pub resolution_detail: Option<String>,
 }
 
 /// Information about a successfully protected SSH private key. Contains NO key
@@ -234,6 +278,8 @@ pub struct StatusInfo {
     #[serde(default)]
     pub topology_degraded: bool,
     pub protected_files: usize,
+    #[serde(default)]
+    pub ssh_protected_keys: usize,
     pub protected_trees: usize,
     pub browsers: usize,
     pub browser_exes: usize,
@@ -242,6 +288,28 @@ pub struct StatusInfo {
     pub unclassified: u64,
     pub audit_dropped: u64,
     pub peer_uid: u32,
+    /// `ACTIVE` only after the selected kernel send hook has loaded and
+    /// attached. `UNAVAILABLE` means raw SSH reads remain fail-closed.
+    #[serde(default)]
+    pub ssh_behavior_status: String,
+    #[serde(default)]
+    pub ssh_behavior_detail: Option<String>,
+    #[serde(default)]
+    pub ssh_behavior_active_incidents: u64,
+    #[serde(default)]
+    pub ssh_behavior_pending_decisions: u64,
+    #[serde(default)]
+    pub ssh_behavior_key_reads: u64,
+    #[serde(default)]
+    pub ssh_behavior_network_blocks: u64,
+    #[serde(default)]
+    pub ssh_behavior_user_allows: u64,
+    #[serde(default)]
+    pub ssh_behavior_quarantines: u64,
+    /// Number of configured SSH behavioral backend initialization failures.
+    /// A nonzero value means raw reads remained fail-closed.
+    #[serde(default)]
+    pub ssh_behavior_backend_failures: u64,
 }
 
 fn default_enforcement_mode() -> String {
@@ -362,6 +430,14 @@ mod tests {
             RequestOp::LeasesRevoke {
                 lease_id: "7".into(),
             },
+            RequestOp::IncidentsList,
+            RequestOp::IncidentGet {
+                id: "ssh-0001".into(),
+            },
+            RequestOp::IncidentResolve {
+                id: "ssh-0001".into(),
+                action: IncidentResolutionAction::AllowNetwork,
+            },
             RequestOp::ConfigCheck,
             RequestOp::MigrationAuthorize {
                 source_browser: "chrome".into(),
@@ -411,6 +487,22 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("\"uid\""), "no uid in request: {json}");
         assert!(json.contains("\"kind\":\"migration_authorize\""));
+    }
+
+    #[test]
+    fn incident_resolution_has_only_fixed_metadata() {
+        let request = Request {
+            version: PROTOCOL_VERSION,
+            op: RequestOp::IncidentResolve {
+                id: "ssh-0001".into(),
+                action: IncidentResolutionAction::StopAndQuarantine,
+            },
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(!json.contains("\"uid\""));
+        assert!(!json.contains("\"pid\""));
+        assert!(!json.contains("\"path\""));
+        assert!(json.contains("stop_and_quarantine"));
     }
 
     #[test]
@@ -540,6 +632,16 @@ mod tests {
             unclassified: 0,
             audit_dropped: 0,
             peer_uid: 1000,
+            ssh_protected_keys: 0,
+            ssh_behavior_status: "ACTIVE".into(),
+            ssh_behavior_detail: None,
+            ssh_behavior_active_incidents: 0,
+            ssh_behavior_pending_decisions: 0,
+            ssh_behavior_key_reads: 0,
+            ssh_behavior_network_blocks: 0,
+            ssh_behavior_user_allows: 0,
+            ssh_behavior_quarantines: 0,
+            ssh_behavior_backend_failures: 0,
         }));
         let j = serde_json::to_string(&ok).unwrap();
         let back: Response = serde_json::from_str(&j).unwrap();

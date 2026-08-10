@@ -149,6 +149,22 @@ pub fn read_start_time(pid: i32) -> Result<u64, ResolveError> {
     Ok(read_stat(pid)?.0)
 }
 
+/// Read the Linux thread-group ID from `/proc/<pid>/status`. Fanotify may
+/// report a thread ID, while the BPF socket-send hook uses TGID to cover the
+/// reader's entire thread group.
+pub fn read_tgid(pid: i32) -> Result<u32, ResolveError> {
+    let status = fs::read_to_string(format!("/proc/{pid}/status"))
+        .map_err(|err| ResolveError::StatusRead { pid, err })?;
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("Tgid:\t"))
+        .and_then(|value| value.trim().parse().ok())
+        .ok_or(ResolveError::StatusParse {
+            pid,
+            reason: "missing Tgid",
+        })
+}
+
 /// Build the identity that a stopped child will have after it execs a daemon-
 /// selected executable. The child contributes only kernel-observed invocation
 /// facts (PID/start time/UID/parent); executable path and inode come from the
@@ -465,6 +481,15 @@ mod tests {
     use std::path::PathBuf;
     use std::process::{Child, Command};
     use tempfile::tempdir;
+
+    #[test]
+    fn read_tgid_returns_our_process_group() {
+        // A test thread can have a different TID, but its TGID is always the
+        // process ID exposed by getpid().
+        assert_eq!(read_tgid(unsafe { libc::getpid() }).unwrap(), unsafe {
+            libc::getpid() as u32
+        });
+    }
 
     struct ChildGuard(std::process::Child);
 

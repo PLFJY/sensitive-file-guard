@@ -59,6 +59,39 @@ pub fn leases(socket: &Path) -> anyhow::Result<Vec<guard_ipc::LeaseInfo>> {
         _ => None,
     })
 }
+pub fn incidents(socket: &Path) -> anyhow::Result<Vec<guard_ipc::SshIncidentInfo>> {
+    exchange(socket, RequestOp::IncidentsList, |body| match body {
+        ResponseBody::Incidents(value) => Some(value),
+        _ => None,
+    })
+}
+pub fn incident(socket: &Path, id: &str) -> anyhow::Result<guard_ipc::SshIncidentInfo> {
+    exchange(
+        socket,
+        RequestOp::IncidentGet { id: id.to_owned() },
+        |body| match body {
+            ResponseBody::Incident(value) => Some(*value),
+            _ => None,
+        },
+    )
+}
+pub fn resolve_incident(
+    socket: &Path,
+    id: &str,
+    action: guard_ipc::IncidentResolutionAction,
+) -> anyhow::Result<guard_ipc::SshIncidentInfo> {
+    exchange(
+        socket,
+        RequestOp::IncidentResolve {
+            id: id.to_owned(),
+            action,
+        },
+        |body| match body {
+            ResponseBody::IncidentResolved(value) => Some(value),
+            _ => None,
+        },
+    )
+}
 pub fn events(socket: &Path, limit: Option<u32>) -> anyhow::Result<Vec<guard_ipc::EventInfo>> {
     events_cursor(socket, limit, None, None)
 }

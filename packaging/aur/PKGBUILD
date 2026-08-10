@@ -7,8 +7,8 @@ pkgdesc='Pre-open local access firewall for browser authentication data and SSH 
 arch=('x86_64')
 url='https://github.com/PLFJY/sensitive-file-guard'
 license=('MIT' 'Apache-2.0')
-depends=('glibc' 'libgcc' 'polkit' 'systemd' 'gtk4' 'libadwaita')
-makedepends=('cargo' 'git' 'rust')
+depends=('glibc' 'libgcc' 'libbpf' 'polkit' 'systemd' 'gtk4' 'libadwaita')
+makedepends=('cargo' 'clang' 'git' 'rust')
 options=('!lto')
 optdepends=(
   'libnotify: desktop notifications via notify-send'

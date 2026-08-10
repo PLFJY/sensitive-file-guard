@@ -89,6 +89,13 @@ enum Command {
         #[command(subcommand)]
         action: LeasesAction,
     },
+    /// Inspect or human-authorize an SSH behavioral incident. Resolution is
+    /// always mediated by polkit; this command has no bypass flag.
+    #[command(name = "incidents")]
+    Incidents {
+        #[command(subcommand)]
+        action: IncidentsAction,
+    },
     /// Authorize a cross-browser migration lease (Phase 08).
     #[command(name = "migration")]
     Migration {
@@ -166,6 +173,14 @@ enum LeasesAction {
 }
 
 #[derive(Subcommand, Debug)]
+enum IncidentsAction {
+    List,
+    Show { id: String },
+    Allow { id: String },
+    Quarantine { id: String },
+}
+
+#[derive(Subcommand, Debug)]
 enum ConfigAction {
     /// Check configuration validity.
     Check,
@@ -200,8 +215,8 @@ enum MigrationAction {
 enum SshAction {
     /// Enroll a single SSH private key at runtime. The daemon canonicalizes +
     /// stats the path, refuses `.pub` / reserved names (known_hosts, config,
-    /// authorized_keys), and adds a `FAN_OPEN_PERM` mark so subsequent raw
-    /// reads are denied. No key contents are ever sent.
+    /// authorized_keys), and adds a narrow `FAN_ACCESS_PERM` mark so actual
+    /// raw read attempts are mediated. No key contents are ever sent.
     Protect {
         /// Path to the SSH private key (e.g. ~/.ssh/id_ed25519).
         path: PathBuf,
@@ -299,6 +314,24 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
             action: LeasesAction::Revoke { lease_id },
         } => RequestOp::LeasesRevoke {
             lease_id: lease_id.clone(),
+        },
+        Command::Incidents {
+            action: IncidentsAction::List,
+        } => RequestOp::IncidentsList,
+        Command::Incidents {
+            action: IncidentsAction::Show { id },
+        } => RequestOp::IncidentGet { id: id.clone() },
+        Command::Incidents {
+            action: IncidentsAction::Allow { id },
+        } => RequestOp::IncidentResolve {
+            id: id.clone(),
+            action: guard_ipc::IncidentResolutionAction::AllowNetwork,
+        },
+        Command::Incidents {
+            action: IncidentsAction::Quarantine { id },
+        } => RequestOp::IncidentResolve {
+            id: id.clone(),
+            action: guard_ipc::IncidentResolutionAction::StopAndQuarantine,
         },
         Command::Migration {
             action:
@@ -581,6 +614,7 @@ struct SetupConfig {
     browsers: Vec<SetupBrowserConfig>,
     enrolled_exes: Vec<String>,
     ssh_keys: Vec<String>,
+    ssh_behavior_window_secs: u64,
 }
 
 fn run_browser_discover(home: Option<&Path>) -> anyhow::Result<()> {
@@ -695,6 +729,7 @@ fn setup_config(discovery: &BrowserDiscovery) -> anyhow::Result<SetupConfig> {
         browsers,
         enrolled_exes: Vec::new(),
         ssh_keys: Vec::new(),
+        ssh_behavior_window_secs: guard_core::DEFAULT_SSH_BEHAVIOR_WINDOW_SECS,
     })
 }
 
@@ -900,6 +935,9 @@ fn print_human(resp: &Response) {
         Some(ResponseBody::Events(es)) => print_events(es),
         Some(ResponseBody::Explain(e)) => print_explain(e),
         Some(ResponseBody::Leases(ls)) => print_leases(ls),
+        Some(ResponseBody::Incidents(incidents)) => print_incidents(incidents),
+        Some(ResponseBody::Incident(incident)) => print_incident(incident),
+        Some(ResponseBody::IncidentResolved(incident)) => print_incident(incident),
         Some(ResponseBody::LeaseRevoked { lease_id, found }) => {
             if *found {
                 println!("Lease {lease_id} revoked.");
@@ -922,6 +960,7 @@ fn print_status(s: &StatusInfo) {
     println!("  required_filesystems: {}", s.required_filesystems);
     println!("  filesystem_marks_healthy: {}", s.filesystem_marks_healthy);
     println!("  protected_files : {}", s.protected_files);
+    println!("  ssh_protected_keys: {}", s.ssh_protected_keys);
     println!("  protected_trees : {}", s.protected_trees);
     println!("  browsers        : {}", s.browsers);
     println!("  browser_exes    : {}", s.browser_exes);
@@ -937,7 +976,78 @@ fn print_status(s: &StatusInfo) {
     println!("  strict_alias_matches: {}", s.strict_alias_matches);
     println!("  topology_degraded: {}", s.topology_degraded);
     println!("  audit_dropped   : {}", s.audit_dropped);
+    println!("  ssh_behavior_backend: {}", s.ssh_behavior_status);
+    if let Some(detail) = &s.ssh_behavior_detail {
+        println!("  ssh_behavior_detail: {detail}");
+    }
+    println!(
+        "  ssh_behavior_active_incidents: {}",
+        s.ssh_behavior_active_incidents
+    );
+    println!(
+        "  ssh_behavior_pending_decisions: {}",
+        s.ssh_behavior_pending_decisions
+    );
+    println!("  ssh_behavior_key_reads: {}", s.ssh_behavior_key_reads);
+    println!(
+        "  ssh_behavior_network_blocks: {}",
+        s.ssh_behavior_network_blocks
+    );
+    println!("  ssh_behavior_user_allows: {}", s.ssh_behavior_user_allows);
+    println!("  ssh_behavior_quarantines: {}", s.ssh_behavior_quarantines);
+    println!(
+        "  ssh_behavior_backend_failures: {}",
+        s.ssh_behavior_backend_failures
+    );
     println!("  peer_uid        : {}", s.peer_uid);
+}
+
+fn print_incidents(incidents: &[guard_ipc::SshIncidentInfo]) {
+    if incidents.is_empty() {
+        println!("(no SSH behavioral incidents)");
+        return;
+    }
+    println!(
+        "{:<22} {:<18} {:<10} {:<8} KEY",
+        "ID", "STATE", "PID", "BLOCKS"
+    );
+    for incident in incidents {
+        println!(
+            "{:<22} {:<18} {:<10} {:<8} {}",
+            incident.id,
+            incident.state,
+            incident.pid,
+            incident.blocked_network_attempts,
+            incident.key_path
+        );
+    }
+}
+
+fn print_incident(incident: &guard_ipc::SshIncidentInfo) {
+    println!("incident: {}", incident.id);
+    println!("  state: {}", incident.state);
+    println!(
+        "  process: {} (pid {}, start {})",
+        incident.process_exe, incident.pid, incident.start_time
+    );
+    println!("  protected key: {}", incident.key_path);
+    println!(
+        "  blocked network attempts: {}",
+        incident.blocked_network_attempts
+    );
+    if let (Some(ip), Some(port), Some(protocol)) = (
+        incident.destination_ip.as_deref(),
+        incident.destination_port,
+        incident.protocol.as_deref(),
+    ) {
+        println!("  first blocked destination: {ip}:{port} ({protocol})");
+    }
+    if let Some(resolution) = &incident.resolution {
+        println!("  resolution: {resolution}");
+    }
+    if let Some(detail) = &incident.resolution_detail {
+        println!("  result: {detail}");
+    }
 }
 
 fn print_resources(rs: &[guard_ipc::ResourceInfo]) {
@@ -1696,6 +1806,7 @@ mod tests {
         assert_eq!(value["browsers"][0]["family"], "firefox");
         assert!(value["browsers"][0].get("owner_uid").is_none());
         assert_eq!(value["ssh_keys"], serde_json::json!([]));
+        assert_eq!(value["ssh_behavior_window_secs"], 10);
     }
 
     #[test]

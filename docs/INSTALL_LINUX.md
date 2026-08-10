@@ -20,13 +20,25 @@ Never use a real Cookies database, browser secret, or SSH private key for a test
 
 | Distribution | Build dependencies | Runtime dependencies |
 | --- | --- | --- |
-| Arch | `sudo pacman -S --needed base-devel cargo rust git gtk4 libadwaita` | `sudo pacman -S --needed systemd polkit`; optional `libnotify openssh` |
-| Debian | `sudo apt install build-essential cargo rustc git pkg-config libgtk-4-dev libadwaita-1-dev` | `sudo apt install systemd polkitd`; optional `libnotify-bin openssh-client` |
-| Ubuntu | `sudo apt install build-essential cargo rustc git pkg-config libgtk-4-dev libadwaita-1-dev` | `sudo apt install systemd polkitd`; optional `libnotify-bin openssh-client` |
-| Fedora | `sudo dnf install gcc make cargo rust git gtk4-devel libadwaita-devel` | `sudo dnf install systemd polkit`; optional `libnotify openssh-clients` |
+| Arch | `sudo pacman -S --needed base-devel cargo rust git clang gtk4 libadwaita` | `sudo pacman -S --needed libbpf systemd polkit`; optional `libnotify openssh` |
+| Debian | `sudo apt install build-essential cargo rustc git clang pkg-config libbpf-dev libgtk-4-dev libadwaita-1-dev` | `sudo apt install libbpf1 systemd polkitd`; optional `libnotify-bin openssh-client` |
+| Ubuntu | `sudo apt install build-essential cargo rustc git clang pkg-config libbpf-dev libgtk-4-dev libadwaita-1-dev` | `sudo apt install libbpf1 systemd polkitd`; optional `libnotify-bin openssh-client` |
+| Fedora | `sudo dnf install gcc make cargo rust git clang libbpf-devel gtk4-devel libadwaita-devel` | `sudo dnf install libbpf systemd polkit`; optional `libnotify openssh-clients` |
 
 Current official metadata confirms Debian `polkitd` provides `pkcheck`; Arch
 and Fedora use `polkit`; Arch `libnotify` provides `notify-send`.
+
+### SSH behavioral backend compatibility
+
+The Phase 22 model requires an attached BPF LSM `socket_sendmsg` hook to block
+an actual outbound send from the reader's process tree, including a socket
+opened before the key was read. It needs an active `bpf` entry in
+`/sys/kernel/security/lsm`, kernel BTF at `/sys/kernel/btf/vmlinux`, and the
+privilege/runtime loader required to attach the program. The package needs
+libbpf at runtime and clang while building the embedded object. It leaves raw
+SSH reads fail-closed whenever loading or attachment fails. Check `guardctl
+status` for `ssh_behavior_backend`; `UNAVAILABLE` or `DEGRADED` is not
+behavioral SSH protection.
 
 `guard-ui` is an unprivileged GTK 4/libadwaita presentation and control client;
 it is not auto-started and never replaces `guardctl` for automation.
@@ -90,7 +102,7 @@ after deliberately selecting an existing suggestion; strict requires each
 configured key to exist.
 
 ```json
-{"enforcement_mode":"strict-filesystem","browsers":[{"id":"firefox","family":"Firefox","profile_root":"/home/alice/.mozilla/firefox","exe_paths":["/usr/lib/firefox/firefox"]}],"enrolled_exes":[],"ssh_keys":[]}
+{"enforcement_mode":"strict-filesystem","browsers":[{"id":"firefox","family":"Firefox","profile_root":"/home/alice/.mozilla/firefox","exe_paths":["/usr/lib/firefox/firefox"]}],"enrolled_exes":[],"ssh_keys":[],"ssh_behavior_window_secs":10}
 ```
 
 | Native form | Profile root | Final executable candidates |

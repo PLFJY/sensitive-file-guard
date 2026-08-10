@@ -23,10 +23,11 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use guard_audit::AuditStore;
+use guard_audit::{AuditRecord, AuditStore};
 use guard_ipc::{
-    ConfigCheckInfo, EventInfo, LeaseInfo, MigrationAuthorizedInfo, Response, ResponseBody,
-    SshLoadAuthorizedInfo, SshProtectedInfo, StatusInfo, MAX_REQUEST_BYTES, PROTOCOL_VERSION,
+    ConfigCheckInfo, EventInfo, IncidentResolutionAction, LeaseInfo, MigrationAuthorizedInfo,
+    Response, ResponseBody, SshIncidentInfo, SshLoadAuthorizedInfo, SshProtectedInfo, StatusInfo,
+    MAX_REQUEST_BYTES, PROTOCOL_VERSION,
 };
 use guard_ipc::{Request, RequestOp};
 use platform_linux::fanotify::FanotifyGroup;
@@ -42,7 +43,7 @@ pub struct IpcState {
     pub audit: Arc<AuditStore>,
     pub version: String,
     /// The fanotify group, shared so the `SshProtect` handler can add a
-    /// `FAN_OPEN_PERM` mark at runtime. `None` when the daemon is not running
+    /// browser `FAN_OPEN_PERM` or SSH `FAN_ACCESS_PERM` mark at runtime. `None` when the daemon is not running
     /// in enforcement mode (e.g. one-shot tests). `mark_file` takes `&self` and
     /// the kernel `fanotify_mark` syscall is thread-safe, so sharing across the
     /// IPC thread is safe.
@@ -54,6 +55,14 @@ pub struct IpcState {
     /// corresponding one-shot lease is revoked/used/expired.
     pub ssh_agent_pins: Arc<Mutex<HashMap<String, PathBuf>>>,
     pub backend_metrics: Arc<crate::strict::BackendMetrics>,
+    /// Capability/attachment state of the SSH read-to-send containment hook.
+    /// It is kept separate from fanotify health so a green browser firewall
+    /// never implies raw SSH reads are behaviorally guarded.
+    pub ssh_behavior_backend: platform_linux::ssh_behavior::SshBehaviorBackendStatus,
+    /// Present only after all BPF links have attached. This is intentionally
+    /// not exposed as a generic backend-control IPC capability.
+    pub ssh_behavior_runtime: Option<Arc<Mutex<platform_linux::ssh_behavior::SshBehaviorBackend>>>,
+    pub incidents: Arc<Mutex<guard_core::ExposureTracker>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -135,6 +144,11 @@ fn handle_request_with_connection(
         RequestOp::Explain { event_id } => handle_explain(state, creds, event_id),
         RequestOp::LeasesList => handle_leases_list(state, creds),
         RequestOp::LeasesRevoke { lease_id } => handle_leases_revoke(state, creds, lease_id),
+        RequestOp::IncidentsList => handle_incidents_list(state, creds),
+        RequestOp::IncidentGet { id } => handle_incident_get(state, creds, &id),
+        RequestOp::IncidentResolve { id, action } => {
+            handle_incident_resolve(state, creds, connection_fd, &id, action)
+        }
         RequestOp::MigrationAuthorize {
             source_browser,
             source_profile,
@@ -160,6 +174,18 @@ fn handle_request_with_connection(
 
 fn handle_status(state: &IpcState, creds: PeerCreds) -> Response {
     let engine = state.engine.lock().expect("engine mutex poisoned");
+    let incident_summary = state
+        .incidents
+        .lock()
+        .expect("incident mutex poisoned")
+        .summary();
+    let ssh_behavior_backend_failures = u64::from(
+        !state.ssh_behavior_backend.can_guard_raw_reads()
+            && engine
+                .registry()
+                .files()
+                .any(|resource| resource.kind == guard_core::ProtectedResourceKind::SshPrivateKey),
+    );
     let audit_dropped = state.audit.dropped();
     let backend = state.backend_metrics.snapshot();
     let required_filesystems = backend.marked_filesystems;
@@ -210,6 +236,11 @@ fn handle_status(state: &IpcState, creds: PeerCreds) -> Response {
         strict_alias_matches: backend.strict_alias_matches,
         topology_degraded: engine.topology_degraded,
         protected_files: engine.registry().file_count(),
+        ssh_protected_keys: engine
+            .registry()
+            .files()
+            .filter(|resource| resource.kind == guard_core::ProtectedResourceKind::SshPrivateKey)
+            .count(),
         protected_trees: engine.registry().trees().len(),
         browsers: engine.browser_config().len(),
         browser_exes: engine.browser_exe_count(),
@@ -218,6 +249,15 @@ fn handle_status(state: &IpcState, creds: PeerCreds) -> Response {
         unclassified: engine.unclassified,
         audit_dropped,
         peer_uid: creds.uid,
+        ssh_behavior_status: state.ssh_behavior_backend.label().to_owned(),
+        ssh_behavior_detail: state.ssh_behavior_backend.detail().map(str::to_owned),
+        ssh_behavior_active_incidents: incident_summary.active,
+        ssh_behavior_pending_decisions: incident_summary.pending,
+        ssh_behavior_key_reads: incident_summary.key_reads,
+        ssh_behavior_network_blocks: incident_summary.network_blocks,
+        ssh_behavior_user_allows: incident_summary.user_allows,
+        ssh_behavior_quarantines: incident_summary.quarantines,
+        ssh_behavior_backend_failures,
     };
     Response::ok(ResponseBody::Status(body))
 }
@@ -310,7 +350,7 @@ fn handle_events(
         Ok(events) => {
             let infos: Vec<EventInfo> = events
                 .iter()
-                .filter(|event| event_visible_in_build(event.record.decision))
+                .filter(|event| event_visible_in_build(event))
                 .map(event_to_info)
                 .collect();
             Response::ok(ResponseBody::Events(infos))
@@ -323,7 +363,7 @@ fn handle_explain(state: &IpcState, creds: PeerCreds, event_id: i64) -> Response
     state.audit.flush();
     match state.audit.query_event(event_id) {
         Ok(Some(ev)) => {
-            if !event_visible_in_build(ev.record.decision) {
+            if !event_visible_in_build(&ev) {
                 return Response::err("event not available");
             }
             // Authorization: non-root may only explain their own events.
@@ -337,8 +377,14 @@ fn handle_explain(state: &IpcState, creds: PeerCreds, event_id: i64) -> Response
     }
 }
 
-fn event_visible_in_build(decision: guard_core::policy::Decision) -> bool {
-    cfg!(debug_assertions) || matches!(decision, guard_core::policy::Decision::Deny(_))
+fn event_visible_in_build(event: &guard_audit::AuditEvent) -> bool {
+    cfg!(debug_assertions)
+        || matches!(event.record.decision, guard_core::policy::Decision::Deny(_))
+        || event
+            .record
+            .backend_diag
+            .starts_with("ssh_behavior_key_read;")
+        || event.record.backend_diag == "ssh_behavior_user_allow"
 }
 
 fn handle_leases_list(state: &IpcState, creds: PeerCreds) -> Response {
@@ -430,6 +476,226 @@ fn handle_leases_revoke(state: &IpcState, creds: PeerCreds, lease_id: String) ->
             }
         }
     }
+}
+
+fn handle_incidents_list(state: &IpcState, creds: PeerCreds) -> Response {
+    let incidents = state
+        .incidents
+        .lock()
+        .expect("incident mutex poisoned")
+        .incidents_for_uid(creds.uid, creds.uid == 0)
+        .iter()
+        .map(incident_to_info)
+        .collect();
+    Response::ok(ResponseBody::Incidents(incidents))
+}
+
+fn handle_incident_get(state: &IpcState, creds: PeerCreds, id: &str) -> Response {
+    let incident = state
+        .incidents
+        .lock()
+        .expect("incident mutex poisoned")
+        .incidents_for_uid(creds.uid, creds.uid == 0)
+        .into_iter()
+        .find(|incident| incident.id == id);
+    match incident {
+        Some(incident) => Response::ok(ResponseBody::Incident(Box::new(incident_to_info(
+            &incident,
+        )))),
+        None => Response::err("incident not found"),
+    }
+}
+
+fn handle_incident_resolve(
+    state: &IpcState,
+    creds: PeerCreds,
+    connection_fd: Option<RawFd>,
+    id: &str,
+    action: IncidentResolutionAction,
+) -> Response {
+    // Read and UID-check before opening a polkit prompt.  The incident ID is
+    // never a capability: the authenticated peer may only resolve its own.
+    let owned = state
+        .incidents
+        .lock()
+        .expect("incident mutex poisoned")
+        .incidents_for_uid(creds.uid, creds.uid == 0)
+        .into_iter()
+        .any(|incident| incident.id == id);
+    if !owned {
+        return Response::err("incident not found");
+    }
+    let action_name = match action {
+        IncidentResolutionAction::AllowNetwork => "allow_network",
+        IncidentResolutionAction::StopAndQuarantine => "stop_and_quarantine",
+    };
+    if let Err(error) = authorize_sensitive(
+        state,
+        creds,
+        connection_fd,
+        "org.guardd.incident-resolve",
+        &[("incident_id", id), ("resolution", action_name)],
+    ) {
+        return Response::err(error);
+    }
+    let resolution = match action {
+        IncidentResolutionAction::AllowNetwork => guard_core::IncidentResolution::AllowNetwork,
+        IncidentResolutionAction::StopAndQuarantine => {
+            guard_core::IncidentResolution::StopAndQuarantine
+        }
+    };
+    let kernel_id = match id
+        .strip_prefix("ssh-")
+        .and_then(|value| u64::from_str_radix(value, 16).ok())
+    {
+        Some(value) => value,
+        None => return Response::err("invalid incident identifier"),
+    };
+    let incident_before = match state
+        .incidents
+        .lock()
+        .expect("incident mutex poisoned")
+        .incidents_for_uid(creds.uid, creds.uid == 0)
+        .into_iter()
+        .find(|incident| incident.id == id)
+    {
+        Some(incident) if incident.state == guard_core::SshIncidentState::PendingDecision => {
+            incident
+        }
+        Some(_) => return Response::err("incident is not awaiting a decision"),
+        None => return Response::err("incident not found"),
+    };
+    let resolution_detail;
+    let backend_diag;
+    match action {
+        IncidentResolutionAction::AllowNetwork => {
+            let Some(runtime) = &state.ssh_behavior_runtime else {
+                return Response::err("SSH behavioral backend is not active");
+            };
+            if let Err(error) = runtime
+                .lock()
+                .expect("SSH behavior backend mutex poisoned")
+                .resolve(kernel_id, true)
+            {
+                return Response::err(format!("cannot allow incident networking: {error}"));
+            }
+            resolution_detail =
+                "Outbound networking was allowed for this incident process tree.".into();
+            backend_diag = "ssh_behavior_user_allow".to_owned();
+        }
+        IncidentResolutionAction::StopAndQuarantine => {
+            let Some(runtime) = &state.ssh_behavior_runtime else {
+                return Response::err("SSH behavioral backend is not active");
+            };
+            let initial = match runtime
+                .lock()
+                .expect("SSH behavior backend mutex poisoned")
+                .incident_tgids(kernel_id)
+            {
+                Ok(pids) => pids,
+                Err(error) => {
+                    return Response::err(format!("cannot inspect incident process tree: {error}"))
+                }
+            };
+            let result = platform_linux::containment::terminate_incident_tree(
+                &incident_before.root_process,
+                incident_before.uid,
+                &initial,
+                || {
+                    runtime
+                        .lock()
+                        .expect("SSH behavior backend mutex poisoned")
+                        .incident_tgids(kernel_id)
+                },
+            );
+            let result = match result {
+                Ok(result) => result,
+                Err(error) => return Response::err(format!("process containment failed: {error}")),
+            };
+            let mut quarantine = runtime.lock().expect("SSH behavior backend mutex poisoned");
+            let quarantine = incident_before.quarantine_candidate.as_ref().map_or(
+                Ok(platform_linux::quarantine::QuarantineResult::NoSafeCandidate),
+                |candidate| {
+                    platform_linux::quarantine::quarantine_candidate(
+                        candidate,
+                        incident_before.uid,
+                        id,
+                        &mut quarantine,
+                    )
+                },
+            );
+            resolution_detail = match quarantine {
+                Ok(platform_linux::quarantine::QuarantineResult::Quarantined { path, sha256 }) => format!(
+                    "Terminated {} verified incident process(es). Quarantined an attributable artifact at {}; SHA-256 {}.",
+                    result.terminated_processes,
+                    path.display(),
+                    sha256
+                ),
+                Ok(platform_linux::quarantine::QuarantineResult::NoSafeCandidate) => format!(
+                    "Terminated {} verified incident process(es). No safe quarantine target was identified.",
+                    result.terminated_processes
+                ),
+                Err(error) => format!(
+                    "Terminated {} verified incident process(es). Artifact quarantine was not completed: {error}",
+                    result.terminated_processes
+                ),
+            };
+            backend_diag = format!(
+                "ssh_behavior_stop_containment;incident={};terminated={};{}",
+                id,
+                result.terminated_processes,
+                if resolution_detail.contains("Quarantined an attributable artifact") {
+                    "quarantine=artifact"
+                } else {
+                    "quarantine=none"
+                }
+            );
+        }
+    }
+    let mut tracker = state.incidents.lock().expect("incident mutex poisoned");
+    if let Err(error) = tracker.resolve(id, resolution) {
+        return Response::err(error);
+    }
+    if let Err(error) = tracker.set_resolution_detail(id, resolution_detail) {
+        return Response::err(error);
+    }
+    let incident = tracker
+        .incidents_for_uid(creds.uid, creds.uid == 0)
+        .into_iter()
+        .find(|incident| incident.id == id)
+        .expect("resolved incident remains visible");
+    state.audit.record(AuditRecord {
+        ts_ms: crate::unix_ms(),
+        uid: incident.uid,
+        pid: incident.root_process.pid,
+        start_time: incident.root_process.start_time,
+        decision: if matches!(action, IncidentResolutionAction::AllowNetwork) {
+            guard_core::Decision::Allow
+        } else {
+            guard_core::Decision::Deny(guard_core::DenyReason::SshBehaviorNetworkBlocked)
+        },
+        deny_reason: if matches!(action, IncidentResolutionAction::AllowNetwork) {
+            None
+        } else {
+            Some(guard_core::DenyReason::SshBehaviorNetworkBlocked)
+        },
+        resource_kind: guard_core::ProtectedResourceKind::SshPrivateKey,
+        resource_browser: None,
+        resource_profile: None,
+        path: incident.key_path.to_string_lossy().into_owned(),
+        exe: incident.process_exe.to_string_lossy().into_owned(),
+        exe_owner_uid: 0,
+        trust_tier: guard_core::TrustTier::Unknown,
+        process_browser: None,
+        parent_pid: incident.parent.as_ref().map(|parent| parent.pid),
+        parent_exe: incident
+            .parent
+            .as_ref()
+            .map(|parent| parent.exe.to_string_lossy().into_owned()),
+        lease_id: None,
+        backend_diag,
+    });
+    Response::ok(ResponseBody::IncidentResolved(incident_to_info(&incident)))
 }
 
 // --- helpers ---
@@ -551,7 +817,7 @@ fn handle_ssh_protect(
     // Mark before publishing the resource. An event in the tiny interval
     // between these operations is unclassified and therefore denied; the old
     // registry-first ordering had a fail-open enrollment window.
-    if let Err(e) = group.mark_file(libc::FAN_OPEN_PERM, &res.path) {
+    if let Err(e) = group.mark_file(libc::FAN_ACCESS_PERM, &res.path) {
         return Response::err(format!(
             "ssh protect: fanotify mark failed for {}: {e}",
             res.path.display()
@@ -1036,6 +1302,44 @@ fn event_to_info(ev: &guard_audit::AuditEvent) -> EventInfo {
     }
 }
 
+fn incident_to_info(incident: &guard_core::SshExposureIncident) -> SshIncidentInfo {
+    SshIncidentInfo {
+        id: incident.id.clone(),
+        uid: incident.uid,
+        key_path: incident.key_path.to_string_lossy().into_owned(),
+        process_exe: incident.process_exe.to_string_lossy().into_owned(),
+        pid: incident.root_process.pid,
+        start_time: incident.root_process.start_time,
+        parent_pid: incident.parent.as_ref().map(|parent| parent.pid),
+        parent_exe: incident
+            .parent
+            .as_ref()
+            .map(|parent| parent.exe.to_string_lossy().into_owned()),
+        first_sensitive_read_ms: incident.first_sensitive_read_ms,
+        last_sensitive_read_ms: incident.last_sensitive_read_ms,
+        observe_until_ms: incident.observe_until_ms,
+        state: format!("{:?}", incident.state),
+        blocked_network_attempts: incident.blocked_network_attempts,
+        first_network_ms: incident.first_network_ms,
+        destination_ip: incident
+            .destination
+            .as_ref()
+            .map(|destination| destination.ip.clone()),
+        destination_port: incident
+            .destination
+            .as_ref()
+            .map(|destination| destination.port),
+        protocol: incident
+            .destination
+            .as_ref()
+            .map(|destination| destination.protocol.clone()),
+        resolution: incident
+            .resolution
+            .map(|resolution| format!("{:?}", resolution)),
+        resolution_detail: incident.resolution_detail.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! IPC handler tests. No root required: the engine + audit store are
@@ -1178,6 +1482,7 @@ mod tests {
             }],
             enrolled_exes: vec![],
             ssh_keys: vec![],
+            ssh_behavior_window_secs: guard_core::DEFAULT_SSH_BEHAVIOR_WINDOW_SECS,
         };
         let engine = EnforcementEngine::from_config(&cfg).unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
@@ -1192,6 +1497,9 @@ mod tests {
             backend_metrics: Arc::new(crate::strict::BackendMetrics::new(
                 EnforcementMode::Conservative,
             )),
+            ssh_behavior_backend: platform_linux::ssh_behavior::SshBehaviorBackendStatus::Active,
+            ssh_behavior_runtime: None,
+            incidents: Arc::new(Mutex::new(guard_core::ExposureTracker::default())),
         };
         (state, (p.root, audit_dir))
     }
@@ -1640,6 +1948,7 @@ mod tests {
             ],
             enrolled_exes: vec![],
             ssh_keys: vec![],
+            ssh_behavior_window_secs: guard_core::DEFAULT_SSH_BEHAVIOR_WINDOW_SECS,
         };
         let engine = EnforcementEngine::from_config(&cfg).unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
@@ -1654,6 +1963,9 @@ mod tests {
             backend_metrics: Arc::new(crate::strict::BackendMetrics::new(
                 EnforcementMode::Conservative,
             )),
+            ssh_behavior_backend: platform_linux::ssh_behavior::SshBehaviorBackendStatus::Active,
+            ssh_behavior_runtime: None,
+            incidents: Arc::new(Mutex::new(guard_core::ExposureTracker::default())),
         };
         (state, (chrome_p.root, ff_p.root, audit_dir))
     }
@@ -1988,6 +2300,9 @@ mod tests {
             authorization: SensitiveAuthorization::AllowForTests,
             ssh_agent_pins: Arc::clone(&state.ssh_agent_pins),
             backend_metrics: Arc::clone(&state.backend_metrics),
+            ssh_behavior_backend: platform_linux::ssh_behavior::SshBehaviorBackendStatus::Active,
+            ssh_behavior_runtime: None,
+            incidents: Arc::clone(&state.incidents),
         };
         let sock_path = sock.clone();
         let server_handle = thread::spawn(move || {
@@ -2071,6 +2386,9 @@ mod tests {
             authorization: SensitiveAuthorization::AllowForTests,
             ssh_agent_pins: Arc::clone(&state.ssh_agent_pins),
             backend_metrics: Arc::clone(&state.backend_metrics),
+            ssh_behavior_backend: platform_linux::ssh_behavior::SshBehaviorBackendStatus::Active,
+            ssh_behavior_runtime: None,
+            incidents: Arc::clone(&state.incidents),
         };
         let sock_path = sock.clone();
         let server_handle = thread::spawn(move || {
@@ -2145,6 +2463,9 @@ mod tests {
             authorization: SensitiveAuthorization::AllowForTests,
             ssh_agent_pins: Arc::clone(&state.ssh_agent_pins),
             backend_metrics: Arc::clone(&state.backend_metrics),
+            ssh_behavior_backend: platform_linux::ssh_behavior::SshBehaviorBackendStatus::Active,
+            ssh_behavior_runtime: None,
+            incidents: Arc::clone(&state.incidents),
         };
         let sock_path = sock.clone();
         let server_handle = thread::spawn(move || {

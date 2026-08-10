@@ -27,7 +27,7 @@
 use std::collections::HashMap;
 use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use guard_audit::AuditRecord;
@@ -42,6 +42,14 @@ pub use platform_linux::config::{BrowserEnrollmentConfig, EnforcementConfig, Enf
 use platform_linux::enrollment::EnrollmentStore;
 use platform_linux::fanotify;
 use platform_linux::identity as linux_identity;
+
+/// Live dependencies required for an ordinary raw SSH key read to become a
+/// short-lived, kernel-enforced behavioral exposure.
+pub struct SshBehaviorGuard<'a> {
+    pub backend: &'a Mutex<platform_linux::ssh_behavior::SshBehaviorBackend>,
+    pub incidents: &'a Mutex<guard_core::ExposureTracker>,
+    pub window_secs: u64,
+}
 
 /// Default migration lease duration (10 minutes), per `08_MIGRATION_LEASE.md`.
 pub const DEFAULT_MIGRATION_DURATION_SECS: u64 = 600;
@@ -341,12 +349,36 @@ impl EnforcementEngine {
         Ok((id, expires_at))
     }
 
-    /// Mark all protected concrete critical files with `FAN_OPEN_PERM`. The
-    /// kernel mark is inode-based, so hardlinks to the same inode also fire.
+    /// Mark protected concrete files. Browser resources retain the existing
+    /// `FAN_OPEN_PERM` policy boundary; SSH private keys alone use
+    /// `FAN_ACCESS_PERM`, which corresponds to an actual read request and does
+    /// not impose a permission round trip on unrelated filesystem activity.
     pub fn mark_files(&self, group: &fanotify::FanotifyGroup) -> std::io::Result<usize> {
         let mut n = 0;
         for res in self.registry.files() {
-            group.mark_file(libc::FAN_OPEN_PERM, &res.path)?;
+            let mask = if res.kind == ProtectedResourceKind::SshPrivateKey {
+                libc::FAN_ACCESS_PERM
+            } else {
+                libc::FAN_OPEN_PERM
+            };
+            group.mark_file(mask, &res.path)?;
+            n += 1;
+        }
+        Ok(n)
+    }
+
+    /// Install exact-file SSH read marks in Strict mode, whose filesystem-wide
+    /// open marks intentionally remain browser-focused.  The duplicate inode
+    /// mark is small and is re-applied after topology refresh so a replaced
+    /// runtime-enrolled key cannot silently lose its narrow read mediation.
+    pub fn mark_ssh_read_files(&self, group: &fanotify::FanotifyGroup) -> std::io::Result<usize> {
+        let mut n = 0;
+        for resource in self
+            .registry
+            .files()
+            .filter(|resource| resource.kind == ProtectedResourceKind::SshPrivateKey)
+        {
+            group.mark_file(libc::FAN_ACCESS_PERM, &resource.path)?;
             n += 1;
         }
         Ok(n)
@@ -460,7 +492,20 @@ impl EnforcementEngine {
     /// caller persists records non-blocking via `AuditStore::record`.
     /// Unclassified opens (not a protected resource) are not audited — they are
     /// tracked by the `unclassified` counter only.
+    #[cfg(test)]
     pub fn decide_with_context(&mut self, pid: i32, fd: RawFd) -> (Decision, Option<AuditRecord>) {
+        self.decide_with_behavior(pid, fd, None)
+    }
+
+    /// Variant used by the daemon for an exact SSH `FAN_ACCESS_PERM` event
+    /// after the BPF LSM backend attached. All other resources preserve the
+    /// ordinary browser authorization path.
+    pub fn decide_with_behavior(
+        &mut self,
+        pid: i32,
+        fd: RawFd,
+        behavior: Option<&SshBehaviorGuard<'_>>,
+    ) -> (Decision, Option<AuditRecord>) {
         let resource = match self.classify_fd(fd) {
             Some(r) => r,
             None => {
@@ -468,17 +513,19 @@ impl EnforcementEngine {
                 return (Decision::Deny(DenyReason::UnknownProcess), None);
             }
         };
-        self.decide_protected_with_context(pid, resource, classify_diag(fd))
+        self.decide_protected_with_behavior(pid, resource, classify_diag(fd), behavior)
     }
 
-    /// Apply the existing policy to a resource already identified by Strict
-    /// Mode's filesystem-event classifier. Unrelated filesystem opens never
-    /// call this function and therefore avoid process resolution entirely.
-    pub fn decide_protected_with_context(
+    /// Like `decide_protected_with_context`, but permits an ordinary raw SSH
+    /// read only after the caller-supplied BPF send backend has installed the
+    /// exact process-tree exposure state. This ordering is the Phase 22
+    /// invariant: arm first, then return FAN_ALLOW.
+    pub fn decide_protected_with_behavior(
         &mut self,
         pid: i32,
         resource: ProtectedResource,
         classification: &'static str,
+        behavior: Option<&SshBehaviorGuard<'_>>,
     ) -> (Decision, Option<AuditRecord>) {
         let (process, resolve_diag) = match self.resolve_process(pid) {
             Some((id, diag)) => (id, diag),
@@ -522,6 +569,11 @@ impl EnforcementEngine {
                 }
             }
         }
+        if matches!(decision, Decision::Deny(DenyReason::SshPrivateKeyRawRead)) {
+            if let Some(behavior) = behavior {
+                decision = self.arm_ssh_behavior(&resource, &process, pid, behavior);
+            }
+        }
         match decision {
             Decision::Allow | Decision::AllowByLease(_) => self.allowed += 1,
             Decision::Deny(_) => self.denied += 1,
@@ -558,6 +610,65 @@ impl EnforcementEngine {
             None
         };
         (decision, record)
+    }
+
+    fn arm_ssh_behavior(
+        &mut self,
+        resource: &ProtectedResource,
+        process: &ProcessIdentity,
+        pid: i32,
+        behavior: &SshBehaviorGuard<'_>,
+    ) -> Decision {
+        let tgid = match linux_identity::read_tgid(pid) {
+            Ok(tgid) => tgid,
+            Err(error) => {
+                tracing::error!(pid, %error, "cannot resolve reader thread group for SSH containment");
+                return Decision::Deny(DenyReason::SshBehaviorBackendUnavailable);
+            }
+        };
+        let now_ns = monotonic_ns();
+        let now_ms = now_ns / 1_000_000;
+        let quarantine_candidate = platform_linux::quarantine::candidate_for_process(process);
+        let (incident, newly_created) = behavior
+            .incidents
+            .lock()
+            .expect("incident mutex poisoned")
+            .arm(
+                resource,
+                process,
+                quarantine_candidate,
+                tgid,
+                now_ms,
+                behavior.window_secs,
+            );
+        let incident_id = match incident
+            .id
+            .strip_prefix("ssh-")
+            .and_then(|value| u64::from_str_radix(value, 16).ok())
+        {
+            Some(id) => id,
+            None => return Decision::Deny(DenyReason::SshBehaviorBackendUnavailable),
+        };
+        let until = now_ns.saturating_add(behavior.window_secs.saturating_mul(1_000_000_000));
+        match behavior
+            .backend
+            .lock()
+            .expect("SSH behavior backend mutex poisoned")
+            .arm(tgid, incident_id, process.uid, until)
+        {
+            Ok(()) => Decision::Allow,
+            Err(error) => {
+                if newly_created {
+                    behavior
+                        .incidents
+                        .lock()
+                        .expect("incident mutex poisoned")
+                        .discard_unarmed(&incident.id);
+                }
+                tracing::error!(pid, tgid, incident_id, %error, "cannot arm SSH send containment");
+                Decision::Deny(DenyReason::SshBehaviorBackendUnavailable)
+            }
+        }
     }
 
     /// Bind an armed migration lease to the first matching target process and
@@ -751,6 +862,24 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Matches BPF's `bpf_ktime_get_ns()` clock. Failure is represented as zero,
+/// which fails closed because an observing deadline then expires immediately
+/// in the BPF program instead of accidentally extending a grant.
+pub(crate) fn monotonic_ns() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: ts points to initialized writable storage and CLOCK_MONOTONIC
+    // has no caller-controlled pointers.
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } != 0 {
+        return 0;
+    }
+    (ts.tv_sec as u64)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(ts.tv_nsec as u64)
+}
+
 /// Build an `AuditRecord` from the decision context. `process` is `None` when
 /// identity resolution failed (the record still captures the resource + pid).
 /// No secret contents are stored — only paths and metadata.
@@ -889,6 +1018,7 @@ mod tests {
             browsers: vec![b],
             enrolled_exes: vec![],
             ssh_keys: vec![],
+            ssh_behavior_window_secs: guard_core::DEFAULT_SSH_BEHAVIOR_WINDOW_SECS,
         }
     }
 
@@ -919,6 +1049,7 @@ mod tests {
             ],
             enrolled_exes: vec![],
             ssh_keys: vec![],
+            ssh_behavior_window_secs: guard_core::DEFAULT_SSH_BEHAVIOR_WINDOW_SECS,
         }
     }
 
@@ -1231,6 +1362,7 @@ mod tests {
             ],
             enrolled_exes: vec![ff_exe.to_path_buf()],
             ssh_keys: vec![],
+            ssh_behavior_window_secs: guard_core::DEFAULT_SSH_BEHAVIOR_WINDOW_SECS,
         }
     }
 
@@ -1456,6 +1588,7 @@ mod tests {
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![ssh_key.to_path_buf()],
+            ssh_behavior_window_secs: guard_core::DEFAULT_SSH_BEHAVIOR_WINDOW_SECS,
         }
     }
 
@@ -1479,6 +1612,7 @@ mod tests {
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![],
+            ssh_behavior_window_secs: guard_core::DEFAULT_SSH_BEHAVIOR_WINDOW_SECS,
         };
         let mut engine = EnforcementEngine::from_config(&cfg).expect("engine");
         let res = engine.protect_ssh_key(&s.private_key).expect("protect");
@@ -1497,6 +1631,7 @@ mod tests {
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![],
+            ssh_behavior_window_secs: guard_core::DEFAULT_SSH_BEHAVIOR_WINDOW_SECS,
         };
         let mut engine = EnforcementEngine::from_config(&cfg).expect("engine");
         let err = engine.protect_ssh_key(&s.public_key).unwrap_err();
@@ -1511,6 +1646,7 @@ mod tests {
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![],
+            ssh_behavior_window_secs: guard_core::DEFAULT_SSH_BEHAVIOR_WINDOW_SECS,
         };
         let mut engine = EnforcementEngine::from_config(&cfg).expect("engine");
         let err = engine.protect_ssh_key(&s.known_hosts).unwrap_err();
@@ -1821,6 +1957,7 @@ mod tests {
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![],
+            ssh_behavior_window_secs: guard_core::DEFAULT_SSH_BEHAVIOR_WINDOW_SECS,
         };
         let mut engine = EnforcementEngine::from_config(&cfg).expect("engine");
         let my_uid = unsafe { libc::getuid() };
@@ -1966,6 +2103,7 @@ mod tests {
             }],
             enrolled_exes: vec![],
             ssh_keys: vec![],
+            ssh_behavior_window_secs: guard_core::DEFAULT_SSH_BEHAVIOR_WINDOW_SECS,
         };
         let engine = EnforcementEngine::from_config(&cfg).expect("engine");
 

@@ -36,20 +36,24 @@ fn main() -> ExitCode {
                 let newest = events.last().map(|event| event.id);
                 if let Some(previous) = last_seen {
                     let now_ms = unix_ms();
-                    for event in events
-                        .iter()
-                        .filter(|event| event.id > previous && event.decision.contains("Deny"))
-                    {
+                    for event in events.iter().filter(|event| {
+                        event.id > previous
+                            && (event.decision.contains("Deny")
+                                || event.backend_diag.starts_with("ssh_behavior_key_read;"))
+                    }) {
                         if !should_notify(&mut last_notified, event, now_ms) {
                             continue;
                         }
-                        let (summary, body) = notification_text(event);
-                        if let Err(error) = notify(&summary, &body) {
+                        let (summary, body, urgency) = notification_text(event);
+                        if let Err(error) = notify(&summary, &body, urgency) {
                             eprintln!("guard-notify: desktop notification failed: {error}");
                         } else {
                             // Event IDs are safe metadata and give the acceptance
                             // harness an unambiguous delivery acknowledgement.
                             eprintln!("guard-notify: delivered event_id={}", event.id);
+                        }
+                        if event.reason_code.as_deref() == Some("ssh_behavior_network_blocked") {
+                            activate_guard_ui();
                         }
                     }
                     if let Some(newest) = newest {
@@ -123,7 +127,7 @@ fn fetch_events(socket: &Path) -> Result<Vec<EventInfo>, String> {
     }
 }
 
-fn notification_text(event: &EventInfo) -> (String, String) {
+fn notification_text(event: &EventInfo) -> (String, String, &'static str) {
     let exe = Path::new(&event.exe)
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -134,6 +138,25 @@ fn notification_text(event: &EventInfo) -> (String, String) {
             format!(
                 "{exe} attempted to access protected browser data. Authorize a temporary migration access lease if this was intentional."
             ),
+            "normal",
+        );
+    }
+    if event.reason_code.as_deref() == Some("ssh_behavior_network_blocked") {
+        return (
+            "Sensitive-key network activity blocked".into(),
+            format!(
+                "A process that recently read a protected SSH private key attempted outbound network activity. Process: {exe}."
+            ),
+            "critical",
+        );
+    }
+    if event.backend_diag.starts_with("ssh_behavior_key_read;") {
+        return (
+            "SSH private key accessed".into(),
+            format!(
+                "{exe} read a protected SSH private key. Network activity from this process will be watched briefly."
+            ),
+            "normal",
         );
     }
     (
@@ -142,14 +165,15 @@ fn notification_text(event: &EventInfo) -> (String, String) {
             "{exe} attempted to access {}. Access was denied.",
             event.resource_kind_code
         ),
+        "normal",
     )
 }
 
-fn notify(summary: &str, body: &str) -> std::io::Result<()> {
+fn notify(summary: &str, body: &str, urgency: &str) -> std::io::Result<()> {
     let output = Command::new("notify-send")
         .args([
             "--app-name=guardd",
-            "--urgency=normal",
+            &format!("--urgency={urgency}"),
             "--icon=security-medium",
             summary,
             body,
@@ -167,6 +191,19 @@ fn notify(summary: &str, body: &str) -> std::io::Result<()> {
             output.status,
             stderr.trim()
         )))
+    }
+}
+
+fn activate_guard_ui() {
+    // The UI remains an unprivileged presenter: it polls the authenticated
+    // incident API and asks guardd to cross polkit for any resolution.
+    if let Err(error) = Command::new("guard-ui")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        eprintln!("guard-notify: could not activate guard-ui: {error}");
     }
 }
 

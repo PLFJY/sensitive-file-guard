@@ -6,12 +6,18 @@
 //! root or any OS interception layer.
 
 pub mod identity;
+pub mod incident;
 pub mod lease;
 pub mod logging;
 pub mod policy;
 pub mod resource;
 
 pub use identity::{AncestorSummary, ProcessIdentity, ProcessStableId, StableIdentity, TrustTier};
+pub use incident::{
+    ExposureSummary, ExposureTracker, IncidentResolution, NetworkDecision, NetworkDestination,
+    QuarantineCandidate, QuarantineCandidateKind, SshExposureIncident, SshIncidentState,
+    DEFAULT_SSH_BEHAVIOR_WINDOW_SECS, MAX_SSH_BEHAVIOR_WINDOW_SECS, MIN_SSH_BEHAVIOR_WINDOW_SECS,
+};
 pub use lease::{LeaseId, LeaseSet, MigrationAccessLease, MigrationLeaseState, SshLoadLease};
 pub use logging::init_logging;
 pub use policy::{evaluate, AccessEvent, AccessOperation, Decision, DenyReason};

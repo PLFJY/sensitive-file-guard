@@ -10,7 +10,8 @@ A narrow local capability firewall for sensitive files. It prevents
 unauthorized local processes from reading protected local secrets **before**
 the protected file is successfully opened.
 
-> Core principle: **Prevent access, not exfiltration.**
+> Core principle: **Prevent browser-secret access. SSH behavioral containment
+> is capability-gated and does not claim payload provenance.**
 
 ## ⚠️ Do not test on real secrets
 
@@ -25,8 +26,10 @@ AF_UNIX socket below its disposable test directory.
 1. Browser authentication/session data: cookies + sidecars, session data,
    browser key material, selected Local/Session Storage and IndexedDB trees,
    saved-login databases (secondary priority).
-2. SSH private keys: raw private-key bytes are normally unreadable to ordinary
-   applications; normal SSH/Git workflows should use `ssh-agent`.
+2. SSH private keys: the existing hardened `ssh-agent` path remains supported.
+   Phase 22 adds narrow read-attempt mediation and a bounded incident model for
+   a future BPF-LSM send hook. On a host without an attached compatible hook,
+   raw reads remain fail-closed rather than being allowed unguarded.
 
 ## Threat model
 
@@ -172,6 +175,28 @@ protected/allowed/denied counts, queue overflows, audit
 drops, classifier failures, topology health, and hardlink-alias scans. Strict
 startup fails instead of reporting ACTIVE if any required profile/key
 filesystem cannot be marked.
+
+### SSH behavioral-containment capability
+
+Browser secrets remain a pre-access firewall: unauthorized access is denied.
+SSH has a separate, deliberately modest planned path: an actual private-key
+read arms one exact process tree for `ssh_behavior_window_secs` (default 10,
+range 1–60 seconds); an actual external send during that interval is to be
+blocked before egress and presented as an incident. It is a temporal
+correlation, not a claim that the payload is the key.
+
+The selected Linux hook is BPF LSM `socket_sendmsg`, because connect-only and
+cgroup-egress designs do not provide the required current-task coverage for a
+socket opened before the read. The daemon builds and loads this hook through
+libbpf, then exposes `ssh_behavior_backend` in `guardctl status`. It
+deliberately reports `UNAVAILABLE` and retains raw-key denial unless every
+required hook attached; do not interpret an otherwise ACTIVE browser firewall
+as behavioral SSH containment. `guardctl incidents list|show ID|allow ID|
+quarantine ID` is the typed CLI surface; resolution has a non-cached polkit
+boundary and no bypass flag. Stop & Quarantine first performs pidfd-based
+process containment for the verified incident tree. The result explicitly
+reports that no file was quarantined until the separate TOCTOU-safe
+file-quarantine transaction is available.
 
 ## Logs
 

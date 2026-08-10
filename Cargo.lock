@@ -833,6 +833,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "guard-core",
  "guard-ipc",
  "guard-ssh",
  "libc",
@@ -1182,6 +1183,7 @@ dependencies = [
  "guard-core",
  "libc",
  "serde",
+ "serde_json",
  "sha2",
  "tempfile",
  "thiserror",

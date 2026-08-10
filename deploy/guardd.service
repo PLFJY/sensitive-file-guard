@@ -86,6 +86,11 @@ CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_KILL CAP_DAC_READ_SEARCH 
 
 # Resource limits: the daemon is lightweight but handle burst load.
 LimitNOFILE=4096
+# libbpf loads the bounded exposure/ring-buffer maps before the first raw SSH
+# read can be allowed. Set this in systemd (rather than relying on libbpf to
+# raise it at runtime) so a privileged daemon cannot silently fall back to an
+# unguarded read path on a low-memlock host.
+LimitMEMLOCK=infinity
 MemoryMax=256M
 
 # Standard I/O: log to journald.

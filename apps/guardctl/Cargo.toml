@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 guard-ipc.workspace = true
+guard-core.workspace = true
 guard-ssh.workspace = true
 platform-linux.workspace = true
 anyhow.workspace = true

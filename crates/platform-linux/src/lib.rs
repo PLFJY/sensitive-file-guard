@@ -6,10 +6,13 @@
 
 pub mod capability;
 pub mod config;
+pub mod containment;
 pub mod enrollment;
 pub mod fanotify;
 pub mod identity;
 pub mod ipc;
 pub mod proc;
+pub mod quarantine;
 pub mod signal;
+pub mod ssh_behavior;
 pub mod topology;

@@ -11,10 +11,19 @@ its replacement race remained readable in 10,000/10,000 iterations.
 
 ## Mission
 
-Prevent unauthorized local processes from reading protected local secrets —
-browser session/auth data (cookies, session stores, saved credentials, key
-material) and SSH private keys — **before** the protected file is successfully
-opened. This is an access firewall, not an antivirus, EDR, or DLP.
+Prevent unauthorized local processes from reading protected browser-session
+data **before** access and protect SSH keys through a separate, capability-
+gated model. This is not an antivirus, EDR, DLP, or payload-inspection product.
+
+Browser resources remain denied before access. SSH private keys use an exact
+`FAN_ACCESS_PERM` file mark so the daemon observes an actual read request,
+rather than adding filesystem-wide read mediation. A valid `SshLoadLease`
+still authorizes the brokered `ssh-add` read. Ordinary raw reads are allowed
+only when a BPF LSM send hook is loaded before the fanotify allow response; if
+that backend is unavailable, they remain denied with no misleading ACTIVE
+claim. The current source tree builds and embeds a BPF LSM program, but it
+reports ACTIVE only after libbpf has successfully loaded and attached every
+required hook at daemon startup.
 
 ## Guarantees
 
@@ -183,6 +192,7 @@ mode is `0660 root:guardd-users`; every connection gets kernel credentials from
 | `SshProtect` | root or `stat`-verified file owner; canonical regular-file candidate, name, owner, and successful fanotify mark checked | adds protection but no read capability; polkit for non-root |
 | `SshLoadAuthorize` | protected key owner; direct stopped child and trusted `ssh-add`; verified/pinned trusted `ssh-agent`; all kernel facts rechecked after authorization | grants one matching open for 30 seconds; polkit for non-root |
 | `LeasesRevoke` | lease owner or root; ownership comes from daemon state | removes privilege; no polkit, and cross-user revocation is denied |
+| `IncidentResolve` | incident owner or root may locate the exact ID; daemon then rechecks the peer's live PID/start token | fixed `AllowNetwork` or `StopAndQuarantine` action only, crossing non-cached `org.guardd.incident-resolve` polkit authorization |
 
 Polkit process subjects include PID, start time, and UID. While `pkcheck` is
 pending, guardd monitors the IPC process's start token and the accepted socket;
@@ -225,15 +235,21 @@ depending on agent and key constraints. V1 mediates raw private-key file
 access; it does not mediate agent signing authority. Users can mitigate with
 `ssh-add -c` (confirmation) or `ssh-add -t` (lifetime).
 
-### 5. Not a DLP / network exfiltration blocker
-The firewall prevents local file reads. It does not inspect or block network
-traffic. A process that already has a secret in memory (legitimately or via a
-pre-open fd) can exfiltrate it over the network.
+### 5. SSH behavioral model limits
+Even on a future compatible BPF-LSM deployment, the model is only: protected
+SSH-key read + short (default 10-second) window + same process/future child
+actual external send. It does not prove that any attempted payload is a key,
+inspect TLS/plaintext, or provide full taint tracking. Deliberate bypasses
+outside this V1 scope include sleeping past the window, arbitrary IPC or
+shared-memory transfer to an already-running process, local temporary-file
+handoff, root/kernel compromise, and untested exotic send paths. Loopback/local
+IPC is not the target.
 
 ### 6. Not an antivirus / EDR
-The firewall does not scan file contents for malware, does not quarantine
-files, and does not maintain reputation databases. It enforces an access
-policy on a fixed set of protected paths.
+The firewall does not scan file contents for malware or maintain reputation
+databases. Its SSH incident response may quarantine only a narrowly verified,
+attributable direct executable or explicit script argument; it is not a
+general-purpose malware quarantine engine.
 
 ### 7. Migration access is not read-only on fanotify
 The fanotify event fd uses the flags selected by `fanotify_init`; `F_GETFL` on

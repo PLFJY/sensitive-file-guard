@@ -417,6 +417,8 @@ fn deny_reason_str(r: DenyReason) -> &'static str {
         DenyReason::WrongUid => "wrong_uid",
         DenyReason::IdentityMismatch => "identity_mismatch",
         DenyReason::OneShotLeaseUsed => "one_shot_lease_used",
+        DenyReason::SshBehaviorBackendUnavailable => "ssh_behavior_backend_unavailable",
+        DenyReason::SshBehaviorNetworkBlocked => "ssh_behavior_network_blocked",
     }
 }
 fn parse_deny_reason(s: String) -> DenyReason {
@@ -431,6 +433,8 @@ fn parse_deny_reason(s: String) -> DenyReason {
         "wrong_uid" => DenyReason::WrongUid,
         "identity_mismatch" => DenyReason::IdentityMismatch,
         "one_shot_lease_used" => DenyReason::OneShotLeaseUsed,
+        "ssh_behavior_backend_unavailable" => DenyReason::SshBehaviorBackendUnavailable,
+        "ssh_behavior_network_blocked" => DenyReason::SshBehaviorNetworkBlocked,
         _ => DenyReason::UnknownProcess,
     }
 }

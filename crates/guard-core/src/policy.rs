@@ -43,6 +43,12 @@ pub enum DenyReason {
     WrongUid,
     IdentityMismatch,
     OneShotLeaseUsed,
+    /// The BPF send hook was not attached, so allowing a raw SSH read would
+    /// violate the behavioral guard's arm-before-allow invariant.
+    SshBehaviorBackendUnavailable,
+    /// An actual outbound send was blocked after a protected SSH-key read.
+    /// This does not assert anything about the payload's provenance.
+    SshBehaviorNetworkBlocked,
 }
 
 impl DenyReason {
@@ -73,6 +79,8 @@ impl DenyReason {
             Self::IdentityMismatch => "identity_mismatch",
             // The one-shot SshLoadLease was already consumed.
             Self::OneShotLeaseUsed => "one_shot_lease_used",
+            Self::SshBehaviorBackendUnavailable => "ssh_behavior_backend_unavailable",
+            Self::SshBehaviorNetworkBlocked => "ssh_behavior_network_blocked",
         }
     }
 }
@@ -978,6 +986,8 @@ mod tests {
             DenyReason::WrongUid,
             DenyReason::IdentityMismatch,
             DenyReason::OneShotLeaseUsed,
+            DenyReason::SshBehaviorBackendUnavailable,
+            DenyReason::SshBehaviorNetworkBlocked,
         ]
         .iter()
         .map(|r| r.reason_code())

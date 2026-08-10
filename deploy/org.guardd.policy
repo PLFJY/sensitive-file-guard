@@ -36,6 +36,18 @@
     </defaults>
   </action>
 
+  <action id="org.guardd.incident-resolve">
+    <description>Resolve blocked sensitive-key network activity</description>
+    <message>Authentication is required to $(resolution) incident $(incident_id)</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <!-- Never cache this decision: a same-UID malicious process must not
+           reuse a prior authorization to unblock itself. -->
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+  </action>
+
   <action id="org.guardd.control">
     <description>Change Sensitive File Guard service or configuration</description>
     <message>Authentication is required to change local protection</message>

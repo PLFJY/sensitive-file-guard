@@ -165,6 +165,7 @@ fn tui_client_status_round_trip() {
             strict_alias_matches: 0,
             topology_degraded: false,
             protected_files: 6,
+            ssh_protected_keys: 0,
             protected_trees: 2,
             browsers: 1,
             browser_exes: 1,
@@ -173,6 +174,15 @@ fn tui_client_status_round_trip() {
             unclassified: 0,
             audit_dropped: 0,
             peer_uid: 1000,
+            ssh_behavior_status: "ACTIVE".into(),
+            ssh_behavior_detail: None,
+            ssh_behavior_active_incidents: 0,
+            ssh_behavior_pending_decisions: 0,
+            ssh_behavior_key_reads: 0,
+            ssh_behavior_network_blocks: 0,
+            ssh_behavior_user_allows: 0,
+            ssh_behavior_quarantines: 0,
+            ssh_behavior_backend_failures: 0,
         }));
         let resp_bytes = serde_json::to_vec(&resp).unwrap();
         write_response(&mut stream, &resp_bytes).unwrap();

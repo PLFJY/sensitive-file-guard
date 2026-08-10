@@ -19,9 +19,9 @@ use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
 use clap::Parser;
-use guard_audit::AuditStore;
+use guard_audit::{AuditRecord, AuditStore};
 use guard_core::init_logging;
-use platform_linux::{capability, fanotify, signal};
+use platform_linux::{capability, fanotify, signal, ssh_behavior};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -137,6 +137,37 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
     // Validate the shared public contract before constructing enforcement state.
     cfg.validate()?;
 
+    // The selected backend is a BPF LSM send hook: unlike connect-only or
+    // cgroup-egress designs it can cover a send on a socket opened before the
+    // sensitive read.  Until such a hook is loaded, raw SSH reads retain the
+    // established fail-closed policy rather than being allowed unguarded.
+    let (ssh_behavior_backend, ssh_behavior_runtime) = if cfg.ssh_keys.is_empty() {
+        (ssh_behavior::detect_backend(), None)
+    } else {
+        match ssh_behavior::SshBehaviorBackend::attach() {
+            Ok(backend) => (
+                ssh_behavior::SshBehaviorBackendStatus::Active,
+                Some(Arc::new(Mutex::new(backend))),
+            ),
+            Err(error) => (
+                ssh_behavior::SshBehaviorBackendStatus::Unavailable { reason: error },
+                None,
+            ),
+        }
+    };
+    if !cfg.ssh_keys.is_empty() && !ssh_behavior_backend.can_guard_raw_reads() {
+        tracing::warn!(
+            status = ssh_behavior_backend.label(),
+            reason = ?ssh_behavior_backend.detail(),
+            "SSH behavioral backend unavailable; raw private-key reads remain denied"
+        );
+    } else if !cfg.ssh_keys.is_empty() {
+        tracing::info!(
+            status = ssh_behavior_backend.label(),
+            "SSH behavioral BPF send containment attached"
+        );
+    }
+
     let engine = enforce::EnforcementEngine::from_config(&cfg)?;
 
     // Open audit/config/state dependencies before installing a filesystem-wide
@@ -195,7 +226,11 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                     )
                 })?;
         }
-        (0, 0, classifier.filesystem_paths().len())
+        // Strict's broad filesystem mark is deliberately `FAN_OPEN_PERM` for
+        // browser classification.  Add only exact SSH `FAN_ACCESS_PERM` marks
+        // rather than turning every ordinary file read into a round trip.
+        let ssh_read_marks = engine.mark_ssh_read_files(&group)?;
+        (ssh_read_marks, 0, classifier.filesystem_paths().len())
     } else {
         (engine.mark_files(&group)?, engine.mark_trees(&group)?, 0)
     };
@@ -208,6 +243,7 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
     // `&self`; the underlying syscalls are thread-safe.
     let group = Arc::new(group);
     let engine = Arc::new(Mutex::new(engine));
+    let incidents = Arc::new(Mutex::new(guard_core::ExposureTracker::default()));
 
     // A startup-only fanotify snapshot is not sufficient: browser databases
     // are routinely replaced with new inodes and profiles gain directories at
@@ -284,6 +320,9 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
             authorization: ipc::SensitiveAuthorization::Polkit,
             ssh_agent_pins: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             backend_metrics: Arc::clone(&backend_metrics),
+            ssh_behavior_backend: ssh_behavior_backend.clone(),
+            ssh_behavior_runtime: ssh_behavior_runtime.as_ref().map(Arc::clone),
+            incidents: Arc::clone(&incidents),
         };
         Some(
             std::thread::Builder::new()
@@ -347,6 +386,57 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
             break;
         }
 
+        let bpf_event_fd = ssh_behavior_runtime.as_ref().map(|backend| {
+            backend
+                .lock()
+                .expect("SSH behavior backend mutex poisoned")
+                .event_fd()
+        });
+        let mut poll_fds = vec![libc::pollfd {
+            fd: group.raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        if let Some(fd) = bpf_event_fd {
+            poll_fds.push(libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            });
+        }
+        // SAFETY: poll_fds is a valid mutable array of descriptors owned by
+        // the daemon; a finite timeout also lets us expire/poll BPF events
+        // without waiting for another filesystem operation.
+        let ready = unsafe { libc::poll(poll_fds.as_mut_ptr(), poll_fds.len() as _, 250) };
+        if ready < 0 {
+            if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return Err(std::io::Error::last_os_error().into());
+        }
+        if let Some(runtime) = &ssh_behavior_runtime {
+            let now_ns = enforce::monotonic_ns();
+            runtime
+                .lock()
+                .expect("SSH behavior backend mutex poisoned")
+                .expire(now_ns)
+                .map_err(anyhow::Error::msg)?;
+            incidents
+                .lock()
+                .expect("incident mutex poisoned")
+                .expire(now_ns / 1_000_000);
+            if poll_fds
+                .get(1)
+                .is_some_and(|fd| fd.revents & libc::POLLIN != 0)
+            {
+                drain_blocked_sends(runtime, &incidents, &audit)?;
+            }
+            reconcile_pending_sends(runtime, &incidents, &audit, now_ns)?;
+        }
+        if ready == 0 || poll_fds[0].revents & libc::POLLIN == 0 {
+            continue;
+        }
+
         let n = match group.read(&mut buf) {
             Ok(n) => n,
             Err(e) if e.raw_os_error() == Some(libc::EINTR) => continue,
@@ -388,14 +478,33 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                             backend_metrics
                                 .protected_events
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            engine
-                                .lock()
-                                .expect("engine")
-                                .decide_protected_with_context(
-                                    ev.pid,
-                                    resource,
-                                    "strict_inode_or_path",
-                                )
+                            // Strict's filesystem mark sees the SSH open as
+                            // well as the exact-file access mark.  Let the
+                            // open proceed so the actual read request is the
+                            // sole SSH mediation point. Browser resources are
+                            // still decided at open as before.
+                            if resource.kind == guard_core::ProtectedResourceKind::SshPrivateKey
+                                && ev.is_open_perm()
+                            {
+                                (guard_core::policy::Decision::Allow, None)
+                            } else {
+                                let behavior = ssh_behavior_runtime.as_ref().map(|backend| {
+                                    enforce::SshBehaviorGuard {
+                                        backend,
+                                        incidents: &incidents,
+                                        window_secs: cfg.ssh_behavior_window_secs,
+                                    }
+                                });
+                                engine
+                                    .lock()
+                                    .expect("engine")
+                                    .decide_protected_with_behavior(
+                                        ev.pid,
+                                        resource,
+                                        "strict_inode_or_path",
+                                        behavior.as_ref(),
+                                    )
+                            }
                         }
                         strict::StrictClassification::Unrelated => {
                             backend_metrics
@@ -420,7 +529,15 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                 }
             } else {
                 let mut eng = engine.lock().expect("engine");
-                eng.decide_with_context(ev.pid, ev.fd)
+                let behavior =
+                    ssh_behavior_runtime
+                        .as_ref()
+                        .map(|backend| enforce::SshBehaviorGuard {
+                            backend,
+                            incidents: &incidents,
+                            window_secs: cfg.ssh_behavior_window_secs,
+                        });
+                eng.decide_with_behavior(ev.pid, ev.fd, behavior.as_ref())
             };
             let allow = matches!(
                 decision,
@@ -473,6 +590,148 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
     drop(ipc_handle);
     let _ = topology_handle.join();
     Ok(())
+}
+
+fn drain_blocked_sends(
+    backend: &Mutex<ssh_behavior::SshBehaviorBackend>,
+    incidents: &Mutex<guard_core::ExposureTracker>,
+    audit: &AuditStore,
+) -> anyhow::Result<()> {
+    let events = backend
+        .lock()
+        .expect("SSH behavior backend mutex poisoned")
+        .poll()
+        .map_err(anyhow::Error::msg)?;
+    for event in events {
+        // The incident lifetime is based on BPF's monotonic clock. Audit
+        // timestamps remain wall-clock values for display and correlation.
+        let incident_now_ms = event.at_ns / 1_000_000;
+        let audit_now_ms = unix_ms();
+        let mut tracker = incidents.lock().expect("incident mutex poisoned");
+        let newly_pending =
+            tracker.blocked_send(event.incident_id, event.tgid, event.uid, incident_now_ms);
+        let incident = tracker.incident_for_kernel_id(event.incident_id);
+        drop(tracker);
+        let Some(incident) = incident else {
+            tracing::warn!(
+                incident_id = event.incident_id,
+                tgid = event.tgid,
+                "discarded unmatched SSH BPF event"
+            );
+            continue;
+        };
+        if newly_pending == Some(true) {
+            audit.record(AuditRecord {
+                ts_ms: audit_now_ms,
+                uid: incident.uid,
+                pid: event.tgid,
+                start_time: incident.root_process.start_time,
+                decision: guard_core::Decision::Deny(
+                    guard_core::policy::DenyReason::SshBehaviorNetworkBlocked,
+                ),
+                deny_reason: Some(guard_core::policy::DenyReason::SshBehaviorNetworkBlocked),
+                resource_kind: guard_core::ProtectedResourceKind::SshPrivateKey,
+                resource_browser: None,
+                resource_profile: None,
+                path: incident.key_path.to_string_lossy().into_owned(),
+                exe: incident.process_exe.to_string_lossy().into_owned(),
+                exe_owner_uid: 0,
+                trust_tier: guard_core::TrustTier::Unknown,
+                process_browser: None,
+                parent_pid: incident.parent.as_ref().map(|parent| parent.pid),
+                parent_exe: incident
+                    .parent
+                    .as_ref()
+                    .map(|parent| parent.exe.to_string_lossy().into_owned()),
+                lease_id: None,
+                backend_diag: format!(
+                    "ssh_behavior_network_blocked;incident={};tgid={};send_size={}",
+                    incident.id, event.tgid, event.size
+                ),
+            });
+            tracing::warn!(
+                incident_id = %incident.id,
+                tgid = event.tgid,
+                newly_pending = newly_pending == Some(true),
+                "sensitive-key network activity blocked"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Recover the first pending transition if a ring-buffer record was dropped.
+/// A later polling pass does not create another audit event because
+/// `ensure_pending` leaves an already-pending incident unchanged.
+fn reconcile_pending_sends(
+    backend: &Mutex<ssh_behavior::SshBehaviorBackend>,
+    incidents: &Mutex<guard_core::ExposureTracker>,
+    audit: &AuditStore,
+    now_ns: u64,
+) -> anyhow::Result<()> {
+    let events = backend
+        .lock()
+        .expect("SSH behavior backend mutex poisoned")
+        .pending(now_ns)
+        .map_err(anyhow::Error::msg)?;
+    for event in events {
+        let mut tracker = incidents.lock().expect("incident mutex poisoned");
+        let newly_pending = tracker.ensure_pending(
+            event.incident_id,
+            event.tgid,
+            event.uid,
+            event.at_ns / 1_000_000,
+        );
+        let incident = tracker.incident_for_kernel_id(event.incident_id);
+        drop(tracker);
+        if newly_pending != Some(true) {
+            continue;
+        }
+        let Some(incident) = incident else {
+            continue;
+        };
+        audit.record(AuditRecord {
+            ts_ms: unix_ms(),
+            uid: incident.uid,
+            pid: event.tgid,
+            start_time: incident.root_process.start_time,
+            decision: guard_core::Decision::Deny(
+                guard_core::policy::DenyReason::SshBehaviorNetworkBlocked,
+            ),
+            deny_reason: Some(guard_core::policy::DenyReason::SshBehaviorNetworkBlocked),
+            resource_kind: guard_core::ProtectedResourceKind::SshPrivateKey,
+            resource_browser: None,
+            resource_profile: None,
+            path: incident.key_path.to_string_lossy().into_owned(),
+            exe: incident.process_exe.to_string_lossy().into_owned(),
+            exe_owner_uid: 0,
+            trust_tier: guard_core::TrustTier::Unknown,
+            process_browser: None,
+            parent_pid: incident.parent.as_ref().map(|parent| parent.pid),
+            parent_exe: incident
+                .parent
+                .as_ref()
+                .map(|parent| parent.exe.to_string_lossy().into_owned()),
+            lease_id: None,
+            backend_diag: format!(
+                "ssh_behavior_network_blocked;incident={};tgid={};send_size=0;source=map_reconcile",
+                incident.id, event.tgid
+            ),
+        });
+        tracing::warn!(
+            incident_id = %incident.id,
+            tgid = event.tgid,
+            "recovered SSH blocked-send incident from BPF map"
+        );
+    }
+    Ok(())
+}
+
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn run_protect_test_file(target: &std::path::Path, cli: &Cli) -> anyhow::Result<()> {

@@ -3,6 +3,7 @@ name = "platform-linux"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+build = "build.rs"
 
 [dependencies]
 guard-core.workspace = true
@@ -12,6 +13,7 @@ thiserror.workspace = true
 serde.workspace = true
 anyhow.workspace = true
 sha2.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

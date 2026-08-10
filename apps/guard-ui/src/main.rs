@@ -52,11 +52,19 @@ fn health_from_evidence(
         if !notification_active {
             return Health::Degraded;
         }
-        return match daemon.map(|s| s.status.as_str()) {
-            Some("ACTIVE") => Health::Active,
-            Some("DEGRADED") | Some("NOT_ENFORCING") => Health::Degraded,
-            Some(_) => Health::Unreachable,
-            None => Health::Unreachable,
+        return match daemon {
+            Some(status)
+                if status.status == "ACTIVE"
+                    && (status.ssh_protected_keys == 0
+                        || status.ssh_behavior_status == "ACTIVE") =>
+            {
+                Health::Active
+            }
+            Some(status) if status.status == "ACTIVE" => Health::Degraded,
+            Some(status) if matches!(status.status.as_str(), "DEGRADED" | "NOT_ENFORCING") => {
+                Health::Degraded
+            }
+            Some(_) | None => Health::Unreachable,
         };
     }
     if configured {
@@ -95,6 +103,7 @@ struct UiState {
     poll_in_flight: Rc<Cell<bool>>,
     protection: Rc<RefCell<Option<adw::SwitchRow>>>,
     protection_syncing: Rc<Cell<bool>>,
+    shown_incidents: Rc<RefCell<HashSet<String>>>,
 }
 
 fn main() {
@@ -146,6 +155,7 @@ fn build_ui(app: &adw::Application) {
         poll_in_flight: Rc::new(Cell::new(false)),
         protection: Rc::new(RefCell::new(None)),
         protection_syncing: Rc::new(Cell::new(false)),
+        shown_incidents: Rc::new(RefCell::new(HashSet::new())),
     };
     let overview = scroll_page(overview_page(&state));
     let protection = scroll_page(protection_page(&state));
@@ -194,7 +204,7 @@ fn build_ui(app: &adw::Application) {
     window.present();
 
     load_configuration(&state);
-    start_polling(state);
+    start_polling(state, window);
 }
 
 fn scroll_page(content: gtk::Box) -> gtk::ScrolledWindow {
@@ -434,6 +444,7 @@ fn load_configuration(state: &UiState) {
                 .collect(),
             enrolled_exes: Vec::new(),
             ssh_keys: Vec::new(),
+            ssh_behavior_window_secs: guard_core::DEFAULT_SSH_BEHAVIOR_WINDOW_SECS,
         };
         if cfg.browsers.is_empty() {
             state.detail.set_text("No supported native browser was detected. Add a reviewed custom configuration or install a native browser.");
@@ -940,17 +951,18 @@ fn custom_browser_from_entries(
     })
 }
 
-fn start_polling(state: UiState) {
+fn start_polling(state: UiState, window: adw::ApplicationWindow) {
     let state = Rc::new(state);
     let poll_state = state.clone();
+    let poll_window = window.clone();
     glib::timeout_add_seconds_local(2, move || {
-        refresh_state(&poll_state);
+        refresh_state(&poll_state, &poll_window);
         glib::ControlFlow::Continue
     });
-    refresh_state(&state);
+    refresh_state(&state, &window);
 }
 
-fn refresh_state(state: &UiState) {
+fn refresh_state(state: &UiState, window: &adw::ApplicationWindow) {
     // Never queue refresh work behind a stalled socket or service query. One
     // background request is enough; the next timer tick retries after it ends.
     if state.poll_in_flight.replace(true) {
@@ -965,6 +977,8 @@ fn refresh_state(state: &UiState) {
     let poll_in_flight = state.poll_in_flight.clone();
     let protection = state.protection.clone();
     let protection_syncing = state.protection_syncing.clone();
+    let shown_incidents = state.shown_incidents.clone();
+    let window = window.clone();
     let after_id = event_data.borrow().first().map(|event| event.id);
     glib::MainContext::default().spawn_local(async move {
         let result = gio::spawn_blocking(move || {
@@ -974,15 +988,20 @@ fn refresh_state(state: &UiState) {
                 .into_iter()
                 .filter(is_visible_event)
                 .collect::<Vec<_>>();
+            let pending_incidents = guard_client::incidents(&socket)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|incident| incident.state == "PendingDecision")
+                .collect::<Vec<_>>();
             let service_active = Command::new("systemctl").args(["is-active", "--quiet", "guardd.service"]).status().map(|s| s.success()).unwrap_or(false);
             let notification_active = Command::new("systemctl")
                 .args(["--user", "is-active", "--quiet", "guard-notify.service"])
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false);
-            (service_active, notification_active, daemon, recent_events)
+            (service_active, notification_active, daemon, recent_events, pending_incidents)
         }).await;
-        if let Ok((service_active, notification_active, daemon, recent_events)) = result {
+        if let Ok((service_active, notification_active, daemon, recent_events, pending_incidents)) = result {
             let health = health_from_evidence(
                 service_active,
                 notification_active,
@@ -1005,7 +1024,7 @@ fn refresh_state(state: &UiState) {
             }
             let service_state = if service_active { "active" } else { "inactive" };
             let notification_state = if notification_active { "active" } else { "inactive" };
-            detail.set_text(&daemon.map(|s| format!("Mode: {} · browsers: {} · SSH keys/resources: {} · allowed: {} · denied: {} · marks: {}/{} · service: {} · notifications: {}", s.mode, s.browsers, s.protected_files, s.allowed, s.denied, s.marked_filesystems, s.required_filesystems, service_state, notification_state)).unwrap_or_else(|| format!("guardd IPC is unavailable · service: {} · notifications: {}", service_state, notification_state)));
+            detail.set_text(&daemon.map(|s| format!("Mode: {} · browsers: {} · SSH keys: {} · SSH behavior: {}{} · allowed: {} · denied: {} · marks: {}/{} · service: {} · notifications: {}", s.mode, s.browsers, s.ssh_protected_keys, s.ssh_behavior_status, s.ssh_behavior_detail.as_ref().map(|d| format!(" ({d})")).unwrap_or_default(), s.allowed, s.denied, s.marked_filesystems, s.required_filesystems, service_state, notification_state)).unwrap_or_else(|| format!("guardd IPC is unavailable · service: {} · notifications: {}", service_state, notification_state)));
             if after_id.is_none() {
                 while let Some(child) = events.first_child() { events.remove(&child); }
                 *event_data.borrow_mut() = recent_events.clone();
@@ -1016,18 +1035,105 @@ fn refresh_state(state: &UiState) {
             for event in recent_events {
                 let row = gtk::ListBoxRow::new();
                 let box_ = gtk::Box::new(gtk::Orientation::Vertical, 2);
-                let decision = if is_blocked_event(&event) { "BLOCKED" } else if event.decision.starts_with("AllowByLease") { "ALLOWED BY LEASE" } else { "ALLOWED" };
+                let decision = if event.backend_diag.starts_with("ssh_behavior_key_read;") {
+                    "KEY ACCESSED"
+                } else if event.backend_diag == "ssh_behavior_user_allow" {
+                    "ALLOWED BY USER"
+                } else if event.backend_diag.starts_with("ssh_behavior_stop_containment;") {
+                    "PROCESS STOPPED"
+                } else if event.reason_code.as_deref() == Some("ssh_behavior_network_blocked") {
+                    "NETWORK BLOCKED"
+                } else if is_blocked_event(&event) { "BLOCKED" } else if event.decision.starts_with("AllowByLease") { "ALLOWED BY LEASE" } else { "ALLOWED" };
                 let title = gtk::Label::new(Some(&format!("{}  ·  {}", decision, event.exe)));
-                title.set_xalign(0.0); title.add_css_class(if decision == "BLOCKED" { "error" } else { "success" });
+                title.set_xalign(0.0); title.add_css_class(if matches!(decision, "BLOCKED" | "NETWORK BLOCKED") { "error" } else { "success" });
                 let subtitle = gtk::Label::new(Some(&format!("#{} · {} · {}", event.id, event.resource_kind, event.path)));
                 subtitle.set_xalign(0.0); subtitle.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
                 box_.append(&title); box_.append(&subtitle); row.set_child(Some(&box_));
                 if after_id.is_some() { events.insert(&row, 0); } else { events.append(&row); }
             }
+            for incident in pending_incidents {
+                if shown_incidents.borrow_mut().insert(incident.id.clone()) {
+                    present_incident_dialog(&window, incident);
+                }
+            }
         }
         poll_in_flight.set(false);
         let _ = events;
     });
+}
+
+fn present_incident_dialog(window: &adw::ApplicationWindow, incident: guard_ipc::SshIncidentInfo) {
+    let window = window.clone();
+    let process = PathBuf::from(&incident.process_exe)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| incident.process_exe.clone());
+    let destination = match (
+        incident.destination_ip.as_deref(),
+        incident.destination_port,
+        incident.protocol.as_deref(),
+    ) {
+        (Some(ip), Some(port), Some(protocol)) => {
+            format!("\nDestination: {ip}:{port} ({protocol})")
+        }
+        _ => String::new(),
+    };
+    let dialog = gtk::MessageDialog::builder()
+        .transient_for(&window)
+        .modal(true)
+        .message_type(gtk::MessageType::Warning)
+        .text("Sensitive-key network activity blocked")
+        .secondary_text(format!(
+            "{process} recently read:\n{}\n\nIt then attempted outbound network activity.{}\n\nThis does not establish what data was sent.",
+            incident.key_path, destination
+        ))
+        .build();
+    dialog.add_button("Stop & Quarantine", gtk::ResponseType::Reject);
+    dialog.add_button("Allow Upload", gtk::ResponseType::Accept);
+    dialog.connect_response(move |dialog, response| {
+        if matches!(
+            response,
+            gtk::ResponseType::Accept | gtk::ResponseType::Reject
+        ) {
+            let id = incident.id.clone();
+            let action = if response == gtk::ResponseType::Accept {
+                guard_ipc::IncidentResolutionAction::AllowNetwork
+            } else {
+                guard_ipc::IncidentResolutionAction::StopAndQuarantine
+            };
+            let parent = window.clone();
+            glib::MainContext::default().spawn_local(async move {
+                let socket = PathBuf::from(SOCKET);
+                let result = gio::spawn_blocking(move || {
+                    guard_client::resolve_incident(&socket, &id, action)
+                })
+                .await;
+                let (title, detail) = match result {
+                    Ok(Ok(resolved)) => (
+                        "Incident resolved",
+                        resolved
+                            .resolution_detail
+                            .unwrap_or_else(|| "The incident resolution completed.".into()),
+                    ),
+                    Ok(Err(error)) => ("Incident resolution failed", error.to_string()),
+                    Err(_) => (
+                        "Incident resolution failed",
+                        "The background resolver stopped unexpectedly.".into(),
+                    ),
+                };
+                gtk::MessageDialog::builder()
+                    .transient_for(&parent)
+                    .modal(true)
+                    .message_type(gtk::MessageType::Info)
+                    .text(title)
+                    .secondary_text(detail)
+                    .build()
+                    .show();
+            });
+        }
+        dialog.close();
+    });
+    dialog.show();
 }
 
 fn spawn_protection_bundle(verb: String, switch: adw::SwitchRow, syncing: Rc<Cell<bool>>) {
@@ -1150,6 +1256,7 @@ mod tests {
             strict_alias_matches: 0,
             topology_degraded: false,
             protected_files: 1,
+            ssh_protected_keys: 0,
             protected_trees: 1,
             browsers: 1,
             browser_exes: 1,
@@ -1158,6 +1265,15 @@ mod tests {
             unclassified: 0,
             audit_dropped: 0,
             peer_uid: 1000,
+            ssh_behavior_status: "UNAVAILABLE".into(),
+            ssh_behavior_detail: None,
+            ssh_behavior_active_incidents: 0,
+            ssh_behavior_pending_decisions: 0,
+            ssh_behavior_key_reads: 0,
+            ssh_behavior_network_blocks: 0,
+            ssh_behavior_user_allows: 0,
+            ssh_behavior_quarantines: 0,
+            ssh_behavior_backend_failures: 0,
         };
         assert_eq!(
             health_from_evidence(true, true, Some(&status), true),
