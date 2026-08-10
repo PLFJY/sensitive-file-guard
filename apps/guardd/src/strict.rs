@@ -200,13 +200,11 @@ impl StrictClassifier {
             return StrictClassification::Protected(resource);
         }
 
-        if let Some(resource) = self
-            .inode_index
-            .read()
-            .expect("inode index lock poisoned")
-            .get(&identity)
-            .cloned()
-        {
+        let indexed_resource = {
+            let index = self.inode_index.read().expect("inode index lock poisoned");
+            index.get(&identity).cloned()
+        };
+        if let Some(resource) = indexed_resource {
             if self.identity_index_is_stable(&resource.path)
                 || path_identity(&resource.path).ok() == Some(identity)
             {
