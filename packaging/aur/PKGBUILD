@@ -1,13 +1,13 @@
 # Maintainer: PLFJY <https://github.com/PLFJY>
 
 pkgname=sensitive-file-guard-git
-pkgver=0.1.0.r11.g0cdf005
+pkgver=0.1.0.r12.g867e77d
 pkgrel=1
 pkgdesc='Pre-open local access firewall for browser authentication data and SSH private keys'
 arch=('x86_64')
 url='https://github.com/PLFJY/sensitive-file-guard'
 license=('MIT' 'Apache-2.0')
-depends=('glibc' 'libgcc' 'polkit' 'systemd')
+depends=('glibc' 'libgcc' 'polkit' 'systemd' 'gtk4' 'libadwaita')
 makedepends=('cargo' 'git' 'rust')
 options=('!lto')
 optdepends=(
@@ -43,7 +43,7 @@ check() {
 package() {
   cd "$srcdir/sensitive-file-guard"
 
-  for binary in guardd guardctl guard-tui guard-notify; do
+  for binary in guardd guardctl guard-tui guard-notify guard-ui; do
     install -Dm755 "target/release/$binary" "$pkgdir/usr/bin/$binary"
   done
 
@@ -59,6 +59,12 @@ package() {
     "$pkgdir/usr/share/polkit-1/actions/org.guardd.policy"
   install -Dm644 deploy/guardd-users.sysusers \
     "$pkgdir/usr/lib/sysusers.d/sensitive-file-guard.conf"
+  install -Dm644 data/io.github.plfjy.SensitiveFileGuard.desktop \
+    "$pkgdir/usr/share/applications/io.github.plfjy.SensitiveFileGuard.desktop"
+  install -Dm644 data/io.github.plfjy.SensitiveFileGuard.metainfo.xml \
+    "$pkgdir/usr/share/metainfo/io.github.plfjy.SensitiveFileGuard.metainfo.xml"
+  install -Dm644 data/io.github.plfjy.SensitiveFileGuard.svg \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/io.github.plfjy.SensitiveFileGuard.svg"
 
   # An example is intentionally not installed under /etc: it has no guessed
   # user, UID, profile, or SSH key and must be deliberately copied and edited.

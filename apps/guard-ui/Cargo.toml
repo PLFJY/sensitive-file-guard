@@ -1,26 +1,20 @@
 [package]
-name = "guard-tui"
+name = "guard-ui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-guard-ipc.workspace = true
 guard-client.workspace = true
+guard-ipc.workspace = true
 platform-linux.workspace = true
 serde_json.workspace = true
-ratatui.workspace = true
-crossterm.workspace = true
-
-[lib]
-name = "guard_tui"
-path = "src/lib.rs"
+gtk4.workspace = true
+libadwaita.workspace = true
+glib.workspace = true
+gio.workspace = true
 
 [[bin]]
-name = "guard-tui"
+name = "guard-ui"
 path = "src/main.rs"
-
-[dev-dependencies]
-tempfile.workspace = true
-guard-ipc.workspace = true

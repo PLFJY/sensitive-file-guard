@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.plfjy.SensitiveFileGuard</id>
+  <name>Sensitive File Guard</name>
+  <summary>Local pre-open protection for browser and SSH secrets</summary>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <launchable type="desktop-id">io.github.plfjy.SensitiveFileGuard.desktop</launchable>
+  <description><p>Review live protection health, enrolled browser profiles, SSH key paths, and recent audit events.</p></description>
+</component>

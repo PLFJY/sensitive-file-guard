@@ -127,7 +127,11 @@ fn handle_request_with_connection(
         RequestOp::ResourcesList => handle_resources_list(state, creds),
         RequestOp::BrowsersList => handle_browsers_list(state, creds),
         RequestOp::ConfigCheck => handle_config_check(state, creds),
-        RequestOp::Events { limit } => handle_events(state, creds, limit),
+        RequestOp::Events {
+            limit,
+            before_id,
+            after_id,
+        } => handle_events(state, creds, limit, before_id, after_id),
         RequestOp::Explain { event_id } => handle_explain(state, creds, event_id),
         RequestOp::LeasesList => handle_leases_list(state, creds),
         RequestOp::LeasesRevoke { lease_id } => handle_leases_revoke(state, creds, lease_id),
@@ -280,7 +284,13 @@ fn handle_config_check(state: &IpcState, _creds: PeerCreds) -> Response {
     Response::ok(ResponseBody::ConfigCheck(body))
 }
 
-fn handle_events(state: &IpcState, creds: PeerCreds, limit: Option<u32>) -> Response {
+fn handle_events(
+    state: &IpcState,
+    creds: PeerCreds,
+    limit: Option<u32>,
+    before_id: Option<i64>,
+    after_id: Option<i64>,
+) -> Response {
     // Ordinary users see only their own events; root sees all.
     let uid_filter = if creds.uid == 0 {
         None
@@ -290,7 +300,13 @@ fn handle_events(state: &IpcState, creds: PeerCreds, limit: Option<u32>) -> Resp
     let limit = limit.unwrap_or(100);
     // Flush so the CLI sees the latest committed records.
     state.audit.flush();
-    match state.audit.query_events(uid_filter, limit) {
+    if before_id.is_some() && after_id.is_some() {
+        return Response::err("before_id and after_id cannot both be set");
+    }
+    match state
+        .audit
+        .query_events_cursor(uid_filter, limit, before_id, after_id)
+    {
         Ok(events) => {
             let infos: Vec<EventInfo> = events.iter().map(event_to_info).collect();
             Response::ok(ResponseBody::Events(infos))
@@ -1278,7 +1294,11 @@ mod tests {
                 uid: 1000,
                 gid: 1000,
             },
-            RequestOp::Events { limit: Some(100) },
+            RequestOp::Events {
+                limit: Some(100),
+                before_id: None,
+                after_id: None,
+            },
         );
         assert!(resp.ok);
         match resp.body.unwrap() {
@@ -1299,7 +1319,11 @@ mod tests {
                 uid: 1000,
                 gid: 1000,
             },
-            RequestOp::Events { limit: Some(100) },
+            RequestOp::Events {
+                limit: Some(100),
+                before_id: None,
+                after_id: None,
+            },
         );
         match resp.body.unwrap() {
             ResponseBody::Events(ev) => {
@@ -1323,7 +1347,11 @@ mod tests {
                 uid: 0,
                 gid: 0,
             },
-            RequestOp::Events { limit: Some(100) },
+            RequestOp::Events {
+                limit: Some(100),
+                before_id: None,
+                after_id: None,
+            },
         );
         match resp.body.unwrap() {
             ResponseBody::Events(ev) => assert_eq!(ev.len(), 2),
@@ -1888,7 +1916,11 @@ mod tests {
                 uid: 0,
                 gid: 0,
             },
-            RequestOp::Events { limit: Some(10) },
+            RequestOp::Events {
+                limit: Some(10),
+                before_id: None,
+                after_id: None,
+            },
         );
         match resp.body.unwrap() {
             ResponseBody::Events(ev) => {
@@ -2029,7 +2061,11 @@ mod tests {
         // Query events.
         let req = Request {
             version: PROTOCOL_VERSION,
-            op: RequestOp::Events { limit: Some(10) },
+            op: RequestOp::Events {
+                limit: Some(10),
+                before_id: None,
+                after_id: None,
+            },
         };
         let resp_bytes = retry_ipc(&sock, &serde_json::to_vec(&req).unwrap());
         let resp: Response = serde_json::from_slice(&resp_bytes).unwrap();

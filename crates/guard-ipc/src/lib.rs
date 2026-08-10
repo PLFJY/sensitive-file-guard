@@ -46,6 +46,10 @@ pub enum RequestOp {
     BrowsersList,
     Events {
         limit: Option<u32>,
+        #[serde(default)]
+        before_id: Option<i64>,
+        #[serde(default)]
+        after_id: Option<i64>,
     },
     Explain {
         event_id: i64,
@@ -343,8 +347,16 @@ mod tests {
             RequestOp::Status,
             RequestOp::ResourcesList,
             RequestOp::BrowsersList,
-            RequestOp::Events { limit: Some(50) },
-            RequestOp::Events { limit: None },
+            RequestOp::Events {
+                limit: Some(50),
+                before_id: None,
+                after_id: None,
+            },
+            RequestOp::Events {
+                limit: None,
+                before_id: None,
+                after_id: None,
+            },
             RequestOp::Explain { event_id: 42 },
             RequestOp::LeasesList,
             RequestOp::LeasesRevoke {

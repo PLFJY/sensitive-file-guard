@@ -5,6 +5,7 @@
 //! helpers. Phase 04 adds full process identity resolution and trust tiers.
 
 pub mod capability;
+pub mod config;
 pub mod enrollment;
 pub mod fanotify;
 pub mod identity;

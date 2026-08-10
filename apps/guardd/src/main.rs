@@ -134,6 +134,8 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
         .map_err(|e| anyhow::anyhow!("reading config {}: {e}", cfg_path.display()))?;
     let cfg: enforce::EnforcementConfig = serde_json::from_slice(&cfg_bytes)
         .map_err(|e| anyhow::anyhow!("parsing config {}: {e}", cfg_path.display()))?;
+    // Validate the shared public contract before constructing enforcement state.
+    cfg.validate()?;
 
     let engine = enforce::EnforcementEngine::from_config(&cfg)?;
 

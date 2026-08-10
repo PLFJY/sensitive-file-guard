@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Sensitive File Guard
+Comment=Review and control local sensitive-file protection
+Exec=guard-ui
+Icon=io.github.plfjy.SensitiveFileGuard
+Terminal=false
+Type=Application
+Categories=Security;Utility;
+StartupNotify=true

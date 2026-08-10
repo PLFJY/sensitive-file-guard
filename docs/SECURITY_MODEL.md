@@ -413,3 +413,20 @@ noise and are recorded only as a usability smoke test. Strict remains opt-in.
    polkit. Log out and back in after installation so both the shell and the
    existing `systemd --user` manager receive the new supplementary group.
    Desktop notifications run as `guard-notify` in the user's session.
+
+## GTK control center boundary
+
+`guard-ui` is an ordinary desktop-user process. It reads only daemon metadata,
+the owner-readable configuration contract, and audit rows; it never opens
+browser databases or SSH key contents. Browser discovery produces suggestions,
+not trust. Every switch and policy edit is an in-memory candidate until the
+user presses Apply.
+
+Apply and service start/stop/restart use `pkexec guardctl privileged ...`.
+That hidden helper accepts only the fixed `guardd.service` and fixed
+`/etc/guardd/config.json`, requires root, caps stdin at 256 KiB, validates the
+shared configuration contract, writes a mode-0640 root:guardd-users temporary
+file, fsyncs and renames atomically, then restarts and health-checks guardd.
+When the new daemon does not become active, the prior configuration is restored
+and restarted. No arbitrary command, unit, destination, or shell string is
+accepted. The GTK process itself is never elevated.

@@ -107,6 +107,30 @@ enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Fixed root-only operations used by guard-ui through pkexec.
+    #[command(name = "privileged", hide = true)]
+    Privileged {
+        #[command(subcommand)]
+        action: PrivilegedAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum PrivilegedAction {
+    #[command(name = "service")]
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
+    #[command(name = "apply-config")]
+    ApplyConfig,
+}
+
+#[derive(Subcommand, Debug)]
+enum ServiceAction {
+    Start,
+    Stop,
+    Restart,
 }
 
 #[derive(Subcommand, Debug)]
@@ -220,6 +244,9 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: &Cli) -> anyhow::Result<()> {
+    if let Command::Privileged { action } = &cli.command {
+        return run_privileged(action);
+    }
     // `ssh suggest` is a pure client-side glob (no daemon connection needed).
     if let Command::Ssh {
         action: SshAction::Suggest { dir },
@@ -257,7 +284,11 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
             action: BrowserAction::Discover { .. },
         } => unreachable!("browser discover handled before IPC dispatch"),
         Command::Setup { .. } => unreachable!("setup handled before IPC dispatch"),
-        Command::Events { limit } => RequestOp::Events { limit: *limit },
+        Command::Events { limit } => RequestOp::Events {
+            limit: *limit,
+            before_id: None,
+            after_id: None,
+        },
         Command::Explain { event_id } => RequestOp::Explain {
             event_id: *event_id,
         },
@@ -297,6 +328,7 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
         Command::Config {
             action: ConfigAction::Check,
         } => RequestOp::ConfigCheck,
+        Command::Privileged { .. } => unreachable!("privileged helper handled before IPC dispatch"),
     };
 
     let req = Request {
@@ -335,12 +367,121 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn run_privileged(action: &PrivilegedAction) -> anyhow::Result<()> {
+    // This command is intentionally useful only as pkexec's narrowly scoped
+    // root helper.  It has no arbitrary command, unit, or destination input.
+    // SAFETY: geteuid only reads this process credential and has no pointer
+    // arguments or mutable state.
+    if unsafe { libc::geteuid() } != 0 {
+        anyhow::bail!("privileged helper requires root (invoke it through pkexec)");
+    }
+    match action {
+        PrivilegedAction::Service { action } => {
+            let verb = match action {
+                ServiceAction::Start => "start",
+                ServiceAction::Stop => "stop",
+                ServiceAction::Restart => "restart",
+            };
+            let status = std::process::Command::new("systemctl")
+                .args([verb, "guardd.service"])
+                .status()?;
+            anyhow::ensure!(status.success(), "systemctl {verb} guardd.service failed");
+            Ok(())
+        }
+        PrivilegedAction::ApplyConfig => apply_config_transactionally(),
+    }
+}
+
+const MAX_CONFIG_STDIN: usize = 256 * 1024;
+const ACTIVE_CONFIG: &str = "/etc/guardd/config.json";
+
+fn apply_config_transactionally() -> anyhow::Result<()> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::io::stdin()
+        .take((MAX_CONFIG_STDIN + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    anyhow::ensure!(
+        bytes.len() <= MAX_CONFIG_STDIN,
+        "configuration input exceeds {} bytes",
+        MAX_CONFIG_STDIN
+    );
+    let _cfg = validate_candidate_bytes(&bytes)?;
+    let parent = Path::new(ACTIVE_CONFIG)
+        .parent()
+        .expect("fixed config has parent");
+    std::fs::create_dir_all(parent)?;
+    let previous = std::fs::read(ACTIVE_CONFIG).ok();
+    let temp = parent.join(format!(".config.json.{}.tmp", std::process::id()));
+    write_root_config(&temp, &bytes)?;
+    std::fs::rename(&temp, ACTIVE_CONFIG)?;
+    let restarted = std::process::Command::new("systemctl")
+        .args(["restart", "guardd.service"])
+        .status()?
+        .success();
+    let healthy = restarted
+        && std::process::Command::new("systemctl")
+            .args(["is-active", "--quiet", "guardd.service"])
+            .status()?
+            .success();
+    if healthy {
+        return Ok(());
+    }
+    if let Some(old) = previous {
+        write_root_config(&temp, &old)?;
+        std::fs::rename(&temp, ACTIVE_CONFIG)?;
+        let _ = std::process::Command::new("systemctl")
+            .args(["restart", "guardd.service"])
+            .status();
+    } else {
+        let _ = std::fs::remove_file(ACTIVE_CONFIG);
+    }
+    anyhow::bail!("new configuration failed health check; previous configuration restored")
+}
+
+fn validate_candidate_bytes(
+    bytes: &[u8],
+) -> anyhow::Result<platform_linux::config::EnforcementConfig> {
+    anyhow::ensure!(
+        bytes.len() <= MAX_CONFIG_STDIN,
+        "configuration input exceeds {} bytes",
+        MAX_CONFIG_STDIN
+    );
+    let cfg: platform_linux::config::EnforcementConfig = serde_json::from_slice(bytes)
+        .map_err(|e| anyhow::anyhow!("malformed configuration: {e}"))?;
+    cfg.validate()?;
+    Ok(cfg)
+}
+
+fn write_root_config(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o640)
+        .open(path)?;
+    use std::io::Write;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o640))?;
+    let status = std::process::Command::new("chown")
+        .args(["root:guardd-users", &path.to_string_lossy()])
+        .status()?;
+    anyhow::ensure!(
+        status.success(),
+        "setting root:guardd-users ownership failed"
+    );
+    Ok(())
+}
+
 /// Native layouts selected from maintained distribution package file layouts,
 /// not from package-manager metadata or a process name.  Each executable entry
 /// is the final ELF executable expected from `/proc/<pid>/exe`, rather than a
 /// `/usr/bin` launcher script.  A user can always configure a different
 /// canonical path explicitly.
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
+#[cfg(test)]
 struct NativeBrowserLayout {
     id: &'static str,
     family: &'static str,
@@ -348,6 +489,8 @@ struct NativeBrowserLayout {
     executable_candidates: &'static [&'static str],
 }
 
+#[allow(dead_code)]
+#[cfg(test)]
 const NATIVE_BROWSER_LAYOUTS: &[NativeBrowserLayout] = &[
     NativeBrowserLayout {
         id: "firefox",
@@ -453,7 +596,7 @@ fn run_browser_discover(home: Option<&Path>) -> anyhow::Result<()> {
             home.display()
         );
     }
-    let result = discover_browsers(&home, NATIVE_BROWSER_LAYOUTS);
+    let result = platform_linux::config::discover_native_browsers(&home);
     println!("{}", serde_json::to_string_pretty(&result)?);
     eprintln!(
         "guardctl: review this suggestion before copying it into config.json; \
@@ -465,7 +608,7 @@ fn run_browser_discover(home: Option<&Path>) -> anyhow::Result<()> {
 fn run_setup(home: Option<&Path>, config_path: &Path, assume_yes: bool) -> anyhow::Result<()> {
     reject_existing_config(config_path)?;
     let home = resolve_setup_home(home)?;
-    let discovery = discover_browsers(&home, NATIVE_BROWSER_LAYOUTS);
+    let discovery = shared_discovery(&home);
     let config = setup_config(&discovery)?;
     let rendered = serde_json::to_string_pretty(&config)?;
 
@@ -494,7 +637,10 @@ fn run_setup(home: Option<&Path>, config_path: &Path, assume_yes: bool) -> anyho
     }
 
     write_new_config(config_path, &(rendered + "\n"))?;
-    println!("Created {} with mode 0600.", config_path.display());
+    println!(
+        "Created {} with mode 0640 (root-owned; guardd-users read metadata).",
+        config_path.display()
+    );
     println!("Review it, then run: sudo systemctl enable --now guardd");
     println!("Verify with: guardctl status");
     Ok(())
@@ -552,9 +698,42 @@ fn setup_config(discovery: &BrowserDiscovery) -> anyhow::Result<SetupConfig> {
     })
 }
 
+/// Convert the shared Linux discovery model into the setup renderer's stable
+/// JSON shape.  Discovery itself is shared with guard-ui and never authorizes
+/// a browser.
+fn shared_discovery(home: &Path) -> BrowserDiscovery {
+    let shared = platform_linux::config::discover_native_browsers(home);
+    BrowserDiscovery {
+        browsers: shared
+            .browsers
+            .into_iter()
+            .map(|b| BrowserSuggestion {
+                id: b.id,
+                family: platform_linux::config::family_name(b.family).to_owned(),
+                profile_root: b.profile_root.to_string_lossy().into_owned(),
+                exe_paths: b
+                    .exe_paths
+                    .into_iter()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect(),
+            })
+            .collect(),
+        unsupported_sandboxed: shared
+            .unsupported_sandboxed
+            .into_iter()
+            .map(|b| UnsupportedSandboxedBrowser {
+                kind: b.kind,
+                profile_root: b.profile_root.to_string_lossy().into_owned(),
+                reason: b.reason,
+            })
+            .collect(),
+    }
+}
+
 fn config_family(family: &str) -> anyhow::Result<&'static str> {
     match family {
         "Firefox" => Ok("firefox"),
+        "Zen" => Ok("zen"),
         "Chromium" => Ok("chromium"),
         // `BrowserSuggestion` is generated only by the static table above.
         // Refuse a future unrecognised entry rather than write config that the
@@ -615,16 +794,31 @@ fn write_new_config(config_path: &Path, contents: &str) -> anyhow::Result<()> {
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .mode(0o600)
+        .mode(0o640)
         .open(config_path)
         .map_err(|error| {
             anyhow::anyhow!("creating configuration {}: {error}", config_path.display())
         })?;
     file.write_all(contents.as_bytes())?;
     file.sync_all()?;
+    // SAFETY: geteuid only reads this process credential and has no pointer
+    // arguments or mutable state.
+    if unsafe { libc::geteuid() } == 0 {
+        // Fixed destination/group only; failure is reported rather than
+        // silently widening access. Tests running as an unprivileged user do
+        // not enter this branch.
+        let status = std::process::Command::new("chown")
+            .args(["root:guardd-users", &config_path.to_string_lossy()])
+            .status()?;
+        if !status.success() {
+            anyhow::bail!("setting root:guardd-users ownership failed");
+        }
+    }
     Ok(())
 }
 
+#[allow(dead_code)]
+#[cfg(test)]
 fn discover_browsers(home: &Path, layouts: &[NativeBrowserLayout]) -> BrowserDiscovery {
     let mut browsers = Vec::new();
     for layout in layouts {
@@ -686,6 +880,8 @@ fn discover_browsers(home: &Path, layouts: &[NativeBrowserLayout]) -> BrowserDis
     }
 }
 
+#[allow(dead_code)]
+#[cfg(test)]
 fn canonical_executable(path: &Path) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -1379,6 +1575,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn privileged_candidate_validation_rejects_malformed_oversized_and_empty() {
+        assert!(validate_candidate_bytes(b"not-json").is_err());
+        assert!(validate_candidate_bytes(&vec![b'x'; MAX_CONFIG_STDIN + 1]).is_err());
+        assert!(validate_candidate_bytes(
+            br#"{"enforcement_mode":"strict-filesystem","browsers":[],"ssh_keys":[]}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn privileged_candidate_validation_rejects_relative_and_unsupported_modes() {
+        assert!(validate_candidate_bytes(
+            br#"{"enforcement_mode":"other","browsers":[],"ssh_keys":["relative-key"]}"#
+        )
+        .is_err());
+    }
+
+    #[test]
     fn discovery_represents_native_firefox_and_debian_esr_without_launcher_paths() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");
@@ -1519,7 +1733,7 @@ mod tests {
         );
         assert_eq!(
             std::fs::metadata(&config).unwrap().permissions().mode() & 0o777,
-            0o600
+            0o640
         );
         assert_eq!(
             std::fs::metadata(config.parent().unwrap())

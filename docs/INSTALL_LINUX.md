@@ -20,13 +20,16 @@ Never use a real Cookies database, browser secret, or SSH private key for a test
 
 | Distribution | Build dependencies | Runtime dependencies |
 | --- | --- | --- |
-| Arch | `sudo pacman -S --needed base-devel cargo rust git` | `sudo pacman -S --needed systemd polkit`; optional `libnotify openssh` |
-| Debian | `sudo apt install build-essential cargo rustc git pkg-config` | `sudo apt install systemd polkitd`; optional `libnotify-bin openssh-client` |
-| Ubuntu | `sudo apt install build-essential cargo rustc git pkg-config` | `sudo apt install systemd polkitd`; optional `libnotify-bin openssh-client` |
-| Fedora | `sudo dnf install gcc make cargo rust git` | `sudo dnf install systemd polkit`; optional `libnotify openssh-clients` |
+| Arch | `sudo pacman -S --needed base-devel cargo rust git gtk4 libadwaita` | `sudo pacman -S --needed systemd polkit`; optional `libnotify openssh` |
+| Debian | `sudo apt install build-essential cargo rustc git pkg-config libgtk-4-dev libadwaita-1-dev` | `sudo apt install systemd polkitd`; optional `libnotify-bin openssh-client` |
+| Ubuntu | `sudo apt install build-essential cargo rustc git pkg-config libgtk-4-dev libadwaita-1-dev` | `sudo apt install systemd polkitd`; optional `libnotify-bin openssh-client` |
+| Fedora | `sudo dnf install gcc make cargo rust git gtk4-devel libadwaita-devel` | `sudo dnf install systemd polkit`; optional `libnotify openssh-clients` |
 
 Current official metadata confirms Debian `polkitd` provides `pkcheck`; Arch
 and Fedora use `polkit`; Arch `libnotify` provides `notify-send`.
+
+`guard-ui` is an unprivileged GTK 4/libadwaita presentation and control client;
+it is not auto-started and never replaces `guardctl` for automation.
 
 ## Source installation
 

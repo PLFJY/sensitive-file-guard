@@ -35,4 +35,14 @@
       <allow_active>auth_self</allow_active>
     </defaults>
   </action>
+
+  <action id="org.guardd.control">
+    <description>Change Sensitive File Guard service or configuration</description>
+    <message>Authentication is required to change local protection</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
 </policyconfig>

@@ -74,8 +74,18 @@ out of a sensitive pathname without any open occurring while it has that name.
           protected filesystem resources
 ```
 
-Binaries: `guardd` (daemon), `guardctl` (control), `guard-tui` (terminal UI),
-and `guard-notify` (unprivileged user-session notification presenter).
+Binaries: `guardd` (daemon), `guardctl` (control), `guard-ui` (native GTK/libadwaita
+control center), `guard-tui` (terminal UI), and `guard-notify` (unprivileged
+user-session notification presenter).
+
+## Graphical control center
+
+`guard-ui` is the preferred interactive Linux client. It shows live ACTIVE,
+DEGRADED, STOPPED, UNREACHABLE, and NOT CONFIGURED states; stages Strict or
+Conservative policy and individual browser/SSH-key enrollments; applies a
+complete candidate through the authenticated `guardctl` helper; and displays
+the daemon's audit log. It never writes `/etc/guardd/config.json`, evaluates
+policy, or runs as root. `guardctl` remains the supported CLI/automation tool.
 
 ## Install
 

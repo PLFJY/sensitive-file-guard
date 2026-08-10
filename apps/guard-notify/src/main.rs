@@ -102,7 +102,11 @@ fn unix_ms() -> u64 {
 fn fetch_events(socket: &Path) -> Result<Vec<EventInfo>, String> {
     let request = Request {
         version: PROTOCOL_VERSION,
-        op: RequestOp::Events { limit: Some(100) },
+        op: RequestOp::Events {
+            limit: Some(100),
+            before_id: None,
+            after_id: None,
+        },
     };
     let bytes = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
     let response =

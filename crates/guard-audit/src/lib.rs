@@ -137,7 +137,19 @@ impl AuditStore {
     ) -> anyhow::Result<Vec<AuditEvent>> {
         let conn = Connection::open(&self.path)?;
         conn.pragma_update(None, "query_only", 1).ok();
-        query_events(&conn, uid_filter, limit)
+        query_events_cursor(&conn, uid_filter, limit, None, None)
+    }
+
+    pub fn query_events_cursor(
+        &self,
+        uid_filter: Option<u32>,
+        limit: u32,
+        before_id: Option<i64>,
+        after_id: Option<i64>,
+    ) -> anyhow::Result<Vec<AuditEvent>> {
+        let conn = Connection::open(&self.path)?;
+        conn.pragma_update(None, "query_only", 1).ok();
+        query_events_cursor(&conn, uid_filter, limit, before_id, after_id)
     }
 
     /// Look up a single event by id. Returns `None` if not found or if the
@@ -278,35 +290,42 @@ fn commit_batch(conn: &Connection, pending: &mut Vec<AuditRecord>) -> anyhow::Re
     Ok(())
 }
 
-fn query_events(
+fn query_events_cursor(
     conn: &Connection,
     uid_filter: Option<u32>,
     limit: u32,
+    before_id: Option<i64>,
+    after_id: Option<i64>,
 ) -> anyhow::Result<Vec<AuditEvent>> {
     let limit = limit.clamp(1, 10_000) as i64;
+    if before_id.is_some() && after_id.is_some() {
+        anyhow::bail!("before_id and after_id cannot both be set");
+    }
     let mut out = Vec::new();
+    let mut sql = String::from("SELECT id, ts_ms, uid, pid, start_time, decision, deny_reason, resource_kind, resource_browser, resource_profile, path, exe, exe_owner_uid, trust_tier, process_browser, parent_pid, parent_exe, lease_id, backend_diag FROM events WHERE 1=1");
+    let mut params: Vec<rusqlite::types::Value> = Vec::new();
     if let Some(uid) = uid_filter {
-        let mut stmt = conn.prepare(
-            "SELECT id, ts_ms, uid, pid, start_time, decision, deny_reason, \
-             resource_kind, resource_browser, resource_profile, path, exe, \
-             exe_owner_uid, trust_tier, process_browser, parent_pid, parent_exe, \
-             lease_id, backend_diag FROM events WHERE uid = ?1 ORDER BY id DESC LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![uid, limit], row_to_event)?;
-        for r in rows {
-            out.push(r?);
-        }
+        sql.push_str(" AND uid = ?");
+        params.push(uid.into());
+    }
+    if let Some(id) = before_id {
+        sql.push_str(" AND id < ?");
+        params.push(id.into());
+    }
+    if let Some(id) = after_id {
+        sql.push_str(" AND id > ?");
+        params.push(id.into());
+    }
+    if after_id.is_some() {
+        sql.push_str(" ORDER BY id ASC LIMIT ?");
     } else {
-        let mut stmt = conn.prepare(
-            "SELECT id, ts_ms, uid, pid, start_time, decision, deny_reason, \
-             resource_kind, resource_browser, resource_profile, path, exe, \
-             exe_owner_uid, trust_tier, process_browser, parent_pid, parent_exe, \
-             lease_id, backend_diag FROM events ORDER BY id DESC LIMIT ?1",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![limit], row_to_event)?;
-        for r in rows {
-            out.push(r?);
-        }
+        sql.push_str(" ORDER BY id DESC LIMIT ?");
+    }
+    params.push(limit.into());
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(params), row_to_event)?;
+    for r in rows {
+        out.push(r?);
     }
     Ok(out)
 }
@@ -567,6 +586,28 @@ mod tests {
         let theirs = store.query_events(Some(1001), 100).unwrap();
         assert_eq!(theirs.len(), 1);
         assert_eq!(theirs[0].record.uid, 1001);
+    }
+
+    #[test]
+    fn cursor_queries_return_older_and_newer_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AuditStore::open(&dir.path().join("audit.db")).unwrap();
+        for path in ["/p1", "/p2", "/p3"] {
+            store.record(sample_record(1000, path, Decision::Allow));
+        }
+        store.flush();
+        let newest = store
+            .query_events_cursor(Some(1000), 2, None, None)
+            .unwrap();
+        assert_eq!(newest.len(), 2);
+        let older = store
+            .query_events_cursor(Some(1000), 10, newest.last().map(|e| e.id), None)
+            .unwrap();
+        assert_eq!(older.len(), 1);
+        let newer = store
+            .query_events_cursor(Some(1000), 10, None, older.last().map(|e| e.id))
+            .unwrap();
+        assert_eq!(newer.len(), 2);
     }
 
     #[test]

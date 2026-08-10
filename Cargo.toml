@@ -5,6 +5,7 @@ members = [
     "crates/guard-browser",
     "crates/guard-ssh",
     "crates/guard-ipc",
+    "crates/guard-client",
     "crates/guard-audit",
     "crates/platform-linux",
     "crates/guard-test-fixtures",
@@ -13,6 +14,7 @@ members = [
     "apps/guard-tui",
     "apps/guard-test-probe",
     "apps/guard-notify",
+    "apps/guard-ui",
 ]
 
 [workspace.package]
@@ -25,6 +27,7 @@ guard-core = { path = "crates/guard-core" }
 guard-browser = { path = "crates/guard-browser" }
 guard-ssh = { path = "crates/guard-ssh" }
 guard-ipc = { path = "crates/guard-ipc" }
+guard-client = { path = "crates/guard-client" }
 guard-audit = { path = "crates/guard-audit" }
 platform-linux = { path = "crates/platform-linux" }
 guard-test-fixtures = { path = "crates/guard-test-fixtures" }
@@ -42,6 +45,10 @@ sha2 = "0.10"
 rusqlite = { version = "0.31", features = ["bundled"] }
 ratatui = "0.28"
 crossterm = "0.28"
+gtk4 = "0.9"
+libadwaita = "0.7"
+glib = "0.20"
+gio = "0.20"
 
 [profile.release]
 lto = "thin"

@@ -35,13 +35,13 @@ use guard_browser::{CustomProfile, ProtectedResourceRegistry};
 use guard_core::identity::{ExeIdentity, ProcessIdentity};
 use guard_core::lease::{LeaseId, LeaseSet, MigrationAccessLease, MigrationLeaseState};
 use guard_core::policy::{evaluate, AccessEvent, AccessOperation, Decision, DenyReason};
-use guard_core::resource::{
-    BrowserFamily, BrowserId, ProfileId, ProtectedResource, ProtectedResourceKind,
-};
+#[cfg(test)]
+use guard_core::resource::BrowserFamily;
+use guard_core::resource::{BrowserId, ProfileId, ProtectedResource, ProtectedResourceKind};
+pub use platform_linux::config::{BrowserEnrollmentConfig, EnforcementConfig, EnforcementMode};
 use platform_linux::enrollment::EnrollmentStore;
 use platform_linux::fanotify;
 use platform_linux::identity as linux_identity;
-use serde::{Deserialize, Serialize};
 
 /// Default migration lease duration (10 minutes), per `08_MIGRATION_LEASE.md`.
 pub const DEFAULT_MIGRATION_DURATION_SECS: u64 = 600;
@@ -57,56 +57,6 @@ pub const DEFAULT_SSH_LOAD_DURATION_SECS: u64 = 30;
 pub const MAX_SSH_LOAD_DURATION_SECS: u64 = 300;
 
 pub type InodeIndex = Arc<RwLock<HashMap<(u64, u64), ProtectedResource>>>;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "kebab-case")]
-pub enum EnforcementMode {
-    #[default]
-    Conservative,
-    StrictFilesystem,
-}
-
-impl EnforcementMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Conservative => "conservative",
-            Self::StrictFilesystem => "strict-filesystem",
-        }
-    }
-}
-
-/// One browser enrollment from config. Drives BOTH resource discovery (which
-/// files are protected) and process identity (which exe is this browser). The
-/// `BrowserId` is config-supplied — no trust is inferred from a path name.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BrowserEnrollmentConfig {
-    pub id: String,
-    pub family: BrowserFamily,
-    /// Chromium `user_data_dir` or Firefox profiles root / single profile dir.
-    pub profile_root: PathBuf,
-    /// Profile owner UID. If omitted, auto-detected from `profile_root` owner.
-    #[serde(default)]
-    pub owner_uid: Option<u32>,
-    /// Canonical executable path(s) that identify this browser process.
-    #[serde(default)]
-    pub exe_paths: Vec<PathBuf>,
-}
-
-/// User-writable executables (e.g. AppImage/custom browser builds) to
-/// hash-enroll so they can reach `EnrolledUserWritable` trust.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EnforcementConfig {
-    #[serde(default)]
-    pub enforcement_mode: EnforcementMode,
-    pub browsers: Vec<BrowserEnrollmentConfig>,
-    #[serde(default)]
-    pub enrolled_exes: Vec<PathBuf>,
-    /// SSH private-key paths to protect at startup (Phase 10). Each is enrolled
-    /// as a `SshPrivateKey` resource. Runtime enrollment via `guardctl ssh
-    /// protect PATH` goes through IPC and does not need to be listed here.
-    #[serde(default)]
-    pub ssh_keys: Vec<PathBuf>,
-}
 
 /// The enforcement engine. Owns the registry, identity cache, enrollment store,
 /// fd-identity index, and the active lease set. `decide` is the hot-path entry.
