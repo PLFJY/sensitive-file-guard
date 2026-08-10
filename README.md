@@ -86,6 +86,9 @@ Conservative policy and individual browser/SSH-key enrollments; applies a
 complete candidate through the authenticated `guardctl` helper; and displays
 the daemon's audit log. It never writes `/etc/guardd/config.json`, evaluates
 policy, or runs as root. `guardctl` remains the supported CLI/automation tool.
+The Protection page discovers installed native browser sources on refresh and
+also supports an explicit custom browser entry (family, existing profile root,
+and canonical executable); discovery alone never grants trust.
 
 ## Install
 

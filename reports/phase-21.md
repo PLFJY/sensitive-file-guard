@@ -62,6 +62,21 @@ empty. Blocking IPC, systemctl, and pkexec work runs via Gio's blocking pool;
 GTK objects stay on the main context. A pure health-state test proves config
 alone cannot show green.
 
+## Post-review usability correction
+
+Desktop review found the first GTK layout used an unconstrained paned sidebar,
+placed an ordinary key button inside a list, and allowed timer ticks to queue
+another background refresh before a slow one completed. The UI now has a fixed
+navigation width, header, scrollable content pages, Adwaita boxed lists, and
+normal-sized action rows/buttons. Refresh has an in-flight guard, so a slow IPC
+or service-state query cannot accumulate work and freeze the interface.
+
+The Protection page now combines configured browser entries with native
+discovery on every refresh and displays their configured/detected state.
+It also adds a custom-browser dialog requiring a family, an existing absolute
+profile root, and a canonical executable regular file. This is still a staged
+candidate; applying it crosses the existing authenticated config boundary.
+
 ## Packaging and docs
 
 Source installation now installs `guard-ui`, a desktop entry, AppStream

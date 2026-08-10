@@ -1,7 +1,7 @@
 //! Native GTK control center.  This process is deliberately only a client:
 //! policy decisions and privileged writes remain in guardd/guardctl.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::rc::Rc;
@@ -63,6 +63,8 @@ struct UiState {
     keys: gtk::ListBox,
     events: gtk::ListBox,
     event_data: Rc<RefCell<Vec<guard_ipc::EventInfo>>>,
+    browser_sources: Rc<RefCell<Vec<platform_linux::config::BrowserEnrollmentConfig>>>,
+    poll_in_flight: Rc<Cell<bool>>,
 }
 
 fn main() {
@@ -104,10 +106,12 @@ fn build_ui(app: &adw::Application) {
         keys: keys.clone(),
         events: events.clone(),
         event_data: Rc::new(RefCell::new(Vec::new())),
+        browser_sources: Rc::new(RefCell::new(Vec::new())),
+        poll_in_flight: Rc::new(Cell::new(false)),
     };
-    let overview = overview_page(&state);
-    let protection = protection_page(&state);
-    let log = log_page(&state);
+    let overview = scroll_page(overview_page(&state));
+    let protection = scroll_page(protection_page(&state));
+    let log = scroll_page(log_page(&state));
     let stack = gtk::Stack::new();
     stack.add_titled(&overview, Some("overview"), "Overview");
     stack.add_titled(&protection, Some("protection"), "Protection");
@@ -128,17 +132,40 @@ fn build_ui(app: &adw::Application) {
             });
         }
     });
+    nav.set_width_request(220);
+    nav.add_css_class("navigation-sidebar");
     let split = gtk::Paned::new(gtk::Orientation::Horizontal);
     split.set_start_child(Some(&nav));
     split.set_end_child(Some(&stack));
+    split.set_position(260);
+    split.set_resize_start_child(false);
+    split.set_shrink_start_child(false);
+    stack.set_hexpand(true);
+    stack.set_vexpand(true);
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let header = adw::HeaderBar::new();
+    let title = gtk::Label::new(Some("Sensitive File Guard"));
+    title.add_css_class("title");
+    header.set_title_widget(Some(&title));
+    root.append(&header);
+    root.append(&split);
     let window = adw::ApplicationWindow::new(app);
     window.set_title(Some("Sensitive File Guard"));
     window.set_default_size(980, 680);
-    window.set_content(Some(&split));
+    window.set_content(Some(&root));
     window.present();
 
     load_configuration(&state);
     start_polling(state);
+}
+
+fn scroll_page(content: gtk::Box) -> gtk::ScrolledWindow {
+    content.set_hexpand(true);
+    content.set_vexpand(false);
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroll.set_child(Some(&content));
+    scroll
 }
 
 fn overview_page(state: &UiState) -> gtk::Box {
@@ -195,13 +222,32 @@ fn protection_page(state: &UiState) -> gtk::Box {
     browsers_heading.set_xalign(0.0);
     browsers_heading.add_css_class("title-2");
     page.append(&browsers_heading);
+    state.browsers.add_css_class("boxed-list");
     page.append(&state.browsers);
+    let browser_actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    browser_actions.set_halign(gtk::Align::Start);
+    let refresh = gtk::Button::with_label("Refresh native browsers");
+    let add_browser = gtk::Button::with_label("Add custom browser…");
+    browser_actions.append(&refresh);
+    browser_actions.append(&add_browser);
+    page.append(&browser_actions);
+    let refresh_state = state.clone();
+    refresh.connect_clicked(move |_| refresh_browser_sources(&refresh_state));
+    let add_state = state.clone();
+    add_browser.connect_clicked(move |_| show_add_browser_dialog(&add_state));
     let keys_heading = gtk::Label::new(Some("SSH private keys"));
     keys_heading.set_xalign(0.0);
     keys_heading.add_css_class("title-2");
     page.append(&keys_heading);
+    state.keys.add_css_class("boxed-list");
     page.append(&state.keys);
+    let add_key = gtk::Button::with_label("Add key…");
+    add_key.set_halign(gtk::Align::Start);
+    let key_state = state.clone();
+    add_key.connect_clicked(move |_| show_add_key_dialog(&key_state));
+    page.append(&add_key);
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    actions.set_halign(gtk::Align::Start);
     actions.append(&state.apply);
     let discard = gtk::Button::with_label("Discard");
     actions.append(&discard);
@@ -303,7 +349,6 @@ fn load_configuration(state: &UiState) {
         state
             .mode
             .set_active_id(Some(cfg.enforcement_mode.as_str()));
-        render_objects(state, &cfg);
     } else {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
@@ -332,36 +377,100 @@ fn load_configuration(state: &UiState) {
         }
         *state.candidate.borrow_mut() = Some(cfg.clone());
         state.mode.set_active_id(Some("strict-filesystem"));
-        render_objects(state, &cfg);
         state.apply.set_sensitive(!cfg.browsers.is_empty());
     }
+    refresh_browser_sources(state);
+}
+
+fn refresh_browser_sources(state: &UiState) {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/nonexistent"));
+    let mut sources = state.browser_sources.borrow().clone();
+    let discovered = platform_linux::config::discover_native_browsers(&home);
+    let configured = state
+        .candidate
+        .borrow()
+        .as_ref()
+        .map(|cfg| cfg.browsers.clone())
+        .unwrap_or_default();
+    for browser in discovered
+        .browsers
+        .into_iter()
+        .map(browser_suggestion_to_enrollment)
+        .chain(configured)
+    {
+        if !sources
+            .iter()
+            .any(|source| same_browser_source(source, &browser))
+        {
+            sources.push(browser);
+        }
+    }
+    *state.browser_sources.borrow_mut() = sources;
+    if let Some(cfg) = state.candidate.borrow().as_ref() {
+        render_objects(state, cfg);
+    }
+}
+
+fn browser_suggestion_to_enrollment(
+    suggestion: platform_linux::config::BrowserSuggestion,
+) -> platform_linux::config::BrowserEnrollmentConfig {
+    platform_linux::config::BrowserEnrollmentConfig {
+        id: suggestion.id,
+        family: suggestion.family,
+        profile_root: suggestion.profile_root,
+        owner_uid: None,
+        exe_paths: suggestion.exe_paths,
+    }
+}
+
+fn same_browser_source(
+    left: &platform_linux::config::BrowserEnrollmentConfig,
+    right: &platform_linux::config::BrowserEnrollmentConfig,
+) -> bool {
+    left.id == right.id && left.profile_root == right.profile_root
 }
 
 fn render_objects(state: &UiState, cfg: &platform_linux::config::EnforcementConfig) {
     while let Some(child) = state.browsers.first_child() {
         state.browsers.remove(&child);
     }
-    for browser in &cfg.browsers {
+    for browser in state.browser_sources.borrow().iter() {
+        let enrolled = cfg
+            .browsers
+            .iter()
+            .any(|configured| same_browser_source(configured, browser));
         let row = adw::ActionRow::new();
-        row.set_title(&browser.id);
+        row.set_title(&browser_display_name(&browser.id));
         row.set_subtitle(&format!(
-            "{} · {}",
+            "{} · {} · {}",
             platform_linux::config::family_name(browser.family),
-            browser.profile_root.display()
+            browser.profile_root.display(),
+            if enrolled {
+                "Configured"
+            } else {
+                "Detected — not protected"
+            }
         ));
         let toggle = gtk::Switch::new();
-        toggle.set_active(true);
+        toggle.set_active(enrolled);
         let candidate = state.candidate.clone();
         let apply = state.apply.clone();
         let browser_copy = browser.clone();
         toggle.connect_state_set(move |_, enabled| {
             if let Some(cfg) = candidate.borrow_mut().as_mut() {
                 if enabled {
-                    if !cfg.browsers.iter().any(|b| b.id == browser_copy.id) {
+                    if !cfg
+                        .browsers
+                        .iter()
+                        .any(|b| same_browser_source(b, &browser_copy))
+                    {
                         cfg.browsers.push(browser_copy.clone());
                     }
                 } else {
-                    cfg.browsers.retain(|b| b.id != browser_copy.id);
+                    cfg.browsers
+                        .retain(|b| !same_browser_source(b, &browser_copy));
                 }
                 apply.set_sensitive(true);
             }
@@ -379,35 +488,175 @@ fn render_objects(state: &UiState, cfg: &platform_linux::config::EnforcementConf
         row.add_prefix(&gtk::Image::from_icon_name("emblem-ok-symbolic"));
         state.keys.append(&row);
     }
-    let add = gtk::Button::with_label("Add Key…");
+}
+
+fn browser_display_name(id: &str) -> String {
+    match id {
+        "firefox" => "Firefox",
+        "firefox-esr" => "Firefox ESR",
+        "google-chrome" => "Google Chrome",
+        "microsoft-edge" => "Microsoft Edge",
+        "zen" => "Zen Browser",
+        "brave" => "Brave",
+        "opera" => "Opera",
+        "vivaldi" => "Vivaldi",
+        "chromium" => "Chromium",
+        _ => id,
+    }
+    .to_owned()
+}
+
+fn show_add_key_dialog(state: &UiState) {
+    let dialog = gtk::FileChooserNative::new(
+        Some("Select an SSH private key"),
+        None::<&gtk::Window>,
+        gtk::FileChooserAction::Open,
+        Some("Add"),
+        Some("Cancel"),
+    );
     let candidate = state.candidate.clone();
     let apply = state.apply.clone();
-    add.connect_clicked(move |_| {
-        let dialog = gtk::FileChooserNative::new(
-            Some("Select an SSH private key"),
-            None::<&gtk::Window>,
-            gtk::FileChooserAction::Open,
-            Some("Add"),
-            Some("Cancel"),
-        );
-        let candidate = candidate.clone();
-        let apply = apply.clone();
-        dialog.connect_response(move |dialog, response| {
-            if response == gtk::ResponseType::Accept {
-                if let Some(path) = dialog.file().and_then(|f| f.path()) {
-                    if let Some(cfg) = candidate.borrow_mut().as_mut() {
-                        if !cfg.ssh_keys.contains(&path) {
-                            cfg.ssh_keys.push(path);
-                            apply.set_sensitive(true);
-                        }
+    let render_state = state.clone();
+    dialog.connect_response(move |dialog, response| {
+        if response == gtk::ResponseType::Accept {
+            if let Some(path) = dialog.file().and_then(|file| file.path()) {
+                if let Some(cfg) = candidate.borrow_mut().as_mut() {
+                    if !cfg.ssh_keys.contains(&path) {
+                        cfg.ssh_keys.push(path);
+                        apply.set_sensitive(true);
                     }
                 }
+                if let Some(cfg) = render_state.candidate.borrow().as_ref() {
+                    render_objects(&render_state, cfg);
+                }
             }
-            dialog.destroy();
-        });
-        dialog.show();
+        }
+        dialog.destroy();
     });
-    state.keys.append(&add);
+    dialog.show();
+}
+
+fn show_add_browser_dialog(state: &UiState) {
+    let dialog = gtk::Dialog::with_buttons(
+        Some("Add custom browser"),
+        None::<&gtk::Window>,
+        gtk::DialogFlags::MODAL,
+        &[
+            ("Cancel", gtk::ResponseType::Cancel),
+            ("Add browser", gtk::ResponseType::Accept),
+        ],
+    );
+    dialog.set_default_size(520, -1);
+    let content = dialog.content_area();
+    content.set_spacing(12);
+    content.set_margin_top(18);
+    content.set_margin_bottom(18);
+    content.set_margin_start(18);
+    content.set_margin_end(18);
+
+    let id = gtk::Entry::new();
+    id.set_placeholder_text(Some("Identifier, e.g. work-chromium"));
+    let family = gtk::ComboBoxText::new();
+    family.append(Some("firefox"), "Firefox");
+    family.append(Some("zen"), "Zen Browser");
+    family.append(Some("chromium"), "Chromium family");
+    family.set_active_id(Some("chromium"));
+    let profile = gtk::Entry::new();
+    profile.set_placeholder_text(Some("Profile root, e.g. /home/me/.config/chromium"));
+    let executable = gtk::Entry::new();
+    executable.set_placeholder_text(Some("Actual executable, not a launcher"));
+    let error = gtk::Label::new(None);
+    error.add_css_class("error");
+    error.set_wrap(true);
+    error.set_xalign(0.0);
+    for (label, widget) in [
+        ("Identifier", id.clone().upcast::<gtk::Widget>()),
+        ("Browser family", family.clone().upcast::<gtk::Widget>()),
+        ("Profile root", profile.clone().upcast::<gtk::Widget>()),
+        ("Executable", executable.clone().upcast::<gtk::Widget>()),
+    ] {
+        let row = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        let title = gtk::Label::new(Some(label));
+        title.set_xalign(0.0);
+        row.append(&title);
+        row.append(&widget);
+        content.append(&row);
+    }
+    content.append(&error);
+
+    let source_state = state.browser_sources.clone();
+    let candidate = state.candidate.clone();
+    let apply = state.apply.clone();
+    let render_state = state.clone();
+    dialog.connect_response(move |dialog, response| {
+        if response != gtk::ResponseType::Accept {
+            dialog.destroy();
+            return;
+        }
+        match custom_browser_from_entries(&id, &family, &profile, &executable) {
+            Ok(browser) => {
+                if let Some(cfg) = candidate.borrow_mut().as_mut() {
+                    if !cfg
+                        .browsers
+                        .iter()
+                        .any(|configured| same_browser_source(configured, &browser))
+                    {
+                        cfg.browsers.push(browser.clone());
+                    }
+                }
+                if !source_state
+                    .borrow()
+                    .iter()
+                    .any(|source| same_browser_source(source, &browser))
+                {
+                    source_state.borrow_mut().push(browser);
+                }
+                apply.set_sensitive(true);
+                refresh_browser_sources(&render_state);
+                dialog.destroy();
+            }
+            Err(message) => error.set_text(&message),
+        }
+    });
+    dialog.show();
+}
+
+fn custom_browser_from_entries(
+    id: &gtk::Entry,
+    family: &gtk::ComboBoxText,
+    profile: &gtk::Entry,
+    executable: &gtk::Entry,
+) -> Result<platform_linux::config::BrowserEnrollmentConfig, String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let id = id.text().trim().to_owned();
+    if id.is_empty() {
+        return Err("An identifier is required.".into());
+    }
+    let profile_root = PathBuf::from(profile.text().as_str());
+    if !profile_root.is_absolute() || !profile_root.is_dir() {
+        return Err("Profile root must be an existing absolute directory.".into());
+    }
+    let executable = PathBuf::from(executable.text().as_str());
+    let canonical_exe = std::fs::canonicalize(&executable)
+        .map_err(|_| "Executable must exist and resolve to a real file.".to_owned())?;
+    let metadata = std::fs::metadata(&canonical_exe)
+        .map_err(|_| "Unable to inspect the executable.".to_owned())?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+        return Err("Executable must be a runnable regular file, not a launcher name.".into());
+    }
+    let browser_family = match family.active_id().as_deref() {
+        Some("firefox") => guard_core::resource::BrowserFamily::Firefox,
+        Some("zen") => guard_core::resource::BrowserFamily::Zen,
+        _ => guard_core::resource::BrowserFamily::Chromium,
+    };
+    Ok(platform_linux::config::BrowserEnrollmentConfig {
+        id,
+        family: browser_family,
+        profile_root,
+        owner_uid: None,
+        exe_paths: vec![canonical_exe],
+    })
 }
 
 fn start_polling(state: UiState) {
@@ -421,12 +670,18 @@ fn start_polling(state: UiState) {
 }
 
 fn refresh_state(state: &UiState) {
+    // Never queue refresh work behind a stalled socket or service query. One
+    // background request is enough; the next timer tick retries after it ends.
+    if state.poll_in_flight.replace(true) {
+        return;
+    }
     let socket = PathBuf::from(SOCKET);
     let configured = state.persisted.borrow().is_some();
     let status = state.status.clone();
     let detail = state.detail.clone();
     let events = state.events.clone();
     let event_data = state.event_data.clone();
+    let poll_in_flight = state.poll_in_flight.clone();
     let after_id = event_data.borrow().first().map(|event| event.id);
     glib::MainContext::default().spawn_local(async move {
         let result = gio::spawn_blocking(move || {
@@ -458,6 +713,7 @@ fn refresh_state(state: &UiState) {
                 if after_id.is_some() { events.insert(&row, 0); } else { events.append(&row); }
             }
         }
+        poll_in_flight.set(false);
         let _ = events;
     });
 }

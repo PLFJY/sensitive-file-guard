@@ -819,6 +819,7 @@ dependencies = [
  "glib",
  "gtk4",
  "guard-client",
+ "guard-core",
  "guard-ipc",
  "libadwaita",
  "platform-linux",
