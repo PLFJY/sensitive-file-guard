@@ -30,6 +30,9 @@ and Fedora use `polkit`; Arch `libnotify` provides `notify-send`.
 
 `guard-ui` is an unprivileged GTK 4/libadwaita presentation and control client;
 it is not auto-started and never replaces `guardctl` for automation.
+Launch it from the logged-in desktop session with `guard-ui` (or the
+“Sensitive File Guard” application entry after installation). For a source
+checkout before installation, use `target/release/guard-ui`.
 
 ## Source installation
 

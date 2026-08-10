@@ -65,17 +65,28 @@ alone cannot show green.
 ## Post-review usability correction
 
 Desktop review found the first GTK layout used an unconstrained paned sidebar,
-placed an ordinary key button inside a list, and allowed timer ticks to queue
-another background refresh before a slow one completed. The UI now has a fixed
-navigation width, header, scrollable content pages, Adwaita boxed lists, and
-normal-sized action rows/buttons. Refresh has an in-flight guard, so a slow IPC
-or service-state query cannot accumulate work and freeze the interface.
+placed an ordinary key button inside a list, used raw `GtkSwitch` suffixes that
+could stretch into narrow vertical bars under the desktop theme, and allowed
+timer ticks to queue another background refresh before a slow one completed.
+The UI now has a fixed navigation width, header, scrollable content pages,
+Adwaita boxed lists, native `AdwSwitchRow` controls, and normal-sized action
+rows/buttons. IPC client reads and writes have a two-second bound, and refresh
+has an in-flight guard, so a stalled local listener cannot accumulate work or
+freeze the interface.
 
 The Protection page now combines configured browser entries with native
 discovery on every refresh and displays their configured/detected state.
 It also adds a custom-browser dialog requiring a family, an existing absolute
 profile root, and a canonical executable regular file. This is still a staged
 candidate; applying it crosses the existing authenticated config boundary.
+
+The Overview protection switch is now bound to the observed
+`guardd.service` state, not an initial local default. It polls every two
+seconds, reflects changes made through `systemctl` or `guardctl`, and suppresses
+the switch callback during synchronization so a refresh cannot trigger a
+second privileged action. A running service with unavailable daemon IPC is
+shown as `UNREACHABLE` while the switch remains on, preserving the distinction
+between service state and enforcement health.
 
 ## Packaging and docs
 
@@ -99,7 +110,8 @@ workspace all-feature tests; release workspace build excluding the probe;
 unit. Focused helper tests reject malformed, oversized, empty, relative-path,
 and unsupported-mode candidates. Direct non-root helper smoke tests returned
 the expected root-required error. GTK compilation and the health-state test
-passed; no graphical display was available for a real-window smoke run.
+passed; a Wayland startup smoke (`timeout 3s env GDK_BACKEND=wayland
+target/release/guard-ui`) kept the process alive until the expected timeout.
 
 ## Privileged regressions and limitations
 

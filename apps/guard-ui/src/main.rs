@@ -28,16 +28,18 @@ fn health_from_evidence(
     daemon: Option<&guard_ipc::StatusInfo>,
     configured: bool,
 ) -> Health {
-    if !configured {
-        return Health::NotConfigured;
+    if service_active {
+        return match daemon.map(|s| s.status.as_str()) {
+            Some("ACTIVE") => Health::Active,
+            Some("DEGRADED") | Some("NOT_ENFORCING") => Health::Degraded,
+            Some(_) => Health::Unreachable,
+            None => Health::Unreachable,
+        };
     }
-    if !service_active {
-        return Health::Stopped;
-    }
-    match daemon.map(|s| s.status.as_str()) {
-        Some("ACTIVE") => Health::Active,
-        Some("DEGRADED") | Some("NOT_ENFORCING") => Health::Degraded,
-        _ => Health::Unreachable,
+    if configured {
+        Health::Stopped
+    } else {
+        Health::NotConfigured
     }
 }
 
@@ -65,10 +67,15 @@ struct UiState {
     event_data: Rc<RefCell<Vec<guard_ipc::EventInfo>>>,
     browser_sources: Rc<RefCell<Vec<platform_linux::config::BrowserEnrollmentConfig>>>,
     poll_in_flight: Rc<Cell<bool>>,
+    protection: Rc<RefCell<Option<adw::SwitchRow>>>,
+    protection_syncing: Rc<Cell<bool>>,
 }
 
 fn main() {
     adw::init().expect("libadwaita initialization");
+    // Let libadwaita own the color preference instead of inheriting the
+    // deprecated GtkSettings dark-theme toggle from the desktop session.
+    adw::StyleManager::default().set_color_scheme(adw::ColorScheme::Default);
     let app = adw::Application::new(Some(APP_ID), gio::ApplicationFlags::empty());
     app.connect_activate(build_ui);
     app.run();
@@ -108,6 +115,8 @@ fn build_ui(app: &adw::Application) {
         event_data: Rc::new(RefCell::new(Vec::new())),
         browser_sources: Rc::new(RefCell::new(Vec::new())),
         poll_in_flight: Rc::new(Cell::new(false)),
+        protection: Rc::new(RefCell::new(None)),
+        protection_syncing: Rc::new(Cell::new(false)),
     };
     let overview = scroll_page(overview_page(&state));
     let protection = scroll_page(protection_page(&state));
@@ -176,19 +185,24 @@ fn overview_page(state: &UiState) -> gtk::Box {
     page.set_margin_end(24);
     page.append(&state.status);
     page.append(&state.detail);
-    let switch = gtk::Switch::new();
-    switch.set_active(false);
-    let row = adw::ActionRow::new();
+    let row = adw::SwitchRow::new();
     row.set_title("Protection");
     row.set_subtitle("Turning protection off makes protected files accessible normally.");
-    row.add_suffix(&switch);
-    row.set_activatable_widget(Some(&switch));
-    let start_switch = switch.clone();
-    switch.connect_state_set(move |_, on| {
-        let verb = if on { "start" } else { "stop" };
-        start_switch.set_sensitive(false);
-        spawn_privileged_service(verb.to_owned(), start_switch.clone());
-        false.into()
+    row.set_active(false);
+    *state.protection.borrow_mut() = Some(row.clone());
+    let start_row = row.clone();
+    let syncing = state.protection_syncing.clone();
+    row.connect_active_notify(move |switch_row| {
+        if syncing.get() {
+            return;
+        }
+        let verb = if switch_row.is_active() {
+            "start"
+        } else {
+            "stop"
+        };
+        start_row.set_sensitive(false);
+        spawn_privileged_service(verb.to_owned(), start_row.clone(), syncing.clone());
     });
     page.append(&row);
     page
@@ -441,7 +455,7 @@ fn render_objects(state: &UiState, cfg: &platform_linux::config::EnforcementConf
             .browsers
             .iter()
             .any(|configured| same_browser_source(configured, browser));
-        let row = adw::ActionRow::new();
+        let row = adw::SwitchRow::new();
         row.set_title(&browser_display_name(&browser.id));
         row.set_subtitle(&format!(
             "{} · {} · {}",
@@ -453,14 +467,13 @@ fn render_objects(state: &UiState, cfg: &platform_linux::config::EnforcementConf
                 "Detected — not protected"
             }
         ));
-        let toggle = gtk::Switch::new();
-        toggle.set_active(enrolled);
+        row.set_active(enrolled);
         let candidate = state.candidate.clone();
         let apply = state.apply.clone();
         let browser_copy = browser.clone();
-        toggle.connect_state_set(move |_, enabled| {
+        row.connect_active_notify(move |switch_row| {
             if let Some(cfg) = candidate.borrow_mut().as_mut() {
-                if enabled {
+                if switch_row.is_active() {
                     if !cfg
                         .browsers
                         .iter()
@@ -474,9 +487,7 @@ fn render_objects(state: &UiState, cfg: &platform_linux::config::EnforcementConf
                 }
                 apply.set_sensitive(true);
             }
-            false.into()
         });
-        row.add_suffix(&toggle);
         state.browsers.append(&row);
     }
     while let Some(child) = state.keys.first_child() {
@@ -682,6 +693,8 @@ fn refresh_state(state: &UiState) {
     let events = state.events.clone();
     let event_data = state.event_data.clone();
     let poll_in_flight = state.poll_in_flight.clone();
+    let protection = state.protection.clone();
+    let protection_syncing = state.protection_syncing.clone();
     let after_id = event_data.borrow().first().map(|event| event.id);
     glib::MainContext::default().spawn_local(async move {
         let result = gio::spawn_blocking(move || {
@@ -693,6 +706,18 @@ fn refresh_state(state: &UiState) {
         if let Ok((service_active, daemon, recent_events)) = result {
             let health = health_from_evidence(service_active, daemon.as_ref(), configured);
             status.set_text(health_label(health));
+            // The switch represents the actual systemd service state.  Keep it
+            // synchronized with out-of-band `systemctl`/`guardctl` changes,
+            // while suppressing its callback so a refresh never starts a new
+            // privileged operation.
+            if let Some(row) = protection.borrow().as_ref() {
+                if row.is_active() != service_active {
+                    protection_syncing.set(true);
+                    row.set_active(service_active);
+                    protection_syncing.set(false);
+                }
+                row.set_sensitive(true);
+            }
             detail.set_text(&daemon.map(|s| format!("Mode: {} · browsers: {} · SSH keys/resources: {} · allowed: {} · denied: {} · marks: {}/{}", s.mode, s.browsers, s.protected_files, s.allowed, s.denied, s.marked_filesystems, s.required_filesystems)).unwrap_or_else(|| "guardd IPC is unavailable; service state is shown separately.".into()));
             if after_id.is_none() {
                 while let Some(child) = events.first_child() { events.remove(&child); }
@@ -718,7 +743,7 @@ fn refresh_state(state: &UiState) {
     });
 }
 
-fn spawn_privileged_service(verb: String, switch: gtk::Switch) {
+fn spawn_privileged_service(verb: String, switch: adw::SwitchRow, syncing: Rc<Cell<bool>>) {
     let requested_on = verb == "start";
     glib::MainContext::default().spawn_local(async move {
         let ok = gio::spawn_blocking(move || {
@@ -731,7 +756,9 @@ fn spawn_privileged_service(verb: String, switch: gtk::Switch) {
         .await
         .unwrap_or(false);
         switch.set_sensitive(true);
+        syncing.set(true);
         switch.set_active(ok && requested_on);
+        syncing.set(false);
     });
 }
 
@@ -795,6 +822,10 @@ mod tests {
         };
         assert_eq!(
             health_from_evidence(true, Some(&status), true),
+            Health::Active
+        );
+        assert_eq!(
+            health_from_evidence(true, Some(&status), false),
             Health::Active
         );
         assert_eq!(

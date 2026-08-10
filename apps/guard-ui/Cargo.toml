@@ -12,7 +12,7 @@ guard-ipc.workspace = true
 platform-linux.workspace = true
 serde_json.workspace = true
 gtk4.workspace = true
-libadwaita.workspace = true
+libadwaita = { workspace = true, features = ["v1_4"] }
 glib.workspace = true
 gio.workspace = true
 

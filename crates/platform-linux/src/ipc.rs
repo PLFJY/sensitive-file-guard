@@ -292,6 +292,11 @@ impl IpcClient {
     /// Connect to `path`, send a framed request, read one framed response.
     pub fn request(path: &Path, req_bytes: &[u8]) -> io::Result<Vec<u8>> {
         let mut stream = UnixStream::connect(path)?;
+        // A stalled local listener must not leave a CLI, TUI, or GTK worker
+        // blocked forever. Status/event requests are intentionally bounded;
+        // callers can retry on the next poll or command invocation.
+        stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
         write_response(&mut stream, req_bytes)?;
         // Allow a generous response limit (CLI side; daemon is trusted).
         read_request(&mut stream, 16 * 1024 * 1024)
