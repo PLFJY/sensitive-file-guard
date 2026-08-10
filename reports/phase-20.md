@@ -165,3 +165,38 @@ root-test scripts, `LICENSE-MIT`, `LICENSE-APACHE`, and `packaging/aur/`.
    pre-open descriptor, rename-only, queue-overflow, and root-compromise
    boundaries remain unchanged from Phase 19/19.1.
 4. AUR publication and any privileged package installation remain human actions.
+
+## Post-validation deployment follow-up: explicit setup CLI
+
+An attempted post-package activation exposed that an enabled unit with no
+`/etc/guardd/config.json` exited before creating its IPC socket. This was not a
+browser identity bypass: no fanotify enforcement was running. The follow-up
+adds `guardctl setup` to turn the previously manual configuration step into a
+safe explicit initialization flow.
+
+- `sudo guardctl setup --home "$HOME"` requires an explicit selected home when
+  running as root, discovers only native profile/final-executable pairs, prints
+  the proposed configuration, asks for confirmation (or requires explicit
+  `--yes`), and writes a new mode-`0600` config without overwriting an existing
+  one.
+- It emits `strict-filesystem`, omits `owner_uid` for daemon-side statting, and
+  deliberately leaves `ssh_keys` empty. It refuses an empty native discovery
+  result and reports sandboxed candidates without enrolling them.
+- `guardd.service` now has `ConditionPathExists=/etc/guardd/config.json`, so a
+  machine missing deliberate configuration does not enter a misleading restart
+  loop. Setup does not enable or start the daemon.
+- Source installation now installs only a non-active example under
+  `/usr/local/share/guardd`; it no longer creates an empty active config that
+  would block setup or create a false impression of coverage.
+
+Focused non-privileged validation passed: 15 `guardctl` tests, including setup
+creation/no-overwrite/empty-discovery/deduplication cases; a synthetic-profile
+CLI run produced strict JSON with one canonical executable, no UID/SSH guess,
+and a new mode-`0750` config directory containing a mode-`0600` file.
+`systemd-analyze verify` passed for the rendered unit. The full workspace
+`cargo fmt --check`, clippy with `-D warnings`, all-feature test suite,
+release build, shell syntax checks, and `git diff --check` also passed.
+
+This follow-up is not in the already-installed
+`sensitive-file-guard-git-0.1.0.r6.g2425da7-1` package. Rebuild/install from a
+commit containing these changes before invoking the installed `guardctl setup`.

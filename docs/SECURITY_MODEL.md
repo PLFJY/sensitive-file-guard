@@ -247,6 +247,13 @@ does not treat `/usr/bin` launchers, `argv[0]`, a basename, or package metadata
 as an identity. Omitting `owner_uid` is safe only for an existing profile root:
 guardd stats that root and fails if it cannot.
 
+`guardctl setup --home PATH` is the explicit deployment path for native
+profiles. It requires an explicit home when invoked as root, writes only a new
+non-empty `strict-filesystem` configuration after confirmation, and does not
+start the daemon. It never guesses SSH keys or treats unsupported sandboxed
+paths as browser enrollment. A missing configuration makes the provided unit
+ineligible to start rather than allowing an empty policy to appear active.
+
 Native Firefox and Debian Firefox ESR are ordinary Firefox-family enrollments
 with separately configured executable/profile pairs. Typical ESR values are
 `/usr/lib/firefox-esr/firefox-esr` and `~/.mozilla/firefox-esr`; no Debian
@@ -375,18 +382,21 @@ noise and are recorded only as a usability smoke test. Strict remains opt-in.
 1. **Set `enforcement_mode` to `strict-filesystem`** for the accepted security
    boundary. Conservative is the lower-overhead compatibility mode and retains
    a known replacement race.
-2. **Start `guardd` before user sessions** (Phase 14 systemd unit with
+2. **Create a non-empty reviewed configuration first** with `sudo guardctl
+   setup --home "$HOME"` for a native browser profile, then start `guardd`.
+   The helper does not infer SSH keys; enroll those deliberately if needed.
+3. **Start `guardd` before user sessions** (Phase 14 systemd unit with
    `DefaultDependencies=yes`, `Before=graphical.target`).
-3. **Use `Restart=always`** with a short `RestartSec` to minimize the
+4. **Use `Restart=always`** with a short `RestartSec` to minimize the
    crash-restart window.
-4. **Enroll SSH keys at startup** via config (`ssh_keys` array) so they are
+5. **Enroll SSH keys at startup** via config (`ssh_keys` array) so they are
    protected from boot, not only after a manual `guardctl ssh protect`.
-5. **Run `guardd` as root** (required for `FAN_CLASS_CONTENT` +
+6. **Run `guardd` as root** (required for `FAN_CLASS_CONTENT` +
    `CAP_SYS_ADMIN`). The daemon does not need to run as the user; it resolves
    process identity via `/proc` regardless of the target process's UID.
-6. **Audit log persistence** (Phase 07): the SQLite audit DB survives daemon
+7. **Audit log persistence** (Phase 07): the SQLite audit DB survives daemon
    restarts. Review `guardctl events` periodically.
-7. Put interactive users in `guardd-users` for socket transport. This does not
+8. Put interactive users in `guardd-users` for socket transport. This does not
    authorize mutations: migration and SSH policy changes separately require
    polkit. Log out and back in after installation so both the shell and the
    existing `systemd --user` manager receive the new supplementary group.

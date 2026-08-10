@@ -37,15 +37,36 @@ sudo deploy/install.sh                # installs existing artifacts only
 
 Source installation uses `/usr/local/bin`, `/etc/systemd/system`,
 `/usr/local/lib/systemd/user`, and `/usr/local/share/polkit-1/actions`. It does
-not build as root, overwrite `/etc/guardd/config.json`, enable, or start guardd.
+not build as root, create or overwrite `/etc/guardd/config.json`, enable, or
+start guardd.
 It creates `guardd-users` and adds the sudo-invoking user. To choose another
 account explicitly: `sudo usermod -aG guardd-users alice`. Log out/in before
 using `guardctl` or `guard-notify` so supplementary groups refresh.
 
 ## Configuration and browser portability
 
-The template `/etc/guardd/config.json` is intentionally strict mode with empty
-browser/key lists: no username, UID 1000, guessed profile, or guessed SSH key.
+There is intentionally no active default `/etc/guardd/config.json`: an empty
+strict-mode configuration would look protected while protecting no resources.
+The packaged template is only an example. It has no username, UID 1000,
+guessed profile, or guessed SSH key.
+
+For a supported native browser installation, create a configuration with the
+explicit setup command:
+
+```sh
+# "$HOME" expands before sudo, so the selected desktop user's home is explicit.
+sudo guardctl setup --home "$HOME"
+```
+
+The command prints the proposed JSON, requires `yes` before writing, creates
+only a new `/etc/guardd/config.json` with mode `0600`, and does not start the
+daemon. It refuses to overwrite an existing file, refuses to emit an empty
+configuration, and omits unsupported Snap/Flatpak roots and all SSH keys. Use
+`--yes` only for an already-reviewed non-interactive invocation. If the command
+runs as root, `--home` is mandatory so `/root` is never selected accidentally.
+
+For custom browser layouts, inspect suggestions and build the explicit config
+yourself:
 
 ```sh
 guardctl browser discover
@@ -95,10 +116,8 @@ enable/start guardd. After package installation:
 
 ```sh
 sudo usermod -aG guardd-users "$USER"
-# log out/in; copy and edit the example deliberately
-sudo install -d -m 0750 /etc/guardd
-sudo cp /usr/share/guardd/guardd-config.example.json /etc/guardd/config.json
-sudoedit /etc/guardd/config.json
+# log out/in; discover and confirm a native browser configuration
+sudo guardctl setup --home "$HOME"
 sudo systemctl enable --now guardd
 systemctl --user enable --now guard-notify
 ```
@@ -121,6 +140,8 @@ systemctl --user status guard-notify
 Healthy Strict status is `mode = strict-filesystem`, `ACTIVE`, healthy required
 filesystem marks, and zero classifier failures, queue overflows, and audit drops
 under normal startup. Missing roots/keys or failed marks must not become ACTIVE.
+When no configuration exists, the provided unit is deliberately skipped by its
+`ConditionPathExists` rather than restart-looping; run `guardctl setup` first.
 `conservative` is compatibility-only and has the known replacement/topology race.
 
 To update: stop guardd, update source, build unprivileged, run the installer,

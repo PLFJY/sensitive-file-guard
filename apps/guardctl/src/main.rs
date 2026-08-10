@@ -8,6 +8,7 @@
 //! All authorization is enforced by the daemon using kernel-verified peer
 //! credentials (`SO_PEERCRED`); the CLI never sends a UID.
 
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -59,6 +60,20 @@ enum Command {
     Browser {
         #[command(subcommand)]
         action: BrowserAction,
+    },
+    /// Create a reviewed strict-filesystem configuration for one explicitly
+    /// selected user's native browser profiles. This does not start guardd.
+    Setup {
+        /// Home directory whose profiles are to be protected. Required when
+        /// this command runs as root; use `sudo guardctl setup --home "$HOME"`.
+        #[arg(long, value_name = "PATH")]
+        home: Option<PathBuf>,
+        /// Destination configuration. Existing files are never overwritten.
+        #[arg(long, value_name = "PATH", default_value = "/etc/guardd/config.json")]
+        config: PathBuf,
+        /// Write without the interactive "yes" confirmation.
+        #[arg(long)]
+        yes: bool,
     },
     /// List recent authorization events.
     Events {
@@ -218,6 +233,9 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
     {
         return run_browser_discover(home.as_deref());
     }
+    if let Command::Setup { home, config, yes } = &cli.command {
+        return run_setup(home.as_deref(), config, *yes);
+    }
     // `ssh load` runs a multi-step brokered flow (authorize -> continue child
     // -> revoke) that does not fit the single-request dispatch below.
     if let Command::Ssh {
@@ -238,6 +256,7 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
         Command::Browser {
             action: BrowserAction::Discover { .. },
         } => unreachable!("browser discover handled before IPC dispatch"),
+        Command::Setup { .. } => unreachable!("setup handled before IPC dispatch"),
         Command::Events { limit } => RequestOp::Events { limit: *limit },
         Command::Explain { event_id } => RequestOp::Explain {
             event_id: *event_id,
@@ -402,6 +421,25 @@ struct BrowserDiscovery {
     unsupported_sandboxed: Vec<UnsupportedSandboxedBrowser>,
 }
 
+/// Deliberately separate from the daemon's config type: `guardctl` remains a
+/// client binary and writes the public JSON contract rather than linking the
+/// daemon implementation into an installation helper.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct SetupBrowserConfig {
+    id: String,
+    family: &'static str,
+    profile_root: String,
+    exe_paths: Vec<String>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct SetupConfig {
+    enforcement_mode: &'static str,
+    browsers: Vec<SetupBrowserConfig>,
+    enrolled_exes: Vec<String>,
+    ssh_keys: Vec<String>,
+}
+
 fn run_browser_discover(home: Option<&Path>) -> anyhow::Result<()> {
     let home = match home {
         Some(home) => home.to_path_buf(),
@@ -424,6 +462,169 @@ fn run_browser_discover(home: Option<&Path>) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn run_setup(home: Option<&Path>, config_path: &Path, assume_yes: bool) -> anyhow::Result<()> {
+    reject_existing_config(config_path)?;
+    let home = resolve_setup_home(home)?;
+    let discovery = discover_browsers(&home, NATIVE_BROWSER_LAYOUTS);
+    let config = setup_config(&discovery)?;
+    let rendered = serde_json::to_string_pretty(&config)?;
+
+    println!(
+        "The following strict-filesystem configuration will be written to {}:\n",
+        config_path.display()
+    );
+    println!("{rendered}");
+    if !discovery.unsupported_sandboxed.is_empty() {
+        eprintln!(
+            "guardctl: Snap/Flatpak profile roots were found but deliberately omitted: {}",
+            discovery
+                .unsupported_sandboxed
+                .iter()
+                .map(|browser| browser.kind.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    eprintln!(
+        "guardctl: SSH keys are intentionally not guessed or added. Use `guardctl ssh suggest` and select a key explicitly after setup."
+    );
+
+    if !assume_yes && !confirm_setup()? {
+        anyhow::bail!("setup cancelled; no configuration was written");
+    }
+
+    write_new_config(config_path, &(rendered + "\n"))?;
+    println!("Created {} with mode 0600.", config_path.display());
+    println!("Review it, then run: sudo systemctl enable --now guardd");
+    println!("Verify with: guardctl status");
+    Ok(())
+}
+
+fn resolve_setup_home(home: Option<&Path>) -> anyhow::Result<PathBuf> {
+    let is_root = {
+        // SAFETY: `geteuid` has no preconditions and reads only this process's
+        // effective UID. It prevents sudo from silently selecting /root.
+        unsafe { libc::geteuid() == 0 }
+    };
+    let home = match home {
+        Some(home) => home.to_path_buf(),
+        None if is_root => anyhow::bail!(
+            "--home PATH is required when setup runs as root; for example: sudo guardctl setup --home \"$HOME\""
+        ),
+        None => std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow::anyhow!("HOME is unset; pass --home PATH"))?,
+    };
+    if !home.is_dir() {
+        anyhow::bail!(
+            "home directory {} does not exist or is not a directory",
+            home.display()
+        );
+    }
+    std::fs::canonicalize(&home).map_err(|error| {
+        anyhow::anyhow!("canonicalizing home directory {}: {error}", home.display())
+    })
+}
+
+fn setup_config(discovery: &BrowserDiscovery) -> anyhow::Result<SetupConfig> {
+    if discovery.browsers.is_empty() {
+        anyhow::bail!(
+            "no supported native browser profile/executable pair was found; no configuration was written. Use `guardctl browser discover --home PATH` to inspect candidates, or configure an explicit custom browser path."
+        );
+    }
+    let browsers = discovery
+        .browsers
+        .iter()
+        .map(|browser| {
+            Ok(SetupBrowserConfig {
+                id: browser.id.clone(),
+                family: config_family(&browser.family)?,
+                profile_root: browser.profile_root.clone(),
+                exe_paths: browser.exe_paths.clone(),
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(SetupConfig {
+        enforcement_mode: "strict-filesystem",
+        browsers,
+        enrolled_exes: Vec::new(),
+        ssh_keys: Vec::new(),
+    })
+}
+
+fn config_family(family: &str) -> anyhow::Result<&'static str> {
+    match family {
+        "Firefox" => Ok("firefox"),
+        "Chromium" => Ok("chromium"),
+        // `BrowserSuggestion` is generated only by the static table above.
+        // Refuse a future unrecognised entry rather than write config that the
+        // daemon would reject or interpret differently.
+        _ => anyhow::bail!("unsupported browser family in discovery: {family}"),
+    }
+}
+
+fn reject_existing_config(config_path: &Path) -> anyhow::Result<()> {
+    match std::fs::symlink_metadata(config_path) {
+        Ok(_) => anyhow::bail!(
+            "refusing to overwrite existing configuration {}; review or replace it deliberately",
+            config_path.display()
+        ),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(anyhow::anyhow!(
+            "checking configuration destination {}: {error}",
+            config_path.display()
+        )),
+    }
+}
+
+fn confirm_setup() -> anyhow::Result<bool> {
+    eprint!("Write this configuration? Type yes to continue: ");
+    io::stderr().flush()?;
+    let mut response = String::new();
+    io::stdin().read_line(&mut response)?;
+    Ok(response.trim() == "yes")
+}
+
+fn write_new_config(config_path: &Path, contents: &str) -> anyhow::Result<()> {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let parent = config_path.parent().ok_or_else(|| {
+        anyhow::anyhow!(
+            "configuration destination {} has no parent directory",
+            config_path.display()
+        )
+    })?;
+    let parent_existed = parent.exists();
+    std::fs::create_dir_all(parent).map_err(|error| {
+        anyhow::anyhow!(
+            "creating configuration directory {}: {error}",
+            parent.display()
+        )
+    })?;
+    if !parent_existed {
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o750)).map_err(
+            |error| {
+                anyhow::anyhow!(
+                    "setting configuration directory permissions {}: {error}",
+                    parent.display()
+                )
+            },
+        )?;
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(config_path)
+        .map_err(|error| {
+            anyhow::anyhow!("creating configuration {}: {error}", config_path.display())
+        })?;
+    file.write_all(contents.as_bytes())?;
+    file.sync_all()?;
+    Ok(())
+}
+
 fn discover_browsers(home: &Path, layouts: &[NativeBrowserLayout]) -> BrowserDiscovery {
     let mut browsers = Vec::new();
     for layout in layouts {
@@ -431,12 +632,16 @@ fn discover_browsers(home: &Path, layouts: &[NativeBrowserLayout]) -> BrowserDis
         if !profile_root.is_dir() {
             continue;
         }
-        let exe_paths: Vec<String> = layout
-            .executable_candidates
-            .iter()
-            .filter_map(|candidate| canonical_executable(Path::new(candidate)))
-            .map(|path| path.to_string_lossy().into_owned())
-            .collect();
+        let mut exe_paths = Vec::new();
+        for candidate in layout.executable_candidates {
+            let Some(path) = canonical_executable(Path::new(candidate)) else {
+                continue;
+            };
+            let path = path.to_string_lossy().into_owned();
+            if !exe_paths.contains(&path) {
+                exe_paths.push(path);
+            }
+        }
         if !exe_paths.is_empty() {
             browsers.push(BrowserSuggestion {
                 id: layout.id.to_owned(),
@@ -1233,6 +1438,23 @@ mod tests {
     }
 
     #[test]
+    fn discovery_deduplicates_equivalent_canonical_executables() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(home.join(".mozilla/firefox")).unwrap();
+        let layouts = [NativeBrowserLayout {
+            id: "firefox",
+            family: "Firefox",
+            profile_relative: ".mozilla/firefox",
+            executable_candidates: &["/bin/sh", "/usr/bin/sh"],
+        }];
+
+        let found = discover_browsers(&home, &layouts);
+        assert_eq!(found.browsers.len(), 1);
+        assert_eq!(found.browsers[0].exe_paths.len(), 1);
+    }
+
+    #[test]
     fn discovery_reports_sandboxed_profiles_without_emitting_a_trustable_browser() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path();
@@ -1240,6 +1462,73 @@ mod tests {
         let found = discover_browsers(home, &[]);
         assert!(found.browsers.is_empty());
         assert_eq!(found.unsupported_sandboxed[0].kind, "snap-firefox");
+    }
+
+    #[test]
+    fn setup_generates_nonempty_strict_config_without_uid_or_ssh_guesses() {
+        let discovery = BrowserDiscovery {
+            browsers: vec![BrowserSuggestion {
+                id: "firefox-esr".to_owned(),
+                family: "Firefox".to_owned(),
+                profile_root: "/synthetic/home/.mozilla/firefox-esr".to_owned(),
+                exe_paths: vec!["/usr/lib/firefox-esr/firefox-esr".to_owned()],
+            }],
+            unsupported_sandboxed: Vec::new(),
+        };
+
+        let config = setup_config(&discovery).unwrap();
+        let value = serde_json::to_value(config).unwrap();
+        assert_eq!(value["enforcement_mode"], "strict-filesystem");
+        assert_eq!(value["browsers"][0]["family"], "firefox");
+        assert!(value["browsers"][0].get("owner_uid").is_none());
+        assert_eq!(value["ssh_keys"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn setup_refuses_to_create_an_empty_protection_config() {
+        let error = setup_config(&BrowserDiscovery {
+            browsers: Vec::new(),
+            unsupported_sandboxed: Vec::new(),
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("no supported native browser"));
+    }
+
+    #[test]
+    fn setup_never_overwrites_an_existing_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("config.json");
+        std::fs::write(&config, "keep this config").unwrap();
+        assert!(reject_existing_config(&config).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            "keep this config"
+        );
+    }
+
+    #[test]
+    fn setup_writes_new_config_with_restrictive_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("guardd/config.json");
+        write_new_config(&config, "{\"enforcement_mode\":\"strict-filesystem\"}\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            "{\"enforcement_mode\":\"strict-filesystem\"}\n"
+        );
+        assert_eq!(
+            std::fs::metadata(&config).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(config.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o750
+        );
     }
 
     #[test]

@@ -17,6 +17,10 @@ Description=Sensitive Data Firewall daemon (guardd)
 After=local-fs.target
 Before=graphical.target
 DefaultDependencies=yes
+# A missing configuration means there is no reviewed resource set to protect.
+# Do not restart-loop a daemon that cannot enforce anything; `guardctl setup`
+# creates this file explicitly before the operator enables the service.
+ConditionPathExists=/etc/guardd/config.json
 
 [Service]
 Type=simple

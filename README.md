@@ -96,15 +96,15 @@ security-accepted path.
 # As your normal user, from a source checkout:
 cargo build --release
 sudo deploy/install.sh
-guardctl browser discover
-sudoedit /etc/guardd/config.json
+sudo guardctl setup --home "$HOME"
 sudo systemctl enable --now guardd
 systemctl --user enable --now guard-notify
 guardctl status
 ```
 
 The installer installs already-built binaries; it does not build as root,
-enable, or start the daemon. Its empty strict-mode configuration is intentional.
+enable, or start the daemon. `guardctl setup` writes a new, reviewed strict
+configuration only after finding native browser profile/executable pairs.
 
 ## Run (without systemd)
 
@@ -126,8 +126,9 @@ target/release/guard-tui /run/guardd/guardd.sock
 
 See [`deploy/guardd-config.example.json`](deploy/guardd-config.example.json)
 for a deliberately empty strict-mode template. It contains no username, UID,
-profile, or guessed SSH-key path. Use `guardctl browser discover` to produce
-reviewable native-browser entries. Omit `owner_uid` to have guardd stat the
+profile, or guessed SSH-key path. Use `sudo guardctl setup --home "$HOME"` to
+generate a new reviewable native-browser configuration without `owner_uid`;
+guardd stats the
 existing profile root; it fails rather than silently substituting UID 0.
 
 Linux enforcement is explicit:

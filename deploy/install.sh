@@ -7,8 +7,8 @@
 #
 # Build as an unprivileged user first with `cargo build --release`, then run
 # this script with sudo.  It installs already-built artifacts and deliberately
-# does not enable or start the daemon: an empty strict config must be completed
-# for the intended desktop user first.
+# does not enable or start the daemon: `guardctl setup` creates a reviewed,
+# non-empty strict configuration for the intended desktop user first.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -28,6 +28,7 @@ NOTIFY_UNIT_DST="/usr/local/lib/systemd/user/guard-notify.service"
 CONFIG_DIR="/etc/guardd"
 CONFIG_DST="$CONFIG_DIR/config.json"
 CONFIG_EXAMPLE="$REPO/deploy/guardd-config.example.json"
+CONFIG_EXAMPLE_DST="/usr/local/share/guardd/guardd-config.example.json"
 STATE_DIR="/var/lib/guardd"
 RUN_DIR="/run/guardd"
 POLKIT_SRC="$REPO/deploy/org.guardd.policy"
@@ -51,9 +52,10 @@ if [ "$UNINSTALL" = true ]; then
   rm -f "$UNIT_DST"
   rm -f "$NOTIFY_UNIT_DST"
   rm -f "$POLKIT_DST"
+  rm -f "$CONFIG_EXAMPLE_DST"
   systemctl daemon-reload
   rm -f "$GUARDD_DST" "$GUARDCTL_DST" "$GUARD_TUI_DST" "$GUARD_NOTIFY_DST"
-  echo "    Removed: $UNIT_DST, $NOTIFY_UNIT_DST, $POLKIT_DST, $GUARDD_DST, $GUARDCTL_DST, $GUARD_TUI_DST, $GUARD_NOTIFY_DST"
+  echo "    Removed: $UNIT_DST, $NOTIFY_UNIT_DST, $POLKIT_DST, $CONFIG_EXAMPLE_DST, $GUARDD_DST, $GUARDCTL_DST, $GUARD_TUI_DST, $GUARD_NOTIFY_DST"
   echo "    Preserved: $CONFIG_DIR (edit to remove), $STATE_DIR (audit DB)"
   echo "==> Uninstall complete"
   exit 0
@@ -95,13 +97,13 @@ install -m 0755 "$GUARD_TUI_BIN" "$GUARD_TUI_DST"
 install -m 0755 "$GUARD_NOTIFY_BIN" "$GUARD_NOTIFY_DST"
 echo "    Installed: $GUARDD_DST, $GUARDCTL_DST, $GUARD_TUI_DST, $GUARD_NOTIFY_DST"
 
-# 3. Install config (don't overwrite existing).
-mkdir -p "$CONFIG_DIR"
-if [ ! -f "$CONFIG_DST" ]; then
-  install -m 0640 "$CONFIG_EXAMPLE" "$CONFIG_DST"
-  echo "    Installed: $CONFIG_DST (example — edit before starting)"
-else
+# 3. Install a non-active example. Never create /etc/guardd/config.json here:
+# an empty strict config would look configured while protecting no resources.
+install -Dm0644 "$CONFIG_EXAMPLE" "$CONFIG_EXAMPLE_DST"
+if [ -e "$CONFIG_DST" ]; then
   echo "    Preserved: $CONFIG_DST (already exists)"
+else
+  echo "    No active config created; run guardctl setup --home /home/USER"
 fi
 
 # 4. Create state directory.
@@ -123,9 +125,8 @@ echo "    Installed: $UNIT_DST, $POLKIT_DST"
 
 echo
 echo "==> Install complete. Next steps:"
-echo "    1. Inspect browser paths: guardctl browser discover"
-echo "    2. Edit $CONFIG_DST with existing profile roots and emitted exe_paths"
-echo "    3. Optionally choose an existing key: guardctl ssh suggest"
-echo "    4. Start: sudo systemctl enable --now guardd"
-echo "    5. Verify: guardctl status"
-echo "    6. Desktop notifications (as your user): systemctl --user daemon-reload && systemctl --user enable --now guard-notify"
+echo "    1. Create reviewed strict config: sudo guardctl setup --home /home/USER"
+echo "    2. Optionally choose an existing key: guardctl ssh suggest"
+echo "    3. Start: sudo systemctl enable --now guardd"
+echo "    4. Verify: guardctl status"
+echo "    5. Desktop notifications (as your user): systemctl --user daemon-reload && systemctl --user enable --now guard-notify"
