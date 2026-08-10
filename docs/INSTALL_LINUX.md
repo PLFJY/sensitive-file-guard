@@ -4,6 +4,8 @@ This deployment supports mainstream systemd-based Linux distributions with
 fanotify permission events and `/proc`. `guardd` is a root service because
 `FAN_CLASS_CONTENT` / `FAN_OPEN_PERM` require `CAP_SYS_ADMIN`; it needs polkit
 `pkcheck`. `guard-notify` needs a working user D-Bus session and `notify-send`.
+Start its user unit only after the `guardd-users` supplementary group has
+refreshed; diagnose delivery with `journalctl --user -u guard-notify`.
 
 | Status | Install form |
 | --- | --- |

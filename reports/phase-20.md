@@ -226,3 +226,21 @@ The currently installed AUR package predates this correction. A privileged
 deployment/Strict regression using only synthetic fixtures remains required
 after rebuilding a package from a commit containing it; it is **BLOCKED** in
 this environment because privileged execution is unavailable.
+
+## Post-validation deployment correction: desktop notifications
+
+Investigation of an installed package found `guard-notify` disabled and its
+older runs unable to connect to the daemon socket before the user's
+supplementary group refreshed. After enabling it in the refreshed user session,
+the daemon IPC connection succeeded, but `notify-send` failed with `Permission
+denied` despite a working direct desktop notification and user D-Bus session.
+
+The cause was `ProtectHome=true` in the user unit. Transient user-unit probes
+isolated that setting: `PrivateTmp=true` and `ProtectSystem=strict` succeeded;
+`ProtectHome=true` alone made `notify-send` fail; and
+`ProtectHome=read-only` succeeded with all normal notifier sandbox properties.
+The packaged unit now uses the read-only setting. A user-level compatibility
+drop-in was installed for the already-installed package, then `guard-notify`
+was enabled/restarted and confirmed `active` with `ProtectHome=read-only`.
+The matching sandboxed `notify-send` probe exited successfully. No real
+protected file was opened merely to generate a notification test event.
