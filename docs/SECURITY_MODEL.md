@@ -137,11 +137,17 @@ installs `FAN_MARK_FILESYSTEM | FAN_OPEN_PERM` on every required filesystem.
 Every future regular-file open is therefore intercepted even if the inode did
 not exist during discovery. Classification is ordered as:
 
-1. known `(st_dev, st_ino)` resource;
-2. structural sensitive path below a configured browser root or exact
+1. live structural sensitive path below a configured browser root or exact
    configured SSH-key path;
+2. known `(st_dev, st_ino)` resource for stable concrete files;
 3. exceptional multi-hardlink alias search;
 4. immediate unrelated allow.
+
+Short-lived descendants of browser storage/session trees (SQLite journals,
+WALs, and similar files) are not permanently pinned in the inode index. Their
+inodes can be reused immediately after deletion; retaining those entries would
+misclassify unrelated files such as clipboard databases. Concrete critical
+files and verified hardlinks retain inode identity across rename.
 
 A structural path hit is promoted to the shared `(st_dev, st_ino)` index
 before guardd answers the permission event. This applies whether policy allows
@@ -364,7 +370,7 @@ noise and are recorded only as a usability smoke test. Strict remains opt-in.
 | Hardlink to protected file | **Yes** | Inode index; Strict also scans new multi-link aliases before allow |
 | Symlink to protected file | **Yes** | Canonical path resolution |
 | Relative path `..` traversal | **Yes** | Canonicalize resolves `..` |
-| Previously indexed/classified protected file after rename | **Yes** | Inode identity follows rename |
+| Previously indexed/classified concrete protected file after rename | **Yes** | Inode identity follows rename |
 | New sensitive inode renamed away after its first classified open | **Yes** | Structural hit is indexed before FAN response |
 | Inode only renamed through sensitive name, never opened there | **No** | `FAN_OPEN_PERM` does not mediate rename; explicit open-only boundary |
 | PID reuse | **Yes** | start_time in identity + lease binding |

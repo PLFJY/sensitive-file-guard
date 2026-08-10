@@ -244,3 +244,24 @@ drop-in was installed for the already-installed package, then `guard-notify`
 was enabled/restarted and confirmed `active` with `ProtectHome=read-only`.
 The matching sandboxed `notify-send` probe exited successfully. No real
 protected file was opened merely to generate a notification test event.
+
+## Post-validation false-positive correction: stale Strict inode entries
+
+The installed daemon produced repeated `Deny(UnknownProcess)` records naming
+Code, Dolphin, and `clipvault` against Firefox `storage/.../data.sqlite-journal`.
+The audit record stores the classified protected-resource path, not the raw
+event-fd path. A direct synthetic `clipvault store` failed with SQLite error
+14, and a synthetic `wl-copy` reproduced the same denies on every clipboard
+change. The cause was stale inode-index entries: a short-lived WebStorage
+journal inode was deleted and later reused by unrelated application files.
+
+Strict classification now resolves the live fd path first, indexes only stable
+concrete sensitive files (and verified stable hardlinks), and removes stale
+dynamic-tree entries before alias handling. A regression test covers an
+unrelated `clipvault.db` inode carrying a stale WebStorage entry. This keeps
+the security decision fail-closed for actual protected paths without blocking
+ordinary clipboard databases or treating Code/Dolphin as browser processes.
+
+The currently running installed daemon predates this correction; restarting it
+after installing a package built from this change is required to discard its
+in-memory stale index. No privileged restart was available in this session.

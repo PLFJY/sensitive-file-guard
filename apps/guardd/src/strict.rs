@@ -176,15 +176,6 @@ impl StrictClassifier {
                 return StrictClassification::Error(format!("fstat event fd failed: {error}"))
             }
         };
-        if let Some(resource) = self
-            .inode_index
-            .read()
-            .expect("inode index lock poisoned")
-            .get(&identity)
-            .cloned()
-        {
-            return StrictClassification::Protected(resource);
-        }
 
         let path = match fanotify::fd_path(fd) {
             Ok(path) => path,
@@ -194,45 +185,108 @@ impl StrictClassifier {
                 ))
             }
         };
-        match self.classify_path(&path) {
-            Some(resource) => {
-                // A structural hit is also an object-identity observation.
-                // Publish it before answering the permission event so a
-                // subsequent rename outside the protected namespace cannot
-                // fall through the nlink=1 unrelated fast path while topology
-                // rediscovery is still pending.
+
+        // Prefer the live path.  Dynamic files under browser trees (SQLite
+        // journals/WALs and storage descendants) are routinely deleted and
+        // recreated; pinning their inode forever lets inode-number reuse make
+        // an unrelated file look like a browser resource.
+        if let Some(resource) = self.classify_path(&path) {
+            if self.identity_index_is_stable(&path) {
                 self.inode_index
                     .write()
                     .expect("inode index lock poisoned")
                     .insert(identity, resource.clone());
-                StrictClassification::Protected(resource)
             }
-            None => match fanotify::fd_link_count(fd) {
-                Ok(links) if links > 1 => {
-                    self.metrics
-                        .strict_alias_scans
-                        .fetch_add(1, Ordering::Relaxed);
-                    match self.find_protected_alias(identity) {
-                        Ok(Some(resource)) => {
-                            self.metrics
-                                .strict_alias_matches
-                                .fetch_add(1, Ordering::Relaxed);
+            return StrictClassification::Protected(resource);
+        }
+
+        if let Some(resource) = self
+            .inode_index
+            .read()
+            .expect("inode index lock poisoned")
+            .get(&identity)
+            .cloned()
+        {
+            if self.identity_index_is_stable(&resource.path)
+                || path_identity(&resource.path).ok() == Some(identity)
+            {
+                return StrictClassification::Protected(resource);
+            }
+
+            // The protected path was a transient tree descendant and has
+            // since disappeared or changed identity.  Drop the stale inode
+            // entry before considering aliases so a reused inode cannot
+            // poison unrelated applications (for example a clipboard DB).
+            self.inode_index
+                .write()
+                .expect("inode index lock poisoned")
+                .remove(&identity);
+        }
+
+        match fanotify::fd_link_count(fd) {
+            Ok(links) if links > 1 => {
+                self.metrics
+                    .strict_alias_scans
+                    .fetch_add(1, Ordering::Relaxed);
+                match self.find_protected_alias(identity) {
+                    Ok(Some(resource)) => {
+                        self.metrics
+                            .strict_alias_matches
+                            .fetch_add(1, Ordering::Relaxed);
+                        if self.identity_index_is_stable(&resource.path) {
                             self.inode_index
                                 .write()
                                 .expect("inode index lock poisoned")
                                 .insert(identity, resource.clone());
-                            StrictClassification::Protected(resource)
                         }
-                        Ok(None) => StrictClassification::Unrelated,
-                        Err(error) => StrictClassification::Error(error),
+                        StrictClassification::Protected(resource)
                     }
+                    Ok(None) => StrictClassification::Unrelated,
+                    Err(error) => StrictClassification::Error(error),
                 }
-                Ok(_) => StrictClassification::Unrelated,
-                Err(error) => StrictClassification::Error(format!(
-                    "fstat event fd link count failed: {error}"
-                )),
-            },
+            }
+            Ok(_) => StrictClassification::Unrelated,
+            Err(error) => {
+                StrictClassification::Error(format!("fstat event fd link count failed: {error}"))
+            }
         }
+    }
+
+    /// Concrete critical files are safe to pin by inode.  Descendants of
+    /// browser storage/session trees are intentionally not: their journal and
+    /// WAL inodes are short-lived and inode numbers are reusable.
+    fn identity_index_is_stable(&self, path: &Path) -> bool {
+        if self.ssh.iter().any(|key| key.path == path) {
+            return true;
+        }
+        self.browsers.iter().any(|namespace| {
+            let Ok(relative) = path.strip_prefix(&namespace.root) else {
+                return false;
+            };
+            match namespace.family {
+                BrowserFamily::Chromium => {
+                    let components: Vec<_> = relative.components().take(2).collect();
+                    !components.iter().any(|component| {
+                        matches!(
+                            component.as_os_str().to_str(),
+                            Some("Sessions")
+                                | Some("Session Storage")
+                                | Some("Local Storage")
+                                | Some("IndexedDB")
+                        )
+                    })
+                }
+                BrowserFamily::Firefox | BrowserFamily::Zen => {
+                    let components: Vec<_> = relative.components().take(2).collect();
+                    !components.iter().any(|component| {
+                        matches!(
+                            component.as_os_str().to_str(),
+                            Some("storage") | Some("sessionstore-backups")
+                        )
+                    })
+                }
+            }
+        })
     }
 
     /// An event fd opened through an external hardlink exposes that alias, not
@@ -563,6 +617,44 @@ mod tests {
             classifier.classify_fd(renamed.as_raw_fd()),
             StrictClassification::Protected(_)
         ));
+    }
+
+    #[test]
+    fn stale_dynamic_tree_inode_does_not_block_unrelated_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("chromium");
+        std::fs::create_dir_all(root.join("Default/Local Storage/leveldb")).unwrap();
+        let stale_path = root.join("Default/Local Storage/leveldb/000001.log");
+        std::fs::write(&stale_path, b"synthetic").unwrap();
+        let unrelated = temp.path().join("clipvault.db");
+        std::fs::write(&unrelated, b"clipboard database").unwrap();
+
+        let index = std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+        let metrics = std::sync::Arc::new(BackendMetrics::new(EnforcementMode::StrictFilesystem));
+        let classifier = StrictClassifier::new(
+            &chromium_config(&root),
+            std::sync::Arc::clone(&index),
+            metrics,
+        )
+        .unwrap();
+        let unrelated_identity = path_identity(&unrelated).unwrap();
+        index.write().unwrap().insert(
+            unrelated_identity,
+            resource(
+                &stale_path,
+                ProtectedResourceKind::WebStorage,
+                1000,
+                Some(BrowserId("synthetic-chromium".into())),
+                Some(ProfileId("Default".into())),
+            ),
+        );
+
+        let file = std::fs::File::open(&unrelated).unwrap();
+        assert!(matches!(
+            classifier.classify_fd(file.as_raw_fd()),
+            StrictClassification::Unrelated
+        ));
+        assert!(!index.read().unwrap().contains_key(&unrelated_identity));
     }
 
     #[test]
