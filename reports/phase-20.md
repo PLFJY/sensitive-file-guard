@@ -197,6 +197,32 @@ and a new mode-`0750` config directory containing a mode-`0600` file.
 `cargo fmt --check`, clippy with `-D warnings`, all-feature test suite,
 release build, shell syntax checks, and `git diff --check` also passed.
 
-This follow-up is not in the already-installed
-`sensitive-file-guard-git-0.1.0.r6.g2425da7-1` package. Rebuild/install from a
-commit containing these changes before invoking the installed `guardctl setup`.
+This follow-up was not in the original
+`sensitive-file-guard-git-0.1.0.r6.g2425da7-1` validation archive. Rebuild and
+install from a commit containing it before invoking the installed `guardctl
+setup`.
+
+## Post-validation security correction: legacy Firefox WebStorage
+
+Static review of the user-supplied open-source `HackBrowserData` source showed
+that its Firefox local-storage extractor reads the legacy per-profile
+`webappsstore.sqlite` database. The installed classifier protected the modern
+`storage/` tree but did not classify this legacy database or its SQLite
+sidecars. This was a real protected-scope omission.
+
+The correction classifies `webappsstore.sqlite` plus its WAL, SHM, and rollback
+journal sidecars as `WebStorage` in both browser discovery and the Strict
+structural classifier. Synthetic fixture coverage and focused unit tests verify
+discovery and root/nested strict classification. No real profile data or
+extracted output was read during the investigation.
+
+Audit evidence independently confirmed that the extractor process itself was
+not trusted by name or package: its reads of Firefox `logins.json`,
+`cookies.sqlite`, and `key4.db` were denied as `UnknownProcess`. Browser
+history/bookmarks are outside this firewall's secret-resource scope; legacy
+WebStorage is not, and is now covered by this correction.
+
+The currently installed AUR package predates this correction. A privileged
+deployment/Strict regression using only synthetic fixtures remains required
+after rebuilding a package from a commit containing it; it is **BLOCKED** in
+this environment because privileged execution is unavailable.

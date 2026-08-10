@@ -260,6 +260,12 @@ with separately configured executable/profile pairs. Typical ESR values are
 package-name exception exists. Brave, Edge, Vivaldi, and custom browser builds
 remain available through the same explicit configuration mechanism.
 
+Firefox WebStorage coverage includes both the modern `storage/` tree and the
+legacy per-profile `webappsstore.sqlite` database with its WAL/SHM sidecars.
+Its rollback-journal sidecar is covered too. The legacy database remains a
+browser local-storage source used by extraction tools and can contain
+authenticated web state.
+
 Snap and Flatpak browser installations are not security-accepted in Linux V1.
 Their application mount namespaces can make host `/proc/<pid>/exe` identity
 and filesystem-mark/profile visibility differ from the application view. This

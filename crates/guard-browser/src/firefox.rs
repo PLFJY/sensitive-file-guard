@@ -29,6 +29,14 @@ pub fn classify_profile_relative(rel: &Path) -> Classified {
         }
         "logins.json" => Classified::File(ProtectedResourceKind::SavedCredentials),
         "key4.db" => Classified::File(ProtectedResourceKind::BrowserKeyMaterial),
+        // Firefox's legacy local-storage database remains used by profiles
+        // that have not migrated all origins into the `storage/` tree. Its
+        // contents can carry authenticated web state, so protect SQLite
+        // sidecars with the same WebStorage classification.
+        "webappsstore.sqlite"
+        | "webappsstore.sqlite-wal"
+        | "webappsstore.sqlite-shm"
+        | "webappsstore.sqlite-journal" => Classified::File(ProtectedResourceKind::WebStorage),
         "sessionstore-backups" => Classified::Tree(ProtectedResourceKind::SessionStore),
         "storage" => Classified::Tree(ProtectedResourceKind::WebStorage),
         _ => Classified::None,
@@ -185,6 +193,22 @@ mod tests {
     }
 
     #[test]
+    fn classify_legacy_webappsstore_with_sqlite_sidecars() {
+        for path in [
+            "webappsstore.sqlite",
+            "webappsstore.sqlite-wal",
+            "webappsstore.sqlite-shm",
+            "webappsstore.sqlite-journal",
+        ] {
+            assert_eq!(
+                classify_profile_relative(Path::new(path)),
+                Classified::File(ProtectedResourceKind::WebStorage),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
     fn classify_unrelated_is_none() {
         assert_eq!(
             classify_profile_relative(Path::new("prefs.js")),
@@ -206,6 +230,10 @@ mod tests {
         assert!(kinds.contains(&ProtectedResourceKind::CookieStore));
         assert!(kinds.contains(&ProtectedResourceKind::SavedCredentials));
         assert!(kinds.contains(&ProtectedResourceKind::BrowserKeyMaterial));
+        assert!(files.iter().any(|resource| {
+            resource.kind == ProtectedResourceKind::WebStorage
+                && resource.path == p.webappsstore_sqlite
+        }));
 
         // cookies.sqlite + wal => 2 cookie resources
         let cookie_count = files

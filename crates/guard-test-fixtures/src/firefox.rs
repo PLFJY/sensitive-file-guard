@@ -22,6 +22,7 @@ pub struct FirefoxProfile {
     pub cookies_wal: PathBuf,
     pub logins_json: PathBuf,
     pub key4_db: PathBuf,
+    pub webappsstore_sqlite: PathBuf,
     pub sessionstore_backups_dir: PathBuf,
     pub storage_dir: PathBuf,
 }
@@ -35,6 +36,7 @@ impl FirefoxProfile {
         let cookies_wal = profile_dir.join("cookies.sqlite-wal");
         let logins_json = profile_dir.join("logins.json");
         let key4_db = profile_dir.join("key4.db");
+        let webappsstore_sqlite = profile_dir.join("webappsstore.sqlite");
 
         let sessionstore_backups_dir = profile_dir.join("sessionstore-backups");
         let storage_dir = profile_dir.join("storage");
@@ -49,6 +51,7 @@ impl FirefoxProfile {
             ),
         )?;
         write_file(&key4_db, markers::FIREFOX_KEY_MARKER)?;
+        write_file(&webappsstore_sqlite, markers::WEB_STORAGE_MARKER)?;
 
         fs::create_dir_all(&sessionstore_backups_dir)?;
         write_file(
@@ -70,6 +73,7 @@ impl FirefoxProfile {
             cookies_wal,
             logins_json,
             key4_db,
+            webappsstore_sqlite,
             sessionstore_backups_dir,
             storage_dir,
         })
@@ -92,6 +96,7 @@ mod tests {
         assert!(p.cookies_wal.is_file());
         assert!(p.logins_json.is_file());
         assert!(p.key4_db.is_file());
+        assert!(p.webappsstore_sqlite.is_file());
         assert!(p.sessionstore_backups_dir.is_dir());
         assert!(p.storage_dir.is_dir());
 

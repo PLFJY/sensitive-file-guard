@@ -403,6 +403,10 @@ fn classify_firefox_profile_relative(relative: &Path) -> Option<ProtectedResourc
     match name {
         "logins.json" => Some(ProtectedResourceKind::SavedCredentials),
         "key4.db" => Some(ProtectedResourceKind::BrowserKeyMaterial),
+        "webappsstore.sqlite"
+        | "webappsstore.sqlite-wal"
+        | "webappsstore.sqlite-shm"
+        | "webappsstore.sqlite-journal" => Some(ProtectedResourceKind::WebStorage),
         _ if relative.starts_with("sessionstore-backups") => {
             Some(ProtectedResourceKind::SessionStore)
         }
@@ -478,11 +482,16 @@ mod tests {
             "cookies.sqlite-wal",
             "logins.json",
             "key4.db",
+            "webappsstore.sqlite",
+            "webappsstore.sqlite-wal",
+            "webappsstore.sqlite-journal",
             "storage/default/site/data.sqlite",
             "sessionstore-backups/recovery.jsonlz4",
             "profile-a/cookies.sqlite-shm",
             "profile-a/logins.json",
             "profile-a/key4.db",
+            "profile-a/webappsstore.sqlite-shm",
+            "profile-a/webappsstore.sqlite-journal",
             "profile-a/storage/default/site/data.sqlite",
             "profile-a/sessionstore-backups/previous.jsonlz4",
         ] {
