@@ -91,7 +91,8 @@ Its Overview switch controls the system protection and the current user's
 desktop notification service together, and reflects both actual unit states.
 The Protection page discovers installed native browser sources on refresh and
 also supports an explicit custom browser entry (family, existing profile root,
-and canonical executable); discovery alone never grants trust.
+and canonical executable). It shows metadata-only SSH key suggestions without
+enrolling them; discovery alone never grants trust.
 
 ## Install
 

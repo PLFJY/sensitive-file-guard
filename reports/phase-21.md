@@ -84,7 +84,13 @@ Refresh now rebuilds the browser source list from current discovery and the
 staged configuration. Missing profile roots/executables are removed from the
 staged browser enrollments and disappear from the list; the change remains
 staged until Apply. Configured browsers and SSH keys each have an explicit
-remove-protection button.
+remove-protection button. SSH startup now also shows safe metadata-only
+suggestions for conventional `~/.ssh/id_*` files as `Detected — not protected`
+until explicitly selected. The UI source model now distinguishes
+`NativeDetected` from `Custom`: native entries have no trash action, while
+custom browser paths and manually selected SSH keys do. Trash actions use a
+fixed centered square size so desktop themes cannot stretch them into narrow
+vertical controls.
 
 The Overview protection switch is now a bundle control for both the observed
 `guardd.service` and the logged-in user's `guard-notify.service` states, not an

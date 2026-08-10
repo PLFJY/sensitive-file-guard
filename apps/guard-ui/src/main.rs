@@ -2,6 +2,7 @@
 //! policy decisions and privileged writes remain in guardd/guardctl.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::rc::Rc;
@@ -21,6 +22,24 @@ enum Health {
     Stopped,
     Unreachable,
     NotConfigured,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceOrigin {
+    NativeDetected,
+    Custom,
+}
+
+#[derive(Clone)]
+struct BrowserSource {
+    config: platform_linux::config::BrowserEnrollmentConfig,
+    origin: SourceOrigin,
+}
+
+#[derive(Clone)]
+struct SshSource {
+    path: PathBuf,
+    origin: SourceOrigin,
 }
 
 fn health_from_evidence(
@@ -69,7 +88,10 @@ struct UiState {
     keys: gtk::ListBox,
     events: gtk::ListBox,
     event_data: Rc<RefCell<Vec<guard_ipc::EventInfo>>>,
-    browser_sources: Rc<RefCell<Vec<platform_linux::config::BrowserEnrollmentConfig>>>,
+    browser_sources: Rc<RefCell<Vec<BrowserSource>>>,
+    custom_browser_sources: Rc<RefCell<Vec<platform_linux::config::BrowserEnrollmentConfig>>>,
+    ssh_sources: Rc<RefCell<Vec<SshSource>>>,
+    custom_ssh_sources: Rc<RefCell<HashSet<PathBuf>>>,
     poll_in_flight: Rc<Cell<bool>>,
     protection: Rc<RefCell<Option<adw::SwitchRow>>>,
     protection_syncing: Rc<Cell<bool>>,
@@ -118,6 +140,9 @@ fn build_ui(app: &adw::Application) {
         events: events.clone(),
         event_data: Rc::new(RefCell::new(Vec::new())),
         browser_sources: Rc::new(RefCell::new(Vec::new())),
+        custom_browser_sources: Rc::new(RefCell::new(Vec::new())),
+        ssh_sources: Rc::new(RefCell::new(Vec::new())),
+        custom_ssh_sources: Rc::new(RefCell::new(HashSet::new())),
         poll_in_flight: Rc::new(Cell::new(false)),
         protection: Rc::new(RefCell::new(None)),
         protection_syncing: Rc::new(Cell::new(false)),
@@ -430,7 +455,11 @@ fn refresh_browser_sources(state: &UiState) {
     let discovered = discovered
         .browsers
         .into_iter()
-        .map(browser_suggestion_to_enrollment);
+        .map(|suggestion| BrowserSource {
+            config: browser_suggestion_to_enrollment(suggestion),
+            origin: SourceOrigin::NativeDetected,
+        })
+        .collect::<Vec<_>>();
     let removed_missing = if let Some(cfg) = state.candidate.borrow_mut().as_mut() {
         let before = cfg.browsers.len();
         cfg.browsers.retain(browser_source_is_present);
@@ -450,19 +479,88 @@ fn refresh_browser_sources(state: &UiState) {
         .as_ref()
         .map(|cfg| cfg.browsers.clone())
         .unwrap_or_default();
-    let mut sources = Vec::new();
-    for browser in discovered.chain(configured) {
-        if !sources
+    let custom_browser_sources = state.custom_browser_sources.borrow().clone();
+    let mut sources = discovered;
+    for browser in configured {
+        let explicitly_custom = custom_browser_sources
             .iter()
-            .any(|source| same_browser_source(source, &browser))
-        {
-            sources.push(browser);
+            .any(|custom| same_native_browser(custom, &browser));
+        if explicitly_custom {
+            if let Some(source) = sources
+                .iter_mut()
+                .find(|source| same_browser_source(&source.config, &browser))
+            {
+                source.origin = SourceOrigin::Custom;
+            } else {
+                sources.push(BrowserSource {
+                    config: browser,
+                    origin: SourceOrigin::Custom,
+                });
+            }
+        } else if !sources.iter().any(|source| {
+            source.origin == SourceOrigin::NativeDetected
+                && same_native_browser(&source.config, &browser)
+        }) {
+            sources.push(BrowserSource {
+                config: browser,
+                origin: SourceOrigin::Custom,
+            });
         }
     }
     *state.browser_sources.borrow_mut() = sources;
+    refresh_ssh_sources(state);
     if let Some(cfg) = state.candidate.borrow().as_ref() {
         render_objects(state, cfg);
     }
+}
+
+fn refresh_ssh_sources(state: &UiState) {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/nonexistent"));
+    let suggestions = guard_ssh::suggest_keys(&home.join(".ssh"))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|path| SshSource {
+            path,
+            origin: SourceOrigin::NativeDetected,
+        })
+        .collect::<Vec<_>>();
+    let removed_missing = if let Some(cfg) = state.candidate.borrow_mut().as_mut() {
+        let before = cfg.ssh_keys.len();
+        cfg.ssh_keys.retain(|path| path.is_file());
+        before != cfg.ssh_keys.len()
+    } else {
+        false
+    };
+    if removed_missing {
+        state.apply.set_sensitive(true);
+        state.apply.set_tooltip_text(Some(
+            "Missing SSH key entries were removed from the staged configuration; apply to persist the change.",
+        ));
+    }
+    let configured = state
+        .candidate
+        .borrow()
+        .as_ref()
+        .map(|cfg| cfg.ssh_keys.clone())
+        .unwrap_or_default();
+    let custom_ssh_sources = state.custom_ssh_sources.borrow().clone();
+    let mut sources = suggestions;
+    for key in configured {
+        if let Some(source) = sources.iter_mut().find(|source| source.path == key) {
+            if custom_ssh_sources.contains(&key) {
+                source.origin = SourceOrigin::Custom;
+            }
+        } else {
+            sources.push(SshSource {
+                path: key,
+                origin: SourceOrigin::Custom,
+            });
+        }
+    }
+    sources.sort_by(|left, right| left.path.cmp(&right.path));
+    *state.ssh_sources.borrow_mut() = sources;
 }
 
 fn browser_source_is_present(browser: &platform_linux::config::BrowserEnrollmentConfig) -> bool {
@@ -499,11 +597,21 @@ fn same_browser_source(
     left.id == right.id && left.profile_root == right.profile_root
 }
 
+fn same_native_browser(
+    left: &platform_linux::config::BrowserEnrollmentConfig,
+    right: &platform_linux::config::BrowserEnrollmentConfig,
+) -> bool {
+    same_browser_source(left, right)
+        && left.family == right.family
+        && left.exe_paths == right.exe_paths
+}
+
 fn render_objects(state: &UiState, cfg: &platform_linux::config::EnforcementConfig) {
     while let Some(child) = state.browsers.first_child() {
         state.browsers.remove(&child);
     }
-    for browser in state.browser_sources.borrow().iter() {
+    for source in state.browser_sources.borrow().iter() {
+        let browser = &source.config;
         let enrolled = cfg
             .browsers
             .iter()
@@ -541,13 +649,13 @@ fn render_objects(state: &UiState, cfg: &platform_linux::config::EnforcementConf
                 apply.set_sensitive(true);
             }
         });
-        if enrolled {
-            let remove = gtk::Button::from_icon_name("user-trash-symbolic");
-            remove.set_tooltip_text(Some("Remove browser protection"));
-            remove.add_css_class("destructive-action");
+        if enrolled && source.origin == SourceOrigin::Custom {
+            let remove = remove_button("Remove browser protection");
             let candidate = state.candidate.clone();
             let apply = state.apply.clone();
             let render_state = state.clone();
+            let source_state = state.browser_sources.clone();
+            let custom_sources = state.custom_browser_sources.clone();
             let browser_copy = browser.clone();
             remove.connect_clicked(move |_| {
                 if let Some(cfg) = candidate.borrow_mut().as_mut() {
@@ -555,6 +663,12 @@ fn render_objects(state: &UiState, cfg: &platform_linux::config::EnforcementConf
                         .retain(|configured| !same_browser_source(configured, &browser_copy));
                     apply.set_sensitive(true);
                 }
+                source_state
+                    .borrow_mut()
+                    .retain(|source| !same_browser_source(&source.config, &browser_copy));
+                custom_sources
+                    .borrow_mut()
+                    .retain(|source| !same_native_browser(source, &browser_copy));
                 if let Some(cfg) = render_state.candidate.borrow().as_ref() {
                     render_objects(&render_state, cfg);
                 }
@@ -566,29 +680,87 @@ fn render_objects(state: &UiState, cfg: &platform_linux::config::EnforcementConf
     while let Some(child) = state.keys.first_child() {
         state.keys.remove(&child);
     }
+    let mut ssh_sources = state.ssh_sources.borrow().clone();
     for key in &cfg.ssh_keys {
+        if !ssh_sources.iter().any(|source| source.path == *key) {
+            ssh_sources.push(SshSource {
+                path: key.clone(),
+                origin: SourceOrigin::Custom,
+            });
+        }
+    }
+    ssh_sources.sort_by(|left, right| left.path.cmp(&right.path));
+    if ssh_sources.is_empty() {
         let row = adw::ActionRow::new();
-        row.set_title(&key.to_string_lossy());
-        row.add_prefix(&gtk::Image::from_icon_name("emblem-ok-symbolic"));
-        let remove = gtk::Button::from_icon_name("user-trash-symbolic");
-        remove.set_tooltip_text(Some("Remove SSH key protection"));
-        remove.add_css_class("destructive-action");
-        let candidate = state.candidate.clone();
-        let apply = state.apply.clone();
-        let render_state = state.clone();
-        let key_path = key.clone();
-        remove.connect_clicked(move |_| {
-            if let Some(cfg) = candidate.borrow_mut().as_mut() {
-                cfg.ssh_keys.retain(|configured| configured != &key_path);
-                apply.set_sensitive(true);
-            }
-            if let Some(cfg) = render_state.candidate.borrow().as_ref() {
-                render_objects(&render_state, cfg);
-            }
-        });
-        row.add_suffix(&remove);
+        row.set_title("No SSH private-key candidates detected");
+        row.set_subtitle("Use Add key… to select a reviewed private key explicitly.");
         state.keys.append(&row);
     }
+    for source in ssh_sources {
+        let key = source.path;
+        let enrolled = cfg.ssh_keys.contains(&key);
+        let row = adw::SwitchRow::new();
+        row.set_title(&key.to_string_lossy());
+        row.set_subtitle(if enrolled {
+            "Configured"
+        } else {
+            "Detected — not protected"
+        });
+        row.set_active(enrolled);
+        let candidate = state.candidate.clone();
+        let apply = state.apply.clone();
+        let key_path = key.clone();
+        row.connect_active_notify(move |switch_row| {
+            if let Some(cfg) = candidate.borrow_mut().as_mut() {
+                if switch_row.is_active() {
+                    if !cfg.ssh_keys.contains(&key_path) {
+                        cfg.ssh_keys.push(key_path.clone());
+                    }
+                } else {
+                    cfg.ssh_keys.retain(|configured| configured != &key_path);
+                }
+                apply.set_sensitive(true);
+            }
+        });
+        if enrolled && source.origin == SourceOrigin::Custom {
+            let remove = remove_button("Remove SSH key protection");
+            let candidate = state.candidate.clone();
+            let apply = state.apply.clone();
+            let render_state = state.clone();
+            let source_state = state.ssh_sources.clone();
+            let custom_sources = state.custom_ssh_sources.clone();
+            let key_path = key.clone();
+            remove.connect_clicked(move |_| {
+                if let Some(cfg) = candidate.borrow_mut().as_mut() {
+                    cfg.ssh_keys.retain(|configured| configured != &key_path);
+                    apply.set_sensitive(true);
+                }
+                source_state
+                    .borrow_mut()
+                    .retain(|source| source.path != key_path);
+                custom_sources.borrow_mut().remove(&key_path);
+                if let Some(cfg) = render_state.candidate.borrow().as_ref() {
+                    render_objects(&render_state, cfg);
+                }
+            });
+            row.add_suffix(&remove);
+        }
+        state.keys.append(&row);
+    }
+}
+
+fn remove_button(tooltip: &str) -> gtk::Button {
+    let button = gtk::Button::from_icon_name("user-trash-symbolic");
+    button.set_tooltip_text(Some(tooltip));
+    button.add_css_class("destructive-action");
+    // Keep the suffix action square and centered. Without an explicit natural
+    // size some desktop themes stretch icon-only buttons into tall slivers.
+    button.set_size_request(36, 36);
+    button.set_hexpand(false);
+    button.set_vexpand(false);
+    button.set_halign(gtk::Align::Center);
+    button.set_valign(gtk::Align::Center);
+    button
 }
 
 fn browser_display_name(id: &str) -> String {
@@ -617,16 +789,19 @@ fn show_add_key_dialog(state: &UiState) {
     );
     let candidate = state.candidate.clone();
     let apply = state.apply.clone();
+    let custom_sources = state.custom_ssh_sources.clone();
     let render_state = state.clone();
     dialog.connect_response(move |dialog, response| {
         if response == gtk::ResponseType::Accept {
             if let Some(path) = dialog.file().and_then(|file| file.path()) {
+                custom_sources.borrow_mut().insert(path.clone());
                 if let Some(cfg) = candidate.borrow_mut().as_mut() {
                     if !cfg.ssh_keys.contains(&path) {
                         cfg.ssh_keys.push(path);
                         apply.set_sensitive(true);
                     }
                 }
+                refresh_ssh_sources(&render_state);
                 if let Some(cfg) = render_state.candidate.borrow().as_ref() {
                     render_objects(&render_state, cfg);
                 }
@@ -686,6 +861,7 @@ fn show_add_browser_dialog(state: &UiState) {
     content.append(&error);
 
     let source_state = state.browser_sources.clone();
+    let custom_sources = state.custom_browser_sources.clone();
     let candidate = state.candidate.clone();
     let apply = state.apply.clone();
     let render_state = state.clone();
@@ -696,6 +872,7 @@ fn show_add_browser_dialog(state: &UiState) {
         }
         match custom_browser_from_entries(&id, &family, &profile, &executable) {
             Ok(browser) => {
+                custom_sources.borrow_mut().push(browser.clone());
                 if let Some(cfg) = candidate.borrow_mut().as_mut() {
                     if !cfg
                         .browsers
@@ -708,9 +885,12 @@ fn show_add_browser_dialog(state: &UiState) {
                 if !source_state
                     .borrow()
                     .iter()
-                    .any(|source| same_browser_source(source, &browser))
+                    .any(|source| same_browser_source(&source.config, &browser))
                 {
-                    source_state.borrow_mut().push(browser);
+                    source_state.borrow_mut().push(BrowserSource {
+                        config: browser,
+                        origin: SourceOrigin::Custom,
+                    });
                 }
                 apply.set_sensitive(true);
                 refresh_browser_sources(&render_state);
