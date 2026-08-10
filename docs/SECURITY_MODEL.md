@@ -429,4 +429,7 @@ shared configuration contract, writes a mode-0640 root:guardd-users temporary
 file, fsyncs and renames atomically, then restarts and health-checks guardd.
 When the new daemon does not become active, the prior configuration is restored
 and restarted. No arbitrary command, unit, destination, or shell string is
-accepted. The GTK process itself is never elevated.
+accepted. The Overview bundle switch also starts/stops the logged-in user's
+fixed `guard-notify.service` through `systemctl --user`; this user service is
+not elevated and is considered part of the complete desktop protection view.
+The GTK process itself is never elevated.

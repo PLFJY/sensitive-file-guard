@@ -44,7 +44,7 @@ struct Cli {
     #[arg(long = "allow-exe", value_name = "EXE")]
     allow_exe: Vec<PathBuf>,
 
-    /// Log each allow/deny decision to stderr.
+    /// Log decisions to stderr (release builds print blocked decisions only).
     #[arg(long)]
     print_decisions: bool,
 
@@ -428,14 +428,14 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
             );
 
             // Non-blocking audit record. Dropped if the channel is full. The
-            // full event reaches the audit log. Desktop presentation is owned
+            // Each blocked event reaches the audit log. Desktop presentation is owned
             // by the unprivileged guard-notify user-session service; this root
             // daemon never attempts to connect to a user's D-Bus session.
             if let Some(rec) = audit_record {
                 audit.record(rec);
             }
 
-            if cli.print_decisions {
+            if cli.print_decisions && (cfg!(debug_assertions) || !allow) {
                 eprintln!(
                     "guardd: pid={} decision={} allow={}",
                     ev.pid,
@@ -451,7 +451,9 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                     allow
                 );
             }
-            tracing::debug!(pid = ev.pid, allow, ?decision, "decision");
+            if cfg!(debug_assertions) || !allow {
+                tracing::debug!(pid = ev.pid, allow, ?decision, "decision");
+            }
 
             if ev.has_fd() {
                 group.respond(ev.fd, allow)?;
@@ -530,7 +532,7 @@ fn run_protect_test_file(target: &std::path::Path, cli: &Cli) -> anyhow::Result<
                 None => false, // cannot identify => deny
             };
 
-            if cli.print_decisions {
+            if cli.print_decisions && (cfg!(debug_assertions) || !allow) {
                 let exe_str = match &exe {
                     Some(p) => p.display().to_string(),
                     None => "<unknown>".to_string(),
@@ -542,7 +544,9 @@ fn run_protect_test_file(target: &std::path::Path, cli: &Cli) -> anyhow::Result<
                     if allow { "ALLOW" } else { "DENY" }
                 );
             }
-            tracing::debug!(pid = ev.pid, allow, "decision");
+            if cfg!(debug_assertions) || !allow {
+                tracing::debug!(pid = ev.pid, allow, "decision");
+            }
 
             if ev.has_fd() {
                 group.respond(ev.fd, allow)?;

@@ -308,7 +308,11 @@ fn handle_events(
         .query_events_cursor(uid_filter, limit, before_id, after_id)
     {
         Ok(events) => {
-            let infos: Vec<EventInfo> = events.iter().map(event_to_info).collect();
+            let infos: Vec<EventInfo> = events
+                .iter()
+                .filter(|event| event_visible_in_build(event.record.decision))
+                .map(event_to_info)
+                .collect();
             Response::ok(ResponseBody::Events(infos))
         }
         Err(e) => Response::err(format!("query failed: {e}")),
@@ -319,6 +323,9 @@ fn handle_explain(state: &IpcState, creds: PeerCreds, event_id: i64) -> Response
     state.audit.flush();
     match state.audit.query_event(event_id) {
         Ok(Some(ev)) => {
+            if !event_visible_in_build(ev.record.decision) {
+                return Response::err("event not available");
+            }
             // Authorization: non-root may only explain their own events.
             if creds.uid != 0 && ev.record.uid != creds.uid {
                 return Response::err("permission denied: event belongs to another user");
@@ -328,6 +335,10 @@ fn handle_explain(state: &IpcState, creds: PeerCreds, event_id: i64) -> Response
         Ok(None) => Response::err(format!("event {event_id} not found")),
         Err(e) => Response::err(format!("query failed: {e}")),
     }
+}
+
+fn event_visible_in_build(decision: guard_core::policy::Decision) -> bool {
+    cfg!(debug_assertions) || matches!(decision, guard_core::policy::Decision::Deny(_))
 }
 
 fn handle_leases_list(state: &IpcState, creds: PeerCreds) -> Response {
@@ -1282,8 +1293,14 @@ mod tests {
     fn ordinary_user_cannot_see_other_users_events() {
         let (state, _t) = make_state(1000);
         // Record events for two different users.
-        state.audit.record(sample_record(1000, Decision::Allow));
-        state.audit.record(sample_record(1001, Decision::Allow));
+        state.audit.record(sample_record(
+            1000,
+            Decision::Deny(DenyReason::UnknownProcess),
+        ));
+        state.audit.record(sample_record(
+            1001,
+            Decision::Deny(DenyReason::UnknownProcess),
+        ));
         state.audit.flush();
 
         // User 1000 asks for events — should see only their own (1 event).
@@ -1336,8 +1353,14 @@ mod tests {
     #[test]
     fn root_sees_all_events() {
         let (state, _t) = make_state(1000);
-        state.audit.record(sample_record(1000, Decision::Allow));
-        state.audit.record(sample_record(1001, Decision::Allow));
+        state.audit.record(sample_record(
+            1000,
+            Decision::Deny(DenyReason::UnknownProcess),
+        ));
+        state.audit.record(sample_record(
+            1001,
+            Decision::Deny(DenyReason::UnknownProcess),
+        ));
         state.audit.flush();
 
         let resp = handle_request(
@@ -1398,7 +1421,10 @@ mod tests {
     #[test]
     fn explain_denied_for_other_users_event() {
         let (state, _t) = make_state(1000);
-        state.audit.record(sample_record(1001, Decision::Allow));
+        state.audit.record(sample_record(
+            1001,
+            Decision::Deny(DenyReason::UnknownProcess),
+        ));
         state.audit.flush();
         let id = state.audit.query_events(None, 10).unwrap()[0].id;
 

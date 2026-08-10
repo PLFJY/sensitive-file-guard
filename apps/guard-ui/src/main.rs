@@ -25,10 +25,14 @@ enum Health {
 
 fn health_from_evidence(
     service_active: bool,
+    notification_active: bool,
     daemon: Option<&guard_ipc::StatusInfo>,
     configured: bool,
 ) -> Health {
     if service_active {
+        if !notification_active {
+            return Health::Degraded;
+        }
         return match daemon.map(|s| s.status.as_str()) {
             Some("ACTIVE") => Health::Active,
             Some("DEGRADED") | Some("NOT_ENFORCING") => Health::Degraded,
@@ -85,7 +89,7 @@ fn build_ui(app: &adw::Application) {
     let status = gtk::Label::new(Some("Connecting to guardd…"));
     status.add_css_class("title-3");
     let detail = gtk::Label::new(Some(
-        "Live service and daemon health are required for a green state.",
+        "Live protection, notification, and daemon health are required for a green state.",
     ));
     detail.set_wrap(true);
     detail.set_xalign(0.0);
@@ -186,8 +190,10 @@ fn overview_page(state: &UiState) -> gtk::Box {
     page.append(&state.status);
     page.append(&state.detail);
     let row = adw::SwitchRow::new();
-    row.set_title("Protection");
-    row.set_subtitle("Turning protection off makes protected files accessible normally.");
+    row.set_title("Protection + notifications");
+    row.set_subtitle(
+        "Controls guardd.service and guard-notify.service together; turning it off makes protected files accessible normally.",
+    );
     row.set_active(false);
     *state.protection.borrow_mut() = Some(row.clone());
     let start_row = row.clone();
@@ -202,7 +208,7 @@ fn overview_page(state: &UiState) -> gtk::Box {
             "stop"
         };
         start_row.set_sensitive(false);
-        spawn_privileged_service(verb.to_owned(), start_row.clone(), syncing.clone());
+        spawn_protection_bundle(verb.to_owned(), start_row.clone(), syncing.clone());
     });
     page.append(&row);
     page
@@ -269,17 +275,23 @@ fn protection_page(state: &UiState) -> gtk::Box {
     let cand = state.candidate.clone();
     let persisted = state.persisted.clone();
     let apply_btn = state.apply.clone();
+    let render_state = state.clone();
     discard.connect_clicked(move |_| {
         *cand.borrow_mut() = persisted.borrow().clone();
         apply_btn.set_sensitive(false);
+        let cfg = render_state.candidate.borrow().clone();
+        if let Some(cfg) = cfg.as_ref() {
+            render_objects(&render_state, cfg);
+        }
     });
     let cand = state.candidate.clone();
+    let persisted = state.persisted.clone();
     let apply_btn = state.apply.clone();
     state.apply.connect_clicked(move |_| {
         if let Some(cfg) = cand.borrow().clone() {
             if let Ok(bytes) = serde_json::to_vec(&cfg) {
                 apply_btn.set_sensitive(false);
-                spawn_apply(bytes, apply_btn.clone());
+                spawn_apply(bytes, apply_btn.clone(), persisted.clone());
             }
         }
     });
@@ -328,6 +340,12 @@ fn log_page(state: &UiState) -> gtk::Box {
             .await
             .ok()
             .and_then(Result::ok)
+            .map(|events| {
+                events
+                    .into_iter()
+                    .filter(is_visible_event)
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
             if page.is_empty() {
                 return;
@@ -351,6 +369,14 @@ fn log_page(state: &UiState) -> gtk::Box {
     });
     page.append(&older);
     page
+}
+
+fn is_blocked_event(event: &guard_ipc::EventInfo) -> bool {
+    event.decision.starts_with("Deny")
+}
+
+fn is_visible_event(event: &guard_ipc::EventInfo) -> bool {
+    cfg!(debug_assertions) || is_blocked_event(event)
 }
 
 fn load_configuration(state: &UiState) {
@@ -400,20 +426,32 @@ fn refresh_browser_sources(state: &UiState) {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/nonexistent"));
-    let mut sources = state.browser_sources.borrow().clone();
     let discovered = platform_linux::config::discover_native_browsers(&home);
+    let discovered = discovered
+        .browsers
+        .into_iter()
+        .map(browser_suggestion_to_enrollment);
+    let removed_missing = if let Some(cfg) = state.candidate.borrow_mut().as_mut() {
+        let before = cfg.browsers.len();
+        cfg.browsers.retain(browser_source_is_present);
+        before != cfg.browsers.len()
+    } else {
+        false
+    };
+    if removed_missing {
+        state.apply.set_sensitive(true);
+        state.apply.set_tooltip_text(Some(
+            "Missing browser entries were removed from the staged configuration; apply to persist the change.",
+        ));
+    }
     let configured = state
         .candidate
         .borrow()
         .as_ref()
         .map(|cfg| cfg.browsers.clone())
         .unwrap_or_default();
-    for browser in discovered
-        .browsers
-        .into_iter()
-        .map(browser_suggestion_to_enrollment)
-        .chain(configured)
-    {
+    let mut sources = Vec::new();
+    for browser in discovered.chain(configured) {
         if !sources
             .iter()
             .any(|source| same_browser_source(source, &browser))
@@ -425,6 +463,21 @@ fn refresh_browser_sources(state: &UiState) {
     if let Some(cfg) = state.candidate.borrow().as_ref() {
         render_objects(state, cfg);
     }
+}
+
+fn browser_source_is_present(browser: &platform_linux::config::BrowserEnrollmentConfig) -> bool {
+    if !browser.profile_root.is_dir() {
+        return false;
+    }
+    browser.exe_paths.is_empty()
+        || browser.exe_paths.iter().any(|path| {
+            std::fs::metadata(path)
+                .map(|metadata| {
+                    use std::os::unix::fs::PermissionsExt;
+                    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+                })
+                .unwrap_or(false)
+        })
 }
 
 fn browser_suggestion_to_enrollment(
@@ -488,6 +541,26 @@ fn render_objects(state: &UiState, cfg: &platform_linux::config::EnforcementConf
                 apply.set_sensitive(true);
             }
         });
+        if enrolled {
+            let remove = gtk::Button::from_icon_name("user-trash-symbolic");
+            remove.set_tooltip_text(Some("Remove browser protection"));
+            remove.add_css_class("destructive-action");
+            let candidate = state.candidate.clone();
+            let apply = state.apply.clone();
+            let render_state = state.clone();
+            let browser_copy = browser.clone();
+            remove.connect_clicked(move |_| {
+                if let Some(cfg) = candidate.borrow_mut().as_mut() {
+                    cfg.browsers
+                        .retain(|configured| !same_browser_source(configured, &browser_copy));
+                    apply.set_sensitive(true);
+                }
+                if let Some(cfg) = render_state.candidate.borrow().as_ref() {
+                    render_objects(&render_state, cfg);
+                }
+            });
+            row.add_suffix(&remove);
+        }
         state.browsers.append(&row);
     }
     while let Some(child) = state.keys.first_child() {
@@ -497,6 +570,23 @@ fn render_objects(state: &UiState, cfg: &platform_linux::config::EnforcementConf
         let row = adw::ActionRow::new();
         row.set_title(&key.to_string_lossy());
         row.add_prefix(&gtk::Image::from_icon_name("emblem-ok-symbolic"));
+        let remove = gtk::Button::from_icon_name("user-trash-symbolic");
+        remove.set_tooltip_text(Some("Remove SSH key protection"));
+        remove.add_css_class("destructive-action");
+        let candidate = state.candidate.clone();
+        let apply = state.apply.clone();
+        let render_state = state.clone();
+        let key_path = key.clone();
+        remove.connect_clicked(move |_| {
+            if let Some(cfg) = candidate.borrow_mut().as_mut() {
+                cfg.ssh_keys.retain(|configured| configured != &key_path);
+                apply.set_sensitive(true);
+            }
+            if let Some(cfg) = render_state.candidate.borrow().as_ref() {
+                render_objects(&render_state, cfg);
+            }
+        });
+        row.add_suffix(&remove);
         state.keys.append(&row);
     }
 }
@@ -699,26 +789,43 @@ fn refresh_state(state: &UiState) {
     glib::MainContext::default().spawn_local(async move {
         let result = gio::spawn_blocking(move || {
             let daemon = guard_client::status(&socket).ok();
-            let recent_events = guard_client::events_cursor(&socket, Some(100), None, after_id).unwrap_or_default();
+            let recent_events = guard_client::events_cursor(&socket, Some(100), None, after_id)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(is_visible_event)
+                .collect::<Vec<_>>();
             let service_active = Command::new("systemctl").args(["is-active", "--quiet", "guardd.service"]).status().map(|s| s.success()).unwrap_or(false);
-            (service_active, daemon, recent_events)
+            let notification_active = Command::new("systemctl")
+                .args(["--user", "is-active", "--quiet", "guard-notify.service"])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            (service_active, notification_active, daemon, recent_events)
         }).await;
-        if let Ok((service_active, daemon, recent_events)) = result {
-            let health = health_from_evidence(service_active, daemon.as_ref(), configured);
+        if let Ok((service_active, notification_active, daemon, recent_events)) = result {
+            let health = health_from_evidence(
+                service_active,
+                notification_active,
+                daemon.as_ref(),
+                configured,
+            );
             status.set_text(health_label(health));
-            // The switch represents the actual systemd service state.  Keep it
+            // The switch represents the actual systemd service bundle.  Keep it
             // synchronized with out-of-band `systemctl`/`guardctl` changes,
             // while suppressing its callback so a refresh never starts a new
             // privileged operation.
             if let Some(row) = protection.borrow().as_ref() {
-                if row.is_active() != service_active {
+                let bundle_active = service_active && notification_active;
+                if row.is_active() != bundle_active {
                     protection_syncing.set(true);
-                    row.set_active(service_active);
+                    row.set_active(bundle_active);
                     protection_syncing.set(false);
                 }
                 row.set_sensitive(true);
             }
-            detail.set_text(&daemon.map(|s| format!("Mode: {} · browsers: {} · SSH keys/resources: {} · allowed: {} · denied: {} · marks: {}/{}", s.mode, s.browsers, s.protected_files, s.allowed, s.denied, s.marked_filesystems, s.required_filesystems)).unwrap_or_else(|| "guardd IPC is unavailable; service state is shown separately.".into()));
+            let service_state = if service_active { "active" } else { "inactive" };
+            let notification_state = if notification_active { "active" } else { "inactive" };
+            detail.set_text(&daemon.map(|s| format!("Mode: {} · browsers: {} · SSH keys/resources: {} · allowed: {} · denied: {} · marks: {}/{} · service: {} · notifications: {}", s.mode, s.browsers, s.protected_files, s.allowed, s.denied, s.marked_filesystems, s.required_filesystems, service_state, notification_state)).unwrap_or_else(|| format!("guardd IPC is unavailable · service: {} · notifications: {}", service_state, notification_state)));
             if after_id.is_none() {
                 while let Some(child) = events.first_child() { events.remove(&child); }
                 *event_data.borrow_mut() = recent_events.clone();
@@ -729,7 +836,7 @@ fn refresh_state(state: &UiState) {
             for event in recent_events {
                 let row = gtk::ListBoxRow::new();
                 let box_ = gtk::Box::new(gtk::Orientation::Vertical, 2);
-                let decision = if event.decision == "Deny" { "BLOCKED" } else if event.decision == "AllowByLease" { "ALLOWED BY LEASE" } else { "ALLOWED" };
+                let decision = if is_blocked_event(&event) { "BLOCKED" } else if event.decision.starts_with("AllowByLease") { "ALLOWED BY LEASE" } else { "ALLOWED" };
                 let title = gtk::Label::new(Some(&format!("{}  ·  {}", decision, event.exe)));
                 title.set_xalign(0.0); title.add_css_class(if decision == "BLOCKED" { "error" } else { "success" });
                 let subtitle = gtk::Label::new(Some(&format!("#{} · {} · {}", event.id, event.resource_kind, event.path)));
@@ -743,18 +850,12 @@ fn refresh_state(state: &UiState) {
     });
 }
 
-fn spawn_privileged_service(verb: String, switch: adw::SwitchRow, syncing: Rc<Cell<bool>>) {
+fn spawn_protection_bundle(verb: String, switch: adw::SwitchRow, syncing: Rc<Cell<bool>>) {
     let requested_on = verb == "start";
     glib::MainContext::default().spawn_local(async move {
-        let ok = gio::spawn_blocking(move || {
-            Command::new("pkexec")
-                .args(["guardctl", "privileged", "service", &verb])
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
-        })
-        .await
-        .unwrap_or(false);
+        let ok = gio::spawn_blocking(move || run_protection_bundle(&verb))
+            .await
+            .unwrap_or(false);
         switch.set_sensitive(true);
         syncing.set(true);
         switch.set_active(ok && requested_on);
@@ -762,7 +863,61 @@ fn spawn_privileged_service(verb: String, switch: adw::SwitchRow, syncing: Rc<Ce
     });
 }
 
-fn spawn_apply(bytes: Vec<u8>, button: gtk::Button) {
+fn run_main_service(verb: &str) -> bool {
+    Command::new("pkexec")
+        .args(["guardctl", "privileged", "service", verb])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn run_notification_service(verb: &str) -> bool {
+    Command::new("systemctl")
+        .args(["--user", verb, "guard-notify.service"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn run_protection_bundle(verb: &str) -> bool {
+    match verb {
+        "start" => {
+            if !run_main_service("start") {
+                return false;
+            }
+            if run_notification_service("start") {
+                true
+            } else {
+                // Do not leave the protection daemon running alone when the
+                // desktop notification half could not be started.
+                let _ = run_main_service("stop");
+                false
+            }
+        }
+        "stop" => {
+            let notification_stopped = run_notification_service("stop");
+            let main_stopped = run_main_service("stop");
+            if main_stopped {
+                true
+            } else {
+                // Preserve the previous bundle when stopping the daemon
+                // failed after notifications were stopped.
+                if notification_stopped {
+                    let _ = run_notification_service("start");
+                }
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+fn spawn_apply(
+    bytes: Vec<u8>,
+    button: gtk::Button,
+    persisted: Rc<RefCell<Option<platform_linux::config::EnforcementConfig>>>,
+) {
+    let write_bytes = bytes.clone();
     glib::MainContext::default().spawn_local(async move {
         let ok = gio::spawn_blocking(move || {
             let mut child = match Command::new("pkexec")
@@ -774,14 +929,18 @@ fn spawn_apply(bytes: Vec<u8>, button: gtk::Button) {
                 Err(_) => return false,
             };
             if let Some(mut stdin) = child.stdin.take() {
-                let _ = std::io::Write::write_all(&mut stdin, &bytes);
+                let _ = std::io::Write::write_all(&mut stdin, &write_bytes);
             }
             child.wait().map(|s| s.success()).unwrap_or(false)
         })
         .await
         .unwrap_or(false);
         button.set_sensitive(true);
-        if !ok {
+        if ok {
+            if let Ok(cfg) = serde_json::from_slice(&bytes) {
+                *persisted.borrow_mut() = Some(cfg);
+            }
+        } else {
             button.set_tooltip_text(Some(
                 "Apply failed; previous configuration was restored when possible.",
             ));
@@ -821,17 +980,24 @@ mod tests {
             peer_uid: 1000,
         };
         assert_eq!(
-            health_from_evidence(true, Some(&status), true),
+            health_from_evidence(true, true, Some(&status), true),
             Health::Active
         );
         assert_eq!(
-            health_from_evidence(true, Some(&status), false),
+            health_from_evidence(true, true, Some(&status), false),
             Health::Active
         );
         assert_eq!(
-            health_from_evidence(false, Some(&status), true),
+            health_from_evidence(true, false, Some(&status), true),
+            Health::Degraded
+        );
+        assert_eq!(
+            health_from_evidence(false, false, Some(&status), true),
             Health::Stopped
         );
-        assert_eq!(health_from_evidence(true, None, true), Health::Unreachable);
+        assert_eq!(
+            health_from_evidence(true, true, None, true),
+            Health::Unreachable
+        );
     }
 }

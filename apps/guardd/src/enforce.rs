@@ -454,10 +454,12 @@ impl EnforcementEngine {
         self.decide_with_context(pid, fd).0
     }
 
-    /// Like `decide` but also returns an `AuditRecord` when the opened file was
-    /// a protected resource (so the caller can persist it non-blocking via
-    /// `AuditStore::record`). Unclassified opens (not a protected resource) are
-    /// not audited — they are tracked by the `unclassified` counter only.
+    /// Like `decide` but also returns an `AuditRecord` for persistence when the
+    /// opened file was a protected resource. Debug builds return records for
+    /// every decision; release builds return only blocked decisions. The
+    /// caller persists records non-blocking via `AuditStore::record`.
+    /// Unclassified opens (not a protected resource) are not audited — they are
+    /// tracked by the `unclassified` counter only.
     pub fn decide_with_context(&mut self, pid: i32, fd: RawFd) -> (Decision, Option<AuditRecord>) {
         let resource = match self.classify_fd(fd) {
             Some(r) => r,
@@ -541,12 +543,21 @@ impl EnforcementEngine {
                 self.ssh_agent_bindings.remove(&id);
             }
         }
-        let backend_diag = format!(
-            "{};classify={};trust={:?}",
-            resolve_diag, classification, process.trust_tier
-        );
-        let record = build_audit_record(&resource, Some(&process), decision, &backend_diag);
-        (decision, Some(record))
+        let record = if should_record_decision(decision) {
+            let backend_diag = format!(
+                "{};classify={};trust={:?}",
+                resolve_diag, classification, process.trust_tier
+            );
+            Some(build_audit_record(
+                &resource,
+                Some(&process),
+                decision,
+                &backend_diag,
+            ))
+        } else {
+            None
+        };
+        (decision, record)
     }
 
     /// Bind an armed migration lease to the first matching target process and
@@ -792,6 +803,14 @@ fn build_audit_record(
         lease_id,
         backend_diag: backend_diag.to_string(),
     }
+}
+
+/// Release builds persist only blocked protected-file opens. Keeping normal
+/// allows in debug builds preserves diagnostics and tests without imposing
+/// per-open string/path allocation and SQLite queue pressure in production.
+#[inline]
+fn should_record_decision(decision: Decision) -> bool {
+    cfg!(debug_assertions) || matches!(decision, Decision::Deny(_))
 }
 
 /// Cheap diagnostic for how the fd was classified: "fd_index" if the inode hit
@@ -1632,16 +1651,21 @@ mod tests {
             "lease must be marked used after a successful allow"
         );
 
-        // Audit record: AllowByLease on an SSH key, no secret contents.
-        let rec = record.expect("audit record");
-        assert_eq!(rec.resource_kind, ProtectedResourceKind::SshPrivateKey);
-        assert_eq!(rec.decision, Decision::AllowByLease(lease_id));
-        assert_eq!(rec.deny_reason, None);
-        let json = serde_json::to_string(&rec).unwrap();
-        assert!(
-            !json.contains(guard_test_fixtures::markers::SSH_PRIVATE_KEY_MARKER),
-            "allow audit record must not contain private-key marker: {json}"
-        );
+        // Debug keeps the full decision stream for diagnostics. Release
+        // intentionally drops successful allows, including lease-bound ones.
+        if cfg!(debug_assertions) {
+            let rec = record.expect("audit record");
+            assert_eq!(rec.resource_kind, ProtectedResourceKind::SshPrivateKey);
+            assert_eq!(rec.decision, Decision::AllowByLease(lease_id));
+            assert_eq!(rec.deny_reason, None);
+            let json = serde_json::to_string(&rec).unwrap();
+            assert!(
+                !json.contains(guard_test_fixtures::markers::SSH_PRIVATE_KEY_MARKER),
+                "allow audit record must not contain private-key marker: {json}"
+            );
+        } else {
+            assert!(record.is_none());
+        }
     }
 
     #[test]

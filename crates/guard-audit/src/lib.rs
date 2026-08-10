@@ -1,7 +1,8 @@
 //! SQLite-backed audit persistence for the Sensitive Data Firewall.
 //!
-//! The daemon records every authorization decision (allow / deny / allow-by-
-//! lease) as an `AuditRecord`. Records carry metadata only — PID, identity
+//! Debug builds record every authorization decision (allow / deny /
+//! allow-by-lease) as an `AuditRecord`; release builds record blocked opens
+//! only. Records carry metadata only — PID, identity
 //! summary, executable path, resource kind/id, decision, deny reason, lease id,
 //! backend diagnostic — and NEVER the protected file's contents (no cookie
 //! values, passwords, key bytes, or DB rows).

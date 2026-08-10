@@ -80,13 +80,27 @@ It also adds a custom-browser dialog requiring a family, an existing absolute
 profile root, and a canonical executable regular file. This is still a staged
 candidate; applying it crosses the existing authenticated config boundary.
 
-The Overview protection switch is now bound to the observed
-`guardd.service` state, not an initial local default. It polls every two
-seconds, reflects changes made through `systemctl` or `guardctl`, and suppresses
-the switch callback during synchronization so a refresh cannot trigger a
-second privileged action. A running service with unavailable daemon IPC is
-shown as `UNREACHABLE` while the switch remains on, preserving the distinction
-between service state and enforcement health.
+Refresh now rebuilds the browser source list from current discovery and the
+staged configuration. Missing profile roots/executables are removed from the
+staged browser enrollments and disappear from the list; the change remains
+staged until Apply. Configured browsers and SSH keys each have an explicit
+remove-protection button.
+
+The Overview protection switch is now a bundle control for both the observed
+`guardd.service` and the logged-in user's `guard-notify.service` states, not an
+initial local default. It polls every two seconds, reflects changes made
+through `systemctl` or `guardctl`, and suppresses the switch callback during
+synchronization so a refresh cannot trigger a second privileged action. The
+bundle is on only when both units are active; a missing notification unit makes
+the health state `DEGRADED` and leaves the switch off. Start/stop uses
+best-effort rollback so a failed half does not intentionally leave the other
+half running alone.
+
+Release builds persist, print, and trace denied decisions only. The daemon IPC
+also hides historical allow rows from `events`/`explain`, and the GTK log
+filters to blocked events, so normal allows do not consume audit storage or
+fill production logs. Debug builds retain the full decision stream for
+diagnostics and tests.
 
 ## Packaging and docs
 
@@ -112,6 +126,8 @@ and unsupported-mode candidates. Direct non-root helper smoke tests returned
 the expected root-required error. GTK compilation and the health-state test
 passed; a Wayland startup smoke (`timeout 3s env GDK_BACKEND=wayland
 target/release/guard-ui`) kept the process alive until the expected timeout.
+The release `guardd` test suite also passed with allow-event audit suppression
+enabled.
 
 ## Privileged regressions and limitations
 
