@@ -315,7 +315,7 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
         let state = ipc::IpcState {
             engine: Arc::clone(&engine),
             audit: Arc::clone(&audit),
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            version: format!("{}+{}", env!("CARGO_PKG_VERSION"), env!("GUARDD_BUILD_ID")),
             group: Some(Arc::clone(&group)),
             authorization: ipc::SensitiveAuthorization::Polkit,
             ssh_agent_pins: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),

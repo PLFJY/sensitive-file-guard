@@ -6,6 +6,11 @@
 > This is an Alpha with the explicit non-goals below, not a claim of protection
 > against root, browser compromise, or already-open descriptors.
 
+> SSH behavioral containment is a separate Phase 22.1 capability and remains
+> runtime-unaccepted on this checkout's currently installed daemon until the
+> privileged BPF acceptance matrix passes. Raw SSH-key reads fail closed when
+> that backend is unavailable.
+
 A narrow local capability firewall for sensitive files. It prevents
 unauthorized local processes from reading protected local secrets **before**
 the protected file is successfully opened.
@@ -17,9 +22,10 @@ the protected file is successfully opened.
 
 Never point this tool, its tests, or its fixtures at your real browser profiles,
 cookies, saved passwords, session tokens, or real SSH private keys. All tests
-use synthetic fixtures only (see `crates/guard-test-fixtures`). Tests never use
-IP networking; the adversarial harness can send only a generated canary to an
-AF_UNIX socket below its disposable test directory.
+use synthetic fixtures only (see `crates/guard-test-fixtures`). Browser and
+ordinary tests use no IP networking; the Phase 22.1 privileged harness uses
+only a disposable non-loopback dummy address in the local namespace and never
+contacts the Internet.
 
 ## What it protects (V1)
 
@@ -27,9 +33,10 @@ AF_UNIX socket below its disposable test directory.
    browser key material, selected Local/Session Storage and IndexedDB trees,
    saved-login databases (secondary priority).
 2. SSH private keys: the existing hardened `ssh-agent` path remains supported.
-   Phase 22 adds narrow read-attempt mediation and a bounded incident model for
-   a future BPF-LSM send hook. On a host without an attached compatible hook,
-   raw reads remain fail-closed rather than being allowed unguarded.
+   When the live BPF-LSM backend is attached, a raw protected-key read is
+   allowed for legitimate local use while the exact process tree is watched
+   briefly for external sends. Without that backend, raw reads remain
+   fail-closed rather than being allowed unguarded.
 
 ## Threat model
 
@@ -179,11 +186,12 @@ filesystem cannot be marked.
 ### SSH behavioral-containment capability
 
 Browser secrets remain a pre-access firewall: unauthorized access is denied.
-SSH has a separate, deliberately modest planned path: an actual private-key
+SSH has a separate, deliberately modest path: an actual private-key
 read arms one exact process tree for `ssh_behavior_window_secs` (default 10,
 range 1–60 seconds); an actual external send during that interval is to be
-blocked before egress and presented as an incident. It is a temporal
-correlation, not a claim that the payload is the key.
+blocked before egress and presented as an incident. AF_UNIX, AF_NETLINK, IPv4
+loopback, and IPv6 loopback are local-only and are not blocked. It is a
+temporal correlation, not a claim that the payload is the key.
 
 The selected Linux hook is BPF LSM `socket_sendmsg`, because connect-only and
 cgroup-egress designs do not provide the required current-task coverage for a

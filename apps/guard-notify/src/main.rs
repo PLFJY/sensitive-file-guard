@@ -77,7 +77,7 @@ fn main() -> ExitCode {
     }
 }
 
-type NotificationKey = (u32, String, String);
+type NotificationKey = (u32, String, String, String);
 
 fn should_notify(
     last_notified: &mut HashMap<NotificationKey, u64>,
@@ -85,7 +85,16 @@ fn should_notify(
     now_ms: u64,
 ) -> bool {
     const WINDOW_MS: u64 = 10_000;
-    let key = (event.pid, event.exe.clone(), event.path.clone());
+    // Behavioral records carry the incident ID in stable metadata. Including
+    // it prevents a new incident after an earlier user resolution from being
+    // suppressed by the old process/path notification window.
+    let incident = event
+        .backend_diag
+        .split(';')
+        .find_map(|field| field.strip_prefix("incident="))
+        .unwrap_or("")
+        .to_owned();
+    let key = (event.pid, event.exe.clone(), event.path.clone(), incident);
     if last_notified
         .get(&key)
         .is_some_and(|last| now_ms.saturating_sub(*last) < WINDOW_MS)
@@ -249,5 +258,16 @@ mod tests {
             &self::event(8, "/synthetic/Cookies"),
             11_001
         ));
+    }
+
+    #[test]
+    fn distinct_behavior_incidents_are_not_coalesced() {
+        let mut sent = HashMap::new();
+        let mut first = event(7, "/synthetic/id_ed25519");
+        first.backend_diag = "ssh_behavior_key_read;incident=ssh-0001".into();
+        let mut second = first.clone();
+        second.backend_diag = "ssh_behavior_key_read;incident=ssh-0002".into();
+        assert!(should_notify(&mut sent, &first, 1_000));
+        assert!(should_notify(&mut sent, &second, 1_001));
     }
 }

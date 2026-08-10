@@ -1,7 +1,7 @@
 # Maintainer: PLFJY <https://github.com/PLFJY>
 
 pkgname=sensitive-file-guard-git
-pkgver=0.1.0.r16.g15b08d8
+pkgver=0.1.0.r18.g3b596e7
 pkgrel=1
 pkgdesc='Pre-open local access firewall for browser authentication data and SSH private keys'
 arch=('x86_64')
@@ -32,7 +32,7 @@ build() {
   # libsqlite3-sys compiles bundled SQLite as a static C archive. Arch's GCC
   # LTO archive cannot be linked by Rust's lld final linker, so package-wide
   # LTO is disabled above while normal makepkg hardening flags remain enabled.
-  cargo build --frozen --release --workspace --exclude guard-test-probe
+  GUARDD_BUILD_ID="$pkgver" cargo build --frozen --release --workspace --exclude guard-test-probe
 }
 
 check() {

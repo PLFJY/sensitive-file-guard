@@ -1,15 +1,17 @@
 //! Linux BPF-LSM backend for bounded SSH read-to-send containment.
 //!
-//! The BPF object has exactly three programs: `socket_sendmsg` blocks the
-//! first actual send, `sched_process_fork` inherits an armed state only to
-//! future children, and `sched_process_exit` removes a process leader's state.
-//! No network payload, TLS plaintext, hostname, or key bytes are inspected.
+//! The BPF object blocks the first actual send, inherits armed state only to
+//! future process children, removes a process leader's state on exit, and
+//! carries the existing quarantine LSM guards. No network payload, TLS
+//! plaintext, hostname, or key bytes are inspected.
 
 use std::ffi::{c_char, c_int, c_long, c_void, CString};
 use std::fs;
 use std::io;
 use std::mem::size_of;
 use std::ptr;
+
+use guard_core::SshIncidentState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SshBehaviorBackendStatus {
@@ -94,6 +96,27 @@ enum BpfMap {}
 enum BpfLink {}
 enum RingBuffer {}
 
+/// ABI-compatible layout of libbpf's bpf_object_open_opts for the supported
+/// libbpf API. The kernel log buffer lets a privileged deployment distinguish
+/// capability denial from verifier failure.
+#[repr(C)]
+struct BpfObjectOpenOpts {
+    sz: usize,
+    object_name: *const c_char,
+    relaxed_maps: bool,
+    _relaxed_maps_padding: [u8; 7],
+    pin_root_path: *const c_char,
+    _removed_attach_prog_fd: u32,
+    _removed_attach_prog_fd_padding: u32,
+    kconfig: *const c_char,
+    btf_custom_path: *const c_char,
+    kernel_log_buf: *mut c_char,
+    kernel_log_size: usize,
+    kernel_log_level: u32,
+    _kernel_log_level_padding: u32,
+    bpf_token_path: *const c_char,
+}
+
 #[link(name = "bpf")]
 unsafe extern "C" {
     fn bpf_object__open_mem(
@@ -116,6 +139,7 @@ unsafe extern "C" {
         category: *const c_char,
         name: *const c_char,
     ) -> *mut BpfLink;
+    fn bpf_program__attach_trace(program: *const BpfProgram) -> *mut BpfLink;
     fn bpf_link__destroy(link: *mut BpfLink) -> c_int;
     fn bpf_map_update_elem(
         fd: c_int,
@@ -146,6 +170,7 @@ pub struct SshBehaviorBackend {
     exit_link: *mut BpfLink,
     quarantine_links: Vec<*mut BpfLink>,
     exposures_fd: c_int,
+    pending_tgids_fd: c_int,
     quarantine_inodes_fd: c_int,
     ring: *mut RingBuffer,
     events: Box<EventQueue>,
@@ -160,24 +185,44 @@ impl SshBehaviorBackend {
     /// Load the embedded BPF ELF and attach every required program. A caller
     /// may allow an SSH read only after this succeeds.
     pub fn attach() -> Result<Self, String> {
+        let mut verifier_log = vec![0u8; 64 * 1024];
+        let options = BpfObjectOpenOpts {
+            sz: size_of::<BpfObjectOpenOpts>(),
+            object_name: ptr::null(),
+            relaxed_maps: false,
+            _relaxed_maps_padding: [0; 7],
+            pin_root_path: ptr::null(),
+            _removed_attach_prog_fd: 0,
+            _removed_attach_prog_fd_padding: 0,
+            kconfig: ptr::null(),
+            btf_custom_path: ptr::null(),
+            kernel_log_buf: verifier_log.as_mut_ptr().cast(),
+            kernel_log_size: verifier_log.len(),
+            // Let libbpf request verifier output only on a failed load; a
+            // successful startup must not pay for verbose verifier logging.
+            kernel_log_level: 0,
+            _kernel_log_level_padding: 0,
+            bpf_token_path: ptr::null(),
+        };
         let object = unsafe {
-            // SAFETY: EMBEDDED_BPF is immutable Cargo-built ELF data and null
-            // options request libbpf defaults.
+            // SAFETY: EMBEDDED_BPF is immutable Cargo-built ELF data. The
+            // options object and verifier buffer remain alive through open/load.
             bpf_object__open_mem(
                 EMBEDDED_BPF.as_ptr().cast(),
                 EMBEDDED_BPF.len(),
-                ptr::null(),
+                (&options as *const BpfObjectOpenOpts).cast(),
             )
         };
         if let Some(error) = pointer_error(object) {
             return Err(error.context("opening embedded BPF object"));
         }
         if unsafe { bpf_object__load(object) } != 0 {
+            let load_errno = io::Error::last_os_error();
             unsafe {
                 // SAFETY: object is a successfully opened libbpf object.
                 bpf_object__close(object);
             }
-            return Err(last_error("loading BPF object"));
+            return Err(load_error(&verifier_log, load_errno));
         }
 
         let result = Self::attach_loaded(object);
@@ -198,6 +243,7 @@ impl SshBehaviorBackend {
         let exit = find_program(object, "guard_process_exit")?;
         let exposures = find_map_fd(object, "exposures")?;
         let event_map = find_map_fd(object, "blocked_events")?;
+        let pending_tgids = find_map_fd(object, "pending_tgids")?;
         let quarantine_inodes = find_map_fd(object, "quarantine_inodes")?;
         let quarantine_controller = find_map_fd(object, "quarantine_controller")?;
 
@@ -209,17 +255,16 @@ impl SshBehaviorBackend {
         if let Some(error) = pointer_error(send_link) {
             return Err(error.context("attaching BPF LSM socket_sendmsg hook"));
         }
-        let category = CString::new("sched").expect("literal has no NUL");
-        let fork_name = CString::new("sched_process_fork").expect("literal has no NUL");
         let fork_link = unsafe {
-            // SAFETY: literals remain alive through the attach call and fork
-            // is a loaded tracepoint program.
-            bpf_program__attach_tracepoint(fork, category.as_ptr(), fork_name.as_ptr())
+            // SAFETY: fork is a loaded BTF-aware tracepoint program and
+            // libbpf owns the returned link.
+            bpf_program__attach_trace(fork)
         };
         if let Some(error) = pointer_error(fork_link) {
             destroy_link(send_link);
             return Err(error.context("attaching sched_process_fork hook"));
         }
+        let category = CString::new("sched").expect("literal has no NUL");
         let exit_name = CString::new("sched_process_exit").expect("literal has no NUL");
         let exit_link = unsafe {
             // SAFETY: literals remain alive through the attach call and exit
@@ -311,6 +356,7 @@ impl SshBehaviorBackend {
             exit_link,
             quarantine_links,
             exposures_fd: exposures,
+            pending_tgids_fd: pending_tgids,
             quarantine_inodes_fd: quarantine_inodes,
             ring,
             events,
@@ -326,11 +372,21 @@ impl SshBehaviorBackend {
         incident_id: u64,
         uid: u32,
         observe_until_ns: u64,
+        state: SshIncidentState,
     ) -> Result<(), String> {
         let value = ExposureValue {
             incident_id,
             observe_until_ns,
-            state: EXPOSURE_OBSERVING,
+            state: match state {
+                SshIncidentState::Observing => EXPOSURE_OBSERVING,
+                SshIncidentState::PendingDecision => EXPOSURE_PENDING,
+                SshIncidentState::Allowed => EXPOSURE_ALLOWED,
+                SshIncidentState::Expired
+                | SshIncidentState::Quarantined
+                | SshIncidentState::Terminated => {
+                    return Err(format!("cannot arm SSH exposure in {state:?} state"));
+                }
+            },
             uid,
         };
         let result = unsafe {
@@ -375,6 +431,16 @@ impl SshBehaviorBackend {
                 if update != 0 {
                     return Err(last_error("resolving SSH send containment"));
                 }
+                let pending_delete = unsafe {
+                    // SAFETY: key points to the same TGID key used by the
+                    // kernel-owned pending marker map.
+                    bpf_map_delete_elem(self.pending_tgids_fd, (&key as *const u32).cast())
+                };
+                if pending_delete != 0
+                    && io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT)
+                {
+                    return Err(last_error("clearing pending SSH send containment"));
+                }
             }
         }
         Ok(())
@@ -384,7 +450,10 @@ impl SshBehaviorBackend {
     /// elapsed, even if their process never attempts a later send or exits.
     pub fn expire(&mut self, now_ns: u64) -> Result<(), String> {
         for (key, value) in self.exposures()? {
-            if value.state == EXPOSURE_OBSERVING && now_ns >= value.observe_until_ns {
+            if value.state == EXPOSURE_OBSERVING
+                && now_ns >= value.observe_until_ns
+                && !self.is_pending_tgid(key)?
+            {
                 let result = unsafe {
                     // SAFETY: key points to an initialized map key and this
                     // backend owns the live map fd.
@@ -402,19 +471,19 @@ impl SshBehaviorBackend {
     /// This is a loss-recovery path for a full ring buffer: enforcement stays
     /// in the kernel, while userspace can still surface the pending incident.
     pub fn pending(&self, at_ns: u64) -> Result<Vec<BlockedSend>, String> {
-        Ok(self
-            .exposures()?
-            .into_iter()
-            .filter_map(|(tgid, value)| {
-                (value.state == EXPOSURE_PENDING).then_some(BlockedSend {
+        let mut pending = Vec::new();
+        for (tgid, value) in self.exposures()? {
+            if value.state == EXPOSURE_PENDING || self.is_pending_tgid(tgid)? {
+                pending.push(BlockedSend {
                     incident_id: value.incident_id,
                     at_ns,
                     tgid,
                     uid: value.uid,
                     size: 0,
-                })
-            })
-            .collect())
+                });
+            }
+        }
+        Ok(pending)
     }
 
     /// Return the current TGIDs that the kernel associates with one incident.
@@ -525,6 +594,25 @@ impl SshBehaviorBackend {
             previous = Some(key);
         }
         Ok(entries)
+    }
+
+    fn is_pending_tgid(&self, tgid: u32) -> Result<bool, String> {
+        let mut incident_id = 0u64;
+        let result = unsafe {
+            // SAFETY: key/value storage matches the pending_tgids map.
+            bpf_map_lookup_elem(
+                self.pending_tgids_fd,
+                (&tgid as *const u32).cast(),
+                (&mut incident_id as *mut u64).cast(),
+            )
+        };
+        if result == 0 {
+            Ok(true)
+        } else if io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT) {
+            Ok(false)
+        } else {
+            Err(last_error("looking up pending SSH send containment"))
+        }
     }
 }
 
@@ -653,6 +741,27 @@ fn last_error(operation: &str) -> String {
     format!("{operation}: {}", io::Error::last_os_error())
 }
 
+fn load_error(verifier_log: &[u8], load_error: io::Error) -> String {
+    let log = verifier_log
+        .split(|byte| *byte == 0)
+        .next()
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .map(str::trim)
+        .filter(|log| !log.is_empty())
+        .map(|log| {
+            const MAX_LOG_CHARS: usize = 8 * 1024;
+            if log.len() > MAX_LOG_CHARS {
+                format!("{}…", &log[..MAX_LOG_CHARS])
+            } else {
+                log.to_owned()
+            }
+        });
+    match log {
+        Some(log) => format!("loading BPF object: {load_error}; verifier_log={log}"),
+        None => format!("loading BPF object: {load_error}"),
+    }
+}
+
 /// Probe prerequisites without loading a privileged BPF program.
 pub fn detect_backend() -> SshBehaviorBackendStatus {
     let lsm = match fs::read_to_string("/sys/kernel/security/lsm") {
@@ -702,5 +811,10 @@ mod tests {
     #[test]
     fn blocked_event_has_stable_kernel_layout() {
         assert_eq!(size_of::<RawBlockedSend>(), 32);
+    }
+
+    #[test]
+    fn libbpf_open_options_layout_matches_current_api() {
+        assert_eq!(size_of::<BpfObjectOpenOpts>(), 88);
     }
 }

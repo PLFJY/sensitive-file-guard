@@ -125,11 +125,23 @@ impl ExposureTracker {
             matches!(
                 incident.state,
                 SshIncidentState::Observing | SshIncidentState::PendingDecision
-            ) && incident.root_process == process.stable
+            ) && (incident.root_tgid == root_tgid
+                && incident.root_process.start_time == process.stable.start_time
+                && incident.root_process.exe_identity() == process.stable.exe_identity()
+                || incident.root_process == process.stable
+                || process
+                    .ancestors
+                    .iter()
+                    .any(|ancestor| same_ancestor(ancestor, &incident.root_process)))
                 && incident.key_resource_id == resource.id.0
         }) {
             existing.last_sensitive_read_ms = now_ms;
-            existing.observe_until_ms = now_ms.saturating_add(window_secs.saturating_mul(1000));
+            // A pending incident is already contained indefinitely.  A later
+            // key read may update audit metadata, but must never reopen or
+            // shorten the observation deadline in either state machine.
+            if existing.state == SshIncidentState::Observing {
+                existing.observe_until_ms = now_ms.saturating_add(window_secs.saturating_mul(1000));
+            }
             return (existing.clone(), false);
         }
 
@@ -488,6 +500,27 @@ mod tests {
     }
 
     #[test]
+    fn secondary_thread_reuses_the_thread_group_incident() {
+        let mut tracker = ExposureTracker::default();
+        let leader = process(12, 1, vec![]);
+        tracker.arm(&key(), &leader, None, 12, 100, 10);
+        let thread = process(13, 1, vec![]);
+        let (incident, is_new) = tracker.arm(&key(), &thread, None, 12, 200, 10);
+        assert!(!is_new);
+        assert_eq!(incident.root_process.pid, 12);
+    }
+
+    #[test]
+    fn reused_tgid_does_not_reuse_an_old_incident() {
+        let mut tracker = ExposureTracker::default();
+        let old_process = process(12, 1, vec![]);
+        tracker.arm(&key(), &old_process, None, 12, 100, 10);
+        let new_process = process(13, 2, vec![]);
+        let (_, is_new) = tracker.arm(&key(), &new_process, None, 12, 200, 10);
+        assert!(is_new);
+    }
+
+    #[test]
     fn allow_is_incident_scoped_not_a_future_whitelist() {
         let mut tracker = ExposureTracker::default();
         let reader = process(12, 1, vec![]);
@@ -552,6 +585,33 @@ mod tests {
                 .unwrap()
                 .blocked_network_attempts,
             1
+        );
+    }
+
+    #[test]
+    fn rereading_after_block_cannot_reopen_or_expire_pending_incident() {
+        let mut tracker = ExposureTracker::default();
+        let reader = process(12, 1, vec![]);
+        let (first, _) = tracker.arm(&key(), &reader, None, 12, 100, 1);
+        assert_eq!(first.observe_until_ms, 1_100);
+        assert_eq!(
+            tracker.network_send(&reader, destination(), 200),
+            NetworkDecision::Block {
+                newly_pending: true
+            }
+        );
+
+        let (reread, is_new) = tracker.arm(&key(), &reader, None, 12, 250, 1);
+        assert!(!is_new);
+        assert_eq!(reread.state, SshIncidentState::PendingDecision);
+        assert_eq!(reread.observe_until_ms, 1_100);
+
+        tracker.expire(50_000);
+        assert_eq!(
+            tracker.network_send(&reader, destination(), 50_001),
+            NetworkDecision::Block {
+                newly_pending: false
+            }
         );
     }
 

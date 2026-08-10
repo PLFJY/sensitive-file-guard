@@ -569,9 +569,25 @@ impl EnforcementEngine {
                 }
             }
         }
+        let mut key_read_event = None;
         if matches!(decision, Decision::Deny(DenyReason::SshPrivateKeyRawRead)) {
             if let Some(behavior) = behavior {
-                decision = self.arm_ssh_behavior(&resource, &process, pid, behavior);
+                let (armed_decision, incident, newly_created) =
+                    self.arm_ssh_behavior(&resource, &process, pid, behavior);
+                decision = armed_decision;
+                if newly_created && matches!(decision, Decision::Allow) {
+                    if let Some(incident) = incident {
+                        key_read_event = Some(build_audit_record(
+                            &resource,
+                            Some(&process),
+                            Decision::Allow,
+                            &format!(
+                                "ssh_behavior_key_read;incident={};tgid={};uid={};window_secs={}",
+                                incident.id, incident.root_tgid, incident.uid, behavior.window_secs
+                            ),
+                        ));
+                    }
+                }
             }
         }
         match decision {
@@ -595,7 +611,9 @@ impl EnforcementEngine {
                 self.ssh_agent_bindings.remove(&id);
             }
         }
-        let record = if should_record_decision(decision) {
+        let record = if let Some(event) = key_read_event {
+            Some(event)
+        } else if should_record_decision(decision) {
             let backend_diag = format!(
                 "{};classify={};trust={:?}",
                 resolve_diag, classification, process.trust_tier
@@ -618,12 +636,16 @@ impl EnforcementEngine {
         process: &ProcessIdentity,
         pid: i32,
         behavior: &SshBehaviorGuard<'_>,
-    ) -> Decision {
+    ) -> (Decision, Option<guard_core::SshExposureIncident>, bool) {
         let tgid = match linux_identity::read_tgid(pid) {
             Ok(tgid) => tgid,
             Err(error) => {
                 tracing::error!(pid, %error, "cannot resolve reader thread group for SSH containment");
-                return Decision::Deny(DenyReason::SshBehaviorBackendUnavailable);
+                return (
+                    Decision::Deny(DenyReason::SshBehaviorBackendUnavailable),
+                    None,
+                    false,
+                );
             }
         };
         let now_ns = monotonic_ns();
@@ -647,16 +669,26 @@ impl EnforcementEngine {
             .and_then(|value| u64::from_str_radix(value, 16).ok())
         {
             Some(id) => id,
-            None => return Decision::Deny(DenyReason::SshBehaviorBackendUnavailable),
+            None => {
+                return (
+                    Decision::Deny(DenyReason::SshBehaviorBackendUnavailable),
+                    None,
+                    false,
+                )
+            }
         };
-        let until = now_ns.saturating_add(behavior.window_secs.saturating_mul(1_000_000_000));
         match behavior
             .backend
             .lock()
             .expect("SSH behavior backend mutex poisoned")
-            .arm(tgid, incident_id, process.uid, until)
-        {
-            Ok(()) => Decision::Allow,
+            .arm(
+                tgid,
+                incident_id,
+                process.uid,
+                incident.observe_until_ms.saturating_mul(1_000_000),
+                incident.state,
+            ) {
+            Ok(()) => (Decision::Allow, Some(incident), newly_created),
             Err(error) => {
                 if newly_created {
                     behavior
@@ -666,7 +698,11 @@ impl EnforcementEngine {
                         .discard_unarmed(&incident.id);
                 }
                 tracing::error!(pid, tgid, incident_id, %error, "cannot arm SSH send containment");
-                Decision::Deny(DenyReason::SshBehaviorBackendUnavailable)
+                (
+                    Decision::Deny(DenyReason::SshBehaviorBackendUnavailable),
+                    None,
+                    false,
+                )
             }
         }
     }

@@ -5,7 +5,9 @@ Linux V1 implementation of the Sensitive Data Firewall (`guardd`). It is the
 authoritative reference for what the firewall does and does not protect against.
 
 **Acceptance state:** **SECURITY-ACCEPTED ALPHA ON TESTED ARCH HOST only in
-`strict-filesystem` mode.** All required privileged suites were executed.
+`strict-filesystem` mode for browser protection.** SSH behavioral containment
+requires a separate privileged BPF acceptance matrix and is not accepted until
+that matrix passes. Previously accepted browser suites were executed.
 Conservative mode remains implementation-complete but is not promoted because
 its replacement race remained readable in 10,000/10,000 iterations.
 
@@ -21,9 +23,10 @@ rather than adding filesystem-wide read mediation. A valid `SshLoadLease`
 still authorizes the brokered `ssh-add` read. Ordinary raw reads are allowed
 only when a BPF LSM send hook is loaded before the fanotify allow response; if
 that backend is unavailable, they remain denied with no misleading ACTIVE
-claim. The current source tree builds and embeds a BPF LSM program, but it
-reports ACTIVE only after libbpf has successfully loaded and attached every
-required hook at daemon startup.
+claim. The backend blocks external IPv4/IPv6 sends at `socket_sendmsg` while
+allowing AF_UNIX, AF_NETLINK, and IPv4/IPv6 loopback. It reports ACTIVE only
+after libbpf has successfully loaded and attached every required hook at
+daemon startup.
 
 ## Guarantees
 
@@ -236,11 +239,12 @@ access; it does not mediate agent signing authority. Users can mitigate with
 `ssh-add -c` (confirmation) or `ssh-add -t` (lifetime).
 
 ### 5. SSH behavioral model limits
-Even on a future compatible BPF-LSM deployment, the model is only: protected
+Even on a compatible BPF-LSM deployment, the model is only: protected
 SSH-key read + short (default 10-second) window + same process/future child
-actual external send. It does not prove that any attempted payload is a key,
-inspect TLS/plaintext, or provide full taint tracking. Deliberate bypasses
-outside this V1 scope include sleeping past the window, arbitrary IPC or
+actual external IPv4/IPv6 send. It does not prove that any attempted payload
+is a key, inspect TLS/plaintext, or provide full taint tracking. AF_UNIX,
+AF_NETLINK, and loopback are deliberately local-only exclusions. Deliberate
+bypasses outside this V1 scope include sleeping past the window, arbitrary IPC or
 shared-memory transfer to an already-running process, local temporary-file
 handoff, root/kernel compromise, and untested exotic send paths. Loopback/local
 IPC is not the target.
@@ -382,7 +386,7 @@ noise and are recorded only as a usability smoke test. Strict remains opt-in.
 | Threat | Protected? | Notes |
 | --- | --- | --- |
 | Unprivileged process reads browser cookies | **Yes** | `FAN_OPEN_PERM` deny before open |
-| Unprivileged process reads SSH private key | **Yes** | `FAN_OPEN_PERM` deny before open |
+| Unprivileged process reads SSH private key | **Conditional** | Allowed only with ACTIVE BPF behavioral backend; otherwise fail-closed |
 | Hardlink to protected file | **Yes** | Inode index; Strict also scans new multi-link aliases before allow |
 | Symlink to protected file | **Yes** | Canonical path resolution |
 | Relative path `..` traversal | **Yes** | Canonicalize resolves `..` |

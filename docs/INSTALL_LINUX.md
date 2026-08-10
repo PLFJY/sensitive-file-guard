@@ -30,7 +30,7 @@ and Fedora use `polkit`; Arch `libnotify` provides `notify-send`.
 
 ### SSH behavioral backend compatibility
 
-The Phase 22 model requires an attached BPF LSM `socket_sendmsg` hook to block
+The Phase 22.1 model requires an attached BPF LSM `socket_sendmsg` hook to block
 an actual outbound send from the reader's process tree, including a socket
 opened before the key was read. It needs an active `bpf` entry in
 `/sys/kernel/security/lsm`, kernel BTF at `/sys/kernel/btf/vmlinux`, and the
@@ -39,6 +39,13 @@ libbpf at runtime and clang while building the embedded object. It leaves raw
 SSH reads fail-closed whenever loading or attachment fails. Check `guardctl
 status` for `ssh_behavior_backend`; `UNAVAILABLE` or `DEGRADED` is not
 behavioral SSH protection.
+
+The `guardd` system unit bounds `CAP_BPF` and `CAP_PERFMON` in addition to the
+existing fanotify/process capabilities. These are the minimum capabilities
+used by libbpf for the BPF-LSM and scheduler tracepoint links; the unit does
+not use a broad privileged capability set. `guardctl status` includes a build
+identifier (`version` such as `0.1.0+<commit>`) so an acceptance run can verify
+that the running daemon is the installed build.
 
 `guard-ui` is an unprivileged GTK 4/libadwaita presentation and control client;
 it is not auto-started and never replaces `guardctl` for automation.
