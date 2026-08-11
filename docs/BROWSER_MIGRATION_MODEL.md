@@ -60,6 +60,15 @@ matching reads for that source browser and
 profile use `AllowByLease`; another profile needs another confirmation. The
 lease dies when its root browser exits, expires, or is revoked.
 
+Edge can spawn several separate browser roots while starting one import. A
+successful confirmation therefore also creates one 60-second, daemon-memory
+coalescing window for matching sibling importers. The match includes the UID,
+source browser/profile, target browser, and target executable path plus
+device/inode. Each sibling is revalidated and receives its own root-bound
+lease before it is allowed. This is deliberately not a polkit `*_keep` cache,
+is never written to disk, and cannot be reused by another executable or after
+the short window expires.
+
 Linux fanotify does not expose the original open flags, so this is not a
 provable read-only grant. The UI correctly says “allow this import.”
 

@@ -1121,8 +1121,18 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow) {
                     present_incident_dialog(&window, incident);
                 }
             }
+            let pending_migration_sessions = pending_migrations
+                .iter()
+                .map(migration_session_key)
+                .collect::<HashSet<_>>();
+            shown_migrations
+                .borrow_mut()
+                .retain(|session| pending_migration_sessions.contains(session));
             for migration in pending_migrations {
-                if shown_migrations.borrow_mut().insert(migration.id.clone()) {
+                if shown_migrations
+                    .borrow_mut()
+                    .insert(migration_session_key(&migration))
+                {
                     present_migration_dialog(&window, migration);
                 }
             }
@@ -1145,6 +1155,19 @@ fn browser_label(id: &str) -> String {
         "vivaldi" => "Vivaldi".into(),
         _ => id.to_owned(),
     }
+}
+
+/// Presentation grouping only. guardd independently revalidates every process
+/// and creates a separate root-bound lease before allowing it.
+fn migration_session_key(migration: &guard_ipc::MigrationPendingInfo) -> String {
+    format!(
+        "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+        migration.uid,
+        migration.source_browser,
+        migration.source_profile,
+        migration.target_browser,
+        migration.target_exe,
+    )
 }
 
 fn present_migration_dialog(
@@ -1500,6 +1523,31 @@ mod tests {
         assert_eq!(
             ssh_key_subtitle(false, true),
             "Configured — not active in the current guardd process"
+        );
+    }
+
+    #[test]
+    fn sibling_importers_share_one_dialog_session_key() {
+        let first = guard_ipc::MigrationPendingInfo {
+            id: "1".into(),
+            uid: 1000,
+            source_browser: "firefox".into(),
+            source_profile: "default".into(),
+            target_browser: "microsoft-edge".into(),
+            target_exe: "/opt/microsoft/msedge/msedge".into(),
+            target_pid: 10,
+            target_start_time: 100,
+            requested_data: "browser_key_material".into(),
+            created_at: 1,
+            expires_at: 2,
+        };
+        let mut sibling = first.clone();
+        sibling.id = "2".into();
+        sibling.target_pid = 11;
+        sibling.target_start_time = 101;
+        assert_eq!(
+            migration_session_key(&first),
+            migration_session_key(&sibling)
         );
     }
 

@@ -871,6 +871,14 @@ fn handle_migration_resolve(
         .approve_pending_migration(&details);
     match outcome {
         Ok((lease_id, expires_at)) => {
+            let siblings = {
+                let mut pending = state
+                    .pending_migrations
+                    .lock()
+                    .expect("pending migration mutex poisoned");
+                pending.record_recent_approval(&details, unix_secs());
+                pending.take_recent_approval_siblings(&details)
+            };
             request.resolve(true);
             let record = state
                 .engine
@@ -886,6 +894,51 @@ fn handle_migration_resolve(
                     ),
                 );
             state.audit.record(record);
+            for sibling in siblings {
+                let sibling_details = sibling.details.clone();
+                match state
+                    .engine
+                    .lock()
+                    .expect("engine mutex poisoned")
+                    .approve_pending_migration(&sibling_details)
+                {
+                    Ok((sibling_lease, sibling_expires_at)) => {
+                        sibling.resolve(true);
+                        let record = state
+                            .engine
+                            .lock()
+                            .expect("engine mutex poisoned")
+                            .migration_audit_record(
+                                &sibling_details,
+                                "browser_migration_allowed",
+                                guard_core::Decision::AllowByLease(sibling_lease),
+                                &format!(
+                                    "browser_migration_allowed;resolution=coalesced_import_session;lease={};expires_at={}",
+                                    sibling_lease.0, sibling_expires_at
+                                ),
+                            );
+                        state.audit.record(record);
+                    }
+                    Err(error) => {
+                        sibling.resolve(false);
+                        let record = state
+                            .engine
+                            .lock()
+                            .expect("engine mutex poisoned")
+                            .migration_audit_record(
+                                &sibling_details,
+                                "browser_migration_blocked",
+                                guard_core::Decision::Deny(
+                                    guard_core::DenyReason::IdentityMismatch,
+                                ),
+                                &format!(
+                                    "browser_migration_blocked;resolution=coalesced_import_identity_revalidation;{error}"
+                                ),
+                            );
+                        state.audit.record(record);
+                    }
+                }
+            }
             Response::ok(ResponseBody::MigrationResolved(
                 MigrationResolutionInfo::Allowed,
             ))

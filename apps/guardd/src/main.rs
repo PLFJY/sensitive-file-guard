@@ -650,6 +650,59 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                                 fd_transferred = true;
                             }
                             pending::EnqueueResult::Joined => fd_transferred = true,
+                            pending::EnqueueResult::RecentlyApproved(details, permission) => {
+                                // A user just authenticated this exact source
+                                // profile -> verified target browser executable
+                                // tuple. Revalidate this sibling process and
+                                // issue its own root-bound lease; no executable-
+                                // wide or persisted authorization is created.
+                                let outcome = engine
+                                    .lock()
+                                    .expect("engine mutex poisoned")
+                                    .approve_pending_migration(&details);
+                                match outcome {
+                                    Ok((lease_id, expires_at)) => {
+                                        if let Err(error) = permission.resolve(true) {
+                                            tracing::error!(%error, "failed to allow recently approved browser import permission");
+                                        }
+                                        audit_record = Some(
+                                            engine
+                                                .lock()
+                                                .expect("engine mutex poisoned")
+                                                .migration_audit_record(
+                                                    &details,
+                                                    "browser_migration_allowed",
+                                                    guard_core::Decision::AllowByLease(lease_id),
+                                                    &format!(
+                                                        "browser_migration_allowed;resolution=recent_import_approval;lease={};expires_at={}",
+                                                        lease_id.0, expires_at
+                                                    ),
+                                                ),
+                                        );
+                                    }
+                                    Err(error) => {
+                                        if let Err(resolve_error) = permission.resolve(false) {
+                                            tracing::error!(%resolve_error, "failed to deny invalid recently approved browser import permission");
+                                        }
+                                        audit_record = Some(
+                                            engine
+                                                .lock()
+                                                .expect("engine mutex poisoned")
+                                                .migration_audit_record(
+                                                    &details,
+                                                    "browser_migration_blocked",
+                                                    guard_core::Decision::Deny(
+                                                        guard_core::DenyReason::IdentityMismatch,
+                                                    ),
+                                                    &format!(
+                                                        "browser_migration_blocked;resolution=recent_import_identity_revalidation;{error}"
+                                                    ),
+                                                ),
+                                        );
+                                    }
+                                }
+                                fd_transferred = true;
+                            }
                             pending::EnqueueResult::DenySuppressed => {
                                 // `PendingPermission` was dropped in enqueue
                                 // and therefore denied + closed exactly once.

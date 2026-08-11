@@ -118,7 +118,10 @@ opening its own enrolled profile is allowed immediately. An unknown process,
 fake browser executable, or cross-UID process is denied immediately. When a
 trusted enrolled browser opens another enrolled browser's profile, the current
 open remains blocked while guard-ui asks whether this is an import. Allow binds
-a 10-minute lease to that exact browser process tree; Block, closing the dialog,
+10-minute leases to the exact verified importer process trees. Edge utility
+processes from that same verified import burst share the one confirmation for
+60 seconds; each still receives its own revalidated, root-bound lease. This is
+daemon memory only, not a polkit-wide password cache. Block, closing the dialog,
 and timeout deny the queued opens. See [the browser migration model](docs/BROWSER_MIGRATION_MODEL.md).
 
 ## Install
