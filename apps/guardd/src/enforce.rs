@@ -52,9 +52,9 @@ pub const DEFAULT_MIGRATION_DURATION_SECS: u64 = 600;
 /// Maximum migration lease duration (1 hour). Longer requests are capped so a
 /// migration grant can never become de-facto permanent trust.
 pub const MAX_MIGRATION_DURATION_SECS: u64 = 3600;
-/// Ordinary SSH key-read authorization follows browser import leases: the
-/// verified reader tree receives a short, memory-only lease for one key.
-pub const DEFAULT_SSH_READ_DURATION_SECS: u64 = 600;
+/// Ordinary SSH key-read authorization is deliberately brief: the verified
+/// reader tree receives a ten-second, memory-only lease for one key.
+pub const DEFAULT_SSH_READ_DURATION_SECS: u64 = 10;
 /// Default SSH load lease duration (30 seconds), per `11_SSH_AGENT_LOAD_FLOW.md`.
 /// The lease is one-shot and also revoked on process exit; the timeout is a
 /// safety net in case `guardctl` crashes before sending the complete signal.

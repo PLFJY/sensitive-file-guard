@@ -9,7 +9,7 @@ The GTK prompt shows only metadata: executable path, PID, start time, and key
 path. **Allow** invokes the non-cached Polkit action
 `org.guardd.ssh-read-resolve`. Guardd then re-resolves the reader and verifies
 the PID/start token, executable file identity, UID, and key owner before it
-replies to the held fanotify read. A successful answer creates a ten-minute
+replies to the held fanotify read. A successful answer creates a ten-second
 `SshReadAccessLease` for that exact resource and reader tree. It is in memory
 only, expires naturally, is revoked if the root exits, and can be revoked via
 the existing lease interface.

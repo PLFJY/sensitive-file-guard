@@ -19,7 +19,7 @@ or payload-inspection product.
 
 Browser resources remain denied before access. SSH private keys use an exact
 `FAN_ACCESS_PERM` file mark so the daemon holds an actual read request. Allow
-requires a non-cached Polkit check and creates a ten-minute in-memory lease
+requires a non-cached Polkit check and creates a ten-second in-memory lease
 bound to one key, UID, and verified process tree. Block, timeout, close, or
 identity change denies the request. The full flow is in
 [SSH_ACCESS_MODEL.md](SSH_ACCESS_MODEL.md).
@@ -212,7 +212,7 @@ mode is `0660 root:guardd-users`; every connection gets kernel credentials from
 | `SshProtect` | root or `stat`-verified file owner; canonical regular-file candidate, name, owner, and successful fanotify mark checked | adds protection but no read capability; polkit for non-root |
 | `SshLoadAuthorize` | protected key owner; direct stopped child and trusted `ssh-add`; verified/pinned trusted `ssh-agent`; all kernel facts rechecked after authorization | grants one matching open for 30 seconds; polkit for non-root |
 | `SshPendingList/Get` | peer UID from `SO_PEERCRED`; non-root sees only its own daemon-recorded requests | metadata-only view; no client-supplied key or process facts |
-| `SshReadResolve` | pending request belongs to peer UID (or root); daemon rechecks reader identity and key ownership | `allow` crosses non-cached `org.guardd.ssh-read-resolve` Polkit and creates one ten-minute memory lease; `block` denies immediately |
+| `SshReadResolve` | pending request belongs to peer UID (or root); daemon rechecks reader identity and key ownership | `allow` crosses non-cached `org.guardd.ssh-read-resolve` Polkit and creates one ten-second memory lease; `block` denies immediately |
 | `LeasesRevoke` | lease owner or root; ownership comes from daemon state | removes privilege; no polkit, and cross-user revocation is denied |
 
 Polkit process subjects include PID, start time, and UID. While `pkcheck` is

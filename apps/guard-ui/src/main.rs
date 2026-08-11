@@ -1288,7 +1288,7 @@ fn present_ssh_read_dialog(window: &adw::ApplicationWindow, pending: guard_ipc::
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| pending.process_exe.clone());
     let details = format!(
-        "Program: {process}\nExecutable: {}\nPID: {}\nSSH private key: {}\n\nAllow this verified process tree to read this key for 10 minutes?",
+        "Program: {process}\nExecutable: {}\nPID: {}\nSSH private key: {}\n\nAllow this verified process tree to read this key for 10 seconds?",
         pending.process_exe, pending.pid, pending.key_path
     );
     let dialog = gtk::MessageDialog::builder()
@@ -1433,7 +1433,7 @@ fn ssh_read_prompt(pending: guard_ipc::SshPendingInfo) -> PendingPrompt {
         request_id: pending.id,
         title: "SSH private-key access detected".into(),
         details: format!(
-            "Program: {process}\nExecutable: {}\nPID: {}\nSSH private key: {}\n\nAllow this verified process tree to read this key for 10 minutes?",
+            "Program: {process}\nExecutable: {}\nPID: {}\nSSH private key: {}\n\nAllow this verified process tree to read this key for 10 seconds?",
             pending.process_exe, pending.pid, pending.key_path
         ),
         allow_label: "Allow".into(),

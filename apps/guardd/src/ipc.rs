@@ -1556,12 +1556,15 @@ mod tests {
 
         // Mirror the IPC handler's critical invariant: materialize the result
         // before any branch reacquires the engine for audit metadata.
+        let before_approval = unix_secs();
         let approval = engine
             .lock()
             .expect("engine mutex poisoned")
             .approve_pending_ssh_read(&details);
         let (lease_id, expires_at) = approval.expect("approve fixture read");
-        assert!(expires_at > unix_secs());
+        let after_approval = unix_secs();
+        assert!(expires_at >= before_approval + 10);
+        assert!(expires_at <= after_approval + 10);
 
         let allowed = engine
             .lock()

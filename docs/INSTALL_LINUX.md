@@ -32,7 +32,7 @@ and Fedora use `polkit`; Arch `libnotify` provides `notify-send`.
 
 An ordinary SSH private-key read is held until the desktop user chooses Allow
 or Block. Allow requires the non-cached Polkit password check and creates a
-ten-minute in-memory lease for only that verified process tree and key.
+ten-second in-memory lease for only that verified process tree and key.
 `guardctl ssh load` keeps its one-shot `ssh-add` / `ssh-agent` exception.
 
 `guard-ui` is an unprivileged GTK 4/libadwaita presentation and control client;

@@ -206,7 +206,7 @@ SSH private-key reads are mediated before the read completes. An ordinary
 reader is held by `FAN_ACCESS_PERM` and the GTK app shows one **Allow** or
 **Block** prompt with the program, PID, executable, and key path. Allow crosses
 the non-cached `org.guardd.ssh-read-resolve` Polkit action, then creates a
-memory-only ten-minute lease for that exact verified process tree and key.
+memory-only ten-second lease for that exact verified process tree and key.
 Closing the prompt, selecting Block, expiry after 60 seconds, or reader exit
 denies the held read. The lease is not saved to disk and cannot cover another
 key, user, executable identity, or PID reuse.
