@@ -2,7 +2,7 @@
 set -eu
 
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-portable_crates="guard-core guard-browser guard-ssh guard-ipc guard-audit guard-platform guard-client"
+portable_crates="guard-core guard-browser guard-ssh guard-ipc guard-audit guard-platform guard-client guard-runtime"
 failed=0
 
 for crate in $portable_crates; do

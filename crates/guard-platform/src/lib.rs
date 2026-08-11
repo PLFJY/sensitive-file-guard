@@ -4,6 +4,7 @@
 //! backend adapters may implement these contracts differently.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use guard_core::identity::{ProcessIdentity, ProcessStableId};
 
@@ -35,8 +36,9 @@ pub enum AccessDisposition {
     Deferred,
 }
 
-/// Owns one deferred OS authorization request.  Implementations must make
-/// `allow`/`deny` terminal and release the underlying request exactly once.
+/// Owns one deferred OS authorization request. Implementations must make
+/// `allow`/`deny` terminal, release the underlying request exactly once, and
+/// fail closed when an unresolved owner is dropped while the OS can respond.
 pub trait PendingPermission: Send {
     fn allow(self: Box<Self>) -> anyhow::Result<()>;
     fn deny(self: Box<Self>) -> anyhow::Result<()>;
@@ -78,8 +80,16 @@ pub trait BrowserDiscovery: Send + Sync {
 
 /// Platform-local transport is separate from the wire protocol.  This trait
 /// is useful to future clients that need a non-Unix local channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestTimeout {
+    Bounded(Duration),
+    /// The server/platform authorization deadline is authoritative. The local
+    /// channel must stay open while trusted UI authentication is in progress.
+    Authorization,
+}
+
 pub trait LocalTransport: Send + Sync {
-    fn request(&self, payload: &[u8]) -> anyhow::Result<Vec<u8>>;
+    fn request(&self, payload: &[u8], timeout: RequestTimeout) -> anyhow::Result<Vec<u8>>;
 }
 
 /// Stable metadata for platform diagnostics; mechanism-specific details may

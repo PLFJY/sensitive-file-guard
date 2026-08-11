@@ -83,8 +83,8 @@ A process owned by a different UID than the resource owner is denied
 A `SshLoadLease` authorizes exactly one `open()` of a protected SSH private
 key by the exact `ssh-add` invocation (bound by `StableIdentity`). The `used`
 flag is set on the first `AllowByLease`. A second open cannot reuse that lease,
-but it follows the ordinary SSH behavioral path and is therefore allowed,
-reported, and observed for immediate external sends.
+so it returns to the ordinary held SSH-read confirmation path and cannot
+receive key bytes without a fresh valid approval.
 
 The client cannot declare that identity. It submits only a stopped child PID;
 the daemon verifies that the child is the IPC peer's direct child, is stopped,
@@ -112,12 +112,12 @@ Audit records contain metadata only (path, exe, uid, pid, decision, deny
 reason, resource kind). They never contain file contents, cookie values,
 passwords, key bytes, or private-key material.
 
-### 11. Deterministic policy and bounded import confirmation
+### 11. Deterministic policy and bounded human confirmation
 The authorization decision is a deterministic function of `(resource, process,
 operation, leases)`. Ordinary Allow/Deny decisions never wait for a human UI.
-The sole exception is a typed `RequireMigrationConfirmation` result for a
-trusted enrolled browser reading another enrolled browser profile for the same
-UID. The event loop transfers that event fd to a bounded pending store and
+Typed `RequireMigrationConfirmation` and `RequireSshKeyConfirmation` results
+retain only the affected authorization operation while the callback/event loop
+continues. The event loop transfers that event fd to a bounded pending store and
 continues serving other fanotify events. A user can allow or block only by
 pending request ID plus a fixed action; Allow crosses a non-cached polkit
 boundary and revalidates PID, start time, executable identity, UID and browser
@@ -126,12 +126,10 @@ revalidation deny. Unknown processes, fake browser names and cross-UID access
 remain immediate denial paths.
 
 ### 12. Classification failure boundaries
-Browser `FAN_OPEN_PERM` classification failures produce
-`Deny(UnclassifiedFd)` so browser protection remains fail-closed. The narrow
-SSH `FAN_ACCESS_PERM` path never denies a read: if key classification or
-process identity cannot be resolved, guardd allows immediately and reports as
-much metadata as it can. Missing identity cannot be treated as permission to
-send-block an unrelated process tree.
+Browser `FAN_OPEN_PERM` classification failures deny so browser protection
+remains fail-closed. The narrow SSH `FAN_ACCESS_PERM` path also fails closed
+when the protected key or reader identity cannot be resolved. Missing identity
+is never permission to disclose protected key bytes.
 
 ### 13. Conservative dynamic resource rediscovery
 An inotify watcher is established before initial fanotify marking and watches
@@ -392,7 +390,7 @@ noise and are recorded only as a usability smoke test. Strict remains opt-in.
 | Threat | Protected? | Notes |
 | --- | --- | --- |
 | Unprivileged process reads browser cookies | **Yes** | `FAN_OPEN_PERM` deny before open |
-| Unprivileged process reads SSH private key | **Observed, not denied** | Always allowed and reported; active BPF observes its exact process tree for immediate sends |
+| Unprivileged process reads SSH private key | **Yes** | Read is held until authenticated Allow; Block/close/timeout/identity change denies before disclosure |
 | Hardlink to protected file | **Yes** | Inode index; Strict also scans new multi-link aliases before allow |
 | Symlink to protected file | **Yes** | Canonical path resolution |
 | Relative path `..` traversal | **Yes** | Canonicalize resolves `..` |

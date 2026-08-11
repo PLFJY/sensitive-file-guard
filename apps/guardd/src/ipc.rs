@@ -204,20 +204,22 @@ fn handle_status(state: &IpcState, creds: PeerCreds) -> Response {
     };
     let body = StatusInfo {
         version: state.version.clone(),
+        backend_kind: "linux-fanotify".to_owned(),
+        backend_diagnostic: Some("fanotify protected-file authorization".to_owned()),
         enforcement_active: state.group.is_some(),
         status: status.to_string(),
-        mode: state.backend_metrics.mode.as_str().to_owned(),
-        marked_filesystems,
-        required_filesystems,
-        filesystem_marks_healthy,
-        strict_events_total: backend.strict_events_total,
-        strict_fast_allowed: backend.strict_fast_allowed,
+        mode: Some(state.backend_metrics.mode.as_str().to_owned()),
+        marked_filesystems: Some(marked_filesystems),
+        required_filesystems: Some(required_filesystems),
+        filesystem_marks_healthy: Some(filesystem_marks_healthy),
+        strict_events_total: Some(backend.strict_events_total),
+        strict_fast_allowed: Some(backend.strict_fast_allowed),
         protected_events: backend.protected_events,
-        fanotify_overflows: backend.fanotify_overflows,
-        classifier_failures: backend.classifier_failures,
-        strict_alias_scans: backend.strict_alias_scans,
-        strict_alias_matches: backend.strict_alias_matches,
-        topology_degraded: engine.topology_degraded,
+        fanotify_overflows: Some(backend.fanotify_overflows),
+        classifier_failures: Some(backend.classifier_failures),
+        strict_alias_scans: Some(backend.strict_alias_scans),
+        strict_alias_matches: Some(backend.strict_alias_matches),
+        topology_degraded: Some(engine.topology_degraded),
         protected_files: engine.registry().file_count(),
         ssh_protected_keys: engine
             .registry()
@@ -289,7 +291,7 @@ fn handle_configuration_get(state: &IpcState, _creds: PeerCreds) -> Response {
     let engine = state.engine.lock().expect("engine mutex poisoned");
     let cfg = engine.configuration();
     Response::ok(ResponseBody::Configuration(ConfigurationInfo {
-        enforcement_mode: cfg.enforcement_mode.as_str().to_owned(),
+        enforcement_mode: Some(cfg.enforcement_mode.as_str().to_owned()),
         browsers: cfg
             .browsers
             .iter()

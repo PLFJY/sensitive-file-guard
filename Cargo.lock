@@ -676,6 +676,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "guard-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "guard-core",
+ "guard-platform",
+ "tracing",
+]
+
+[[package]]
 name = "guard-ssh"
 version = "0.1.0"
 dependencies = [
@@ -713,6 +723,7 @@ dependencies = [
  "guard-platform",
  "guard-ssh",
  "libadwaita",
+ "serde",
  "serde_json",
 ]
 
@@ -745,6 +756,7 @@ dependencies = [
  "guard-core",
  "guard-ipc",
  "guard-platform",
+ "guard-runtime",
  "guard-ssh",
  "guard-test-fixtures",
  "libc",

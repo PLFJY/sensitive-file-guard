@@ -39,12 +39,11 @@ contacts the Internet.
 **Blocks:** ordinary same-user cookie stealers directly opening/copying protected
 browser files; Python/Node/shell scripts reading protected browser data;
 malicious build/postinstall scripts reading protected browser data; and
-immediate external TCP/UDP sends by a process tree that just accessed a
-protected SSH private key.
+unapproved reads of enrolled SSH private keys.
 
-**Allows:** a browser accessing its own profile; all protected SSH-key reads
-(with an informational notification); normal `git push`, SSH authentication,
-and SSH-format Git signing through `ssh-agent`; a recognized, trusted browser
+**Allows:** a browser accessing its own profile; an approved SSH-key reader
+under a short exact process-tree lease; normal `git push`, SSH authentication,
+and SSH-format Git signing through the hardened `ssh-agent` path; a recognized, trusted browser
 import from another enrolled browser profile is held for a one-time user
 confirmation, then receives a temporary `MigrationAccessLease` bound directly
 to that exact process tree. `guardctl migration authorize` remains available

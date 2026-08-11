@@ -2,35 +2,35 @@
 
 ## Purpose
 
-This document defines the boundary introduced by the platform-backend
-refactor. Linux remains the reference implementation. No macOS backend is
-implemented or implied by this document.
+This document defines the production boundary shared by the Linux reference
+implementation and macOS backend work. It does not yet claim a working macOS
+enforcement backend.
 
 ## Portable layers
 
 `guard-core` owns identities, resources, leases, and deterministic
 policy. `guard-browser` and `guard-ssh` own portable resource/domain helpers.
 `guard-ipc` owns only versioned request/response DTOs. `guard-audit` owns the
-metadata-only audit store. `guard-client` owns typed client semantics and
-client-side framing. `guard-platform` owns semantic contracts and portable
-configuration/discovery DTOs.
+metadata-only audit store. `guard-client` owns typed client semantics over an
+injected local transport. `guard-platform` owns semantic contracts and portable
+policy/discovery DTOs. `guard-runtime` owns shared lease transitions and bounded
+browser/SSH pending queues.
 
 The reusable direction is:
 
 ```text
 guard-core / guard-browser / guard-ssh / guard-ipc / guard-audit
                               ↑
-                       guard-platform
+             guard-platform / guard-runtime
                               ↑
                        platform-linux
                               ↑
                   guardd / guardctl composition
 ```
 
-`guard-ui` and `guard-notify` consume `guard-client`, IPC DTOs,
-and portable view/config types. `guardd` is still a Linux composition root in
-this phase; a separate `guard-runtime` crate was not created because the
-existing daemon state machine remains closely coupled to the enforcement loop.
+`guard-ui` and `guard-notify` consume `guard-client`, IPC DTOs, and portable
+view/config types. `guardd` remains the Linux composition root and injects its
+fanotify permission owner and process-liveness adapter into `guard-runtime`.
 
 ## Platform contracts
 
@@ -44,7 +44,9 @@ existing daemon state machine remains closely coupled to the enforcement loop.
   adapter-owned.
 - `ServiceController`: query semantic protection/notification health and
   apply start/stop/restart.
-- `LocalTransport`: the seam for a future local IPC channel implementation.
+- `LocalTransport`: byte transport plus explicit ordinary/authorization timeout
+  policy; Unix sockets are the Linux implementation and XPC can implement the
+  same typed client contract.
 
 The filesystem access request model is `ProtectedAccessRequest` plus
 `ProtectedOperation` and `AccessDisposition::{Allow,Deny,Deferred}`. Product
@@ -76,8 +78,9 @@ access request → policy confirmation candidate → retain opaque pending reque
                → user decision → one terminal allow/deny response
 ```
 
-The Linux pending owner fails closed on drop and closes the underlying event
-resource once. Portable code cannot inspect or duplicate that resource.
+`guard-runtime` owns `Box<dyn PendingPermission>` values and bounded queue
+state. The Linux pending owner fails closed on drop and closes the underlying
+event resource once. Portable code cannot inspect or duplicate that resource.
 
 ## Process identity boundary
 
@@ -90,9 +93,9 @@ an authorization grant.
 
 ## SSH confirmation boundary
 
-SSH key reads are held at the fanotify access boundary. The Linux daemon owns
-the pending permission descriptor, Polkit recheck, and short process-tree lease;
-portable policy only evaluates the resulting resource and stable identity facts.
+SSH key reads are held at the fanotify access boundary. The Linux adapter owns
+the permission descriptor and Polkit gate; the shared runtime owns queue and
+short process-tree lease transitions after exact identity revalidation.
 
 ## IPC boundary
 
@@ -104,10 +107,9 @@ issue ordinary protocol requests.
 
 ## Service boundary
 
-The UI calls the semantic service facade in `guard-client`. The selected CLI
-and Linux adapter own privileged service operations and notification-presenter
-control. UI health is based on `ServiceStatus`; service-manager commands are
-not part of GTK product logic.
+The GTK application selects a small target-specific service composition module.
+Linux `pkexec`/systemd calls live there and in `guardctl`; `guard-client`
+contains only typed protocol request/response behavior.
 
 ## UI boundary
 
@@ -118,25 +120,25 @@ the GTK application reusable without linking the Linux backend implementation.
 
 ## Configuration boundary
 
-`EnforcementConfig`, browser enrollment metadata, and enforcement mode are
-portable models. Linux discovery layouts remain in `platform-linux`. Legacy
-unknown JSON fields are tolerated, so removed SSH observation settings do not
-existing Linux installations require no migration.
+`PolicyConfig` and browser enrollment metadata are portable. Linux
+`EnforcementMode` and the backward-compatible Linux configuration wrapper live
+in `platform-linux`. Existing JSON with `enforcement_mode` still parses without
+migration. Status/config IPC makes Linux mechanism fields optional and reports
+the backend kind, so macOS need not invent filesystem-mark counters or a mode.
 
 ## Testing strategy
 
-`guard-platform/tests/fake_backend.rs` uses synthetic identities and a fake
-pending owner to exercise immediate policy outcomes and deferred terminal
-ownership without privileged facilities. Existing daemon tests and privileged
-Linux scripts remain in place; fake tests supplement rather than replace them.
+`guard-runtime` tests use synthetic identities, a fake process resolver, and a
+fake pending owner to exercise production browser migration and SSH approval,
+block, and timeout paths without privileged facilities. Existing daemon tests
+and privileged Linux scripts remain in place; fake tests supplement them.
 `tests/check_platform_boundaries.sh` checks direct dependency and import
 direction with a small repository-readable rule.
 
 ## Future macOS mapping (planned, not implemented)
 
-A future `platform-macos` can implement filesystem authorization, process
-identity/lifecycle, SSH network containment, local privileged transport,
-service health, artifact containment, and browser discovery behind the same
-semantic seams. macOS APIs, entitlements, system extensions, and packaging are
-intentionally not selected or tested in this phase. No macOS compilation claim
-is made.
+A future `platform-macos` adapter can implement Endpoint Security protected-file
+authorization for both browser and SSH resources, process identity/lifecycle,
+authenticated XPC, service health, and browser discovery behind these seams.
+No Network Extension or SSH network containment is required by the current
+model. Entitled Endpoint Security execution is not claimed in this phase.

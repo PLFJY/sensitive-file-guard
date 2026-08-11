@@ -4,7 +4,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -12,6 +12,7 @@ use gtk4 as gtk;
 use libadwaita as adw;
 
 mod pending_dialog;
+mod platform_service;
 
 use pending_dialog::{PendingDialogController, PendingPrompt, PromptKey, PromptKind, PromptState};
 
@@ -86,7 +87,7 @@ fn ssh_key_subtitle(active: bool, configured: bool) -> &'static str {
 
 #[derive(Clone)]
 struct UiState {
-    candidate: Rc<RefCell<Option<guard_platform::config::EnforcementConfig>>>,
+    candidate: Rc<RefCell<Option<platform_service::LinuxConfiguration>>>,
     status: gtk::Label,
     detail: gtk::Label,
     apply: gtk::Button,
@@ -274,9 +275,9 @@ fn protection_page(state: &UiState) -> gtk::Box {
     mode.connect_changed(move |m| {
         if let Some(cfg) = candidate.borrow_mut().as_mut() {
             cfg.enforcement_mode = if m.active_id().as_deref() == Some("strict-filesystem") {
-                guard_platform::config::EnforcementMode::StrictFilesystem
+                platform_service::LinuxEnforcementMode::StrictFilesystem
             } else {
-                guard_platform::config::EnforcementMode::Conservative
+                platform_service::LinuxEnforcementMode::Conservative
             };
             apply.set_sensitive(true);
         }
@@ -436,10 +437,10 @@ fn load_configuration(state: &UiState) {
 /// browser data.
 fn configuration_from_daemon(
     info: guard_ipc::ConfigurationInfo,
-) -> Option<guard_platform::config::EnforcementConfig> {
-    let enforcement_mode = match info.enforcement_mode.as_str() {
-        "strict-filesystem" => guard_platform::config::EnforcementMode::StrictFilesystem,
-        "conservative" => guard_platform::config::EnforcementMode::Conservative,
+) -> Option<platform_service::LinuxConfiguration> {
+    let enforcement_mode = match info.enforcement_mode.as_deref()? {
+        "strict-filesystem" => platform_service::LinuxEnforcementMode::StrictFilesystem,
+        "conservative" => platform_service::LinuxEnforcementMode::Conservative,
         _ => return None,
     };
     let mut browsers = Vec::with_capacity(info.browsers.len());
@@ -458,7 +459,7 @@ fn configuration_from_daemon(
             exe_paths: browser.exe_paths.into_iter().map(PathBuf::from).collect(),
         });
     }
-    Some(guard_platform::config::EnforcementConfig {
+    Some(platform_service::LinuxConfiguration {
         enforcement_mode,
         browsers,
         enrolled_exes: info.enrolled_exes.into_iter().map(PathBuf::from).collect(),
@@ -672,7 +673,7 @@ fn same_native_browser(
         && left.exe_paths == right.exe_paths
 }
 
-fn render_objects(state: &UiState, cfg: &guard_platform::config::EnforcementConfig) {
+fn render_objects(state: &UiState, cfg: &platform_service::LinuxConfiguration) {
     while let Some(child) = state.browsers.first_child() {
         state.browsers.remove(&child);
     }
@@ -1018,7 +1019,7 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
                 .collect::<Vec<_>>();
             let pending_ssh_reads = guard_client::ssh_pending(&socket);
             let pending_migrations = guard_client::migration_pending(&socket);
-            let service_status = guard_client::service::status().ok();
+            let service_status = platform_service::status().ok();
             let service_active = service_status
                 .as_ref()
                 .map(|status| status.protection_active)
@@ -1058,7 +1059,14 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
             }
             let service_state = if service_active { "active" } else { "inactive" };
             let notification_state = if notification_active { "active" } else { "inactive" };
-            detail.set_text(&daemon.map(|s| format!("Mode: {} · browsers: {} · SSH keys: {} · allowed: {} · denied: {} · marks: {}/{} · service: {} · notifications: {}", s.mode, s.browsers, s.ssh_protected_keys, s.allowed, s.denied, s.marked_filesystems, s.required_filesystems, service_state, notification_state)).unwrap_or_else(|| format!("guardd IPC is unavailable · service: {} · notifications: {}", service_state, notification_state)));
+            detail.set_text(&daemon.map(|s| {
+                let mode = s.mode.as_deref().unwrap_or("platform-default");
+                let marks = match (s.marked_filesystems, s.required_filesystems) {
+                    (Some(marked), Some(required)) => format!(" · marks: {marked}/{required}"),
+                    _ => String::new(),
+                };
+                format!("Backend: {} · mode: {} · browsers: {} · SSH keys: {} · allowed: {} · denied: {}{} · service: {} · notifications: {}", s.backend_kind, mode, s.browsers, s.ssh_protected_keys, s.allowed, s.denied, marks, service_state, notification_state)
+            }).unwrap_or_else(|| format!("guardd IPC is unavailable · service: {} · notifications: {}", service_state, notification_state)));
             if after_id.is_none() {
                 while let Some(child) = events.first_child() { events.remove(&child); }
                 *event_data.borrow_mut() = recent_events.clone();
@@ -1778,7 +1786,7 @@ fn run_main_service(verb: &str) -> bool {
         "restart" => guard_platform::ServiceOperation::Restart,
         _ => return false,
     };
-    guard_client::service::apply(operation).is_ok()
+    platform_service::apply(operation).is_ok()
 }
 
 fn run_notification_service(verb: &str) -> bool {
@@ -1788,7 +1796,7 @@ fn run_notification_service(verb: &str) -> bool {
         "restart" => guard_platform::ServiceOperation::Restart,
         _ => return false,
     };
-    guard_client::service::apply_notifications(operation).is_ok()
+    platform_service::apply_notifications(operation).is_ok()
 }
 
 fn run_protection_bundle(verb: &str) -> bool {
@@ -1827,22 +1835,9 @@ fn run_protection_bundle(verb: &str) -> bool {
 fn spawn_apply(bytes: Vec<u8>, button: gtk::Button) {
     let write_bytes = bytes.clone();
     glib::MainContext::default().spawn_local(async move {
-        let ok = gio::spawn_blocking(move || {
-            let mut child = match Command::new("pkexec")
-                .args(["guardctl", "privileged", "apply-config"])
-                .stdin(Stdio::piped())
-                .spawn()
-            {
-                Ok(c) => c,
-                Err(_) => return false,
-            };
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = std::io::Write::write_all(&mut stdin, &write_bytes);
-            }
-            child.wait().map(|s| s.success()).unwrap_or(false)
-        })
-        .await
-        .unwrap_or(false);
+        let ok = gio::spawn_blocking(move || platform_service::apply_config(&write_bytes).is_ok())
+            .await
+            .unwrap_or(false);
         button.set_sensitive(true);
         if !ok {
             button.set_tooltip_text(Some(
@@ -1859,7 +1854,7 @@ mod tests {
     #[test]
     fn daemon_configuration_preserves_ssh_enrollment_for_the_ui() {
         let config = configuration_from_daemon(guard_ipc::ConfigurationInfo {
-            enforcement_mode: "strict-filesystem".into(),
+            enforcement_mode: Some("strict-filesystem".into()),
             browsers: vec![guard_ipc::ConfiguredBrowserInfo {
                 id: "firefox".into(),
                 family: "Firefox".into(),
@@ -1873,7 +1868,7 @@ mod tests {
         .expect("supported daemon snapshot");
         assert_eq!(
             config.enforcement_mode,
-            guard_platform::config::EnforcementMode::StrictFilesystem
+            platform_service::LinuxEnforcementMode::StrictFilesystem
         );
         assert_eq!(
             config.ssh_keys,
@@ -1923,20 +1918,22 @@ mod tests {
     fn health_requires_live_evidence() {
         let status = guard_ipc::StatusInfo {
             version: "x".into(),
+            backend_kind: "linux-fanotify".into(),
+            backend_diagnostic: None,
             enforcement_active: true,
             status: "ACTIVE".into(),
-            mode: "strict-filesystem".into(),
-            marked_filesystems: 1,
-            required_filesystems: 1,
-            filesystem_marks_healthy: true,
-            strict_events_total: 0,
-            strict_fast_allowed: 0,
+            mode: Some("strict-filesystem".into()),
+            marked_filesystems: Some(1),
+            required_filesystems: Some(1),
+            filesystem_marks_healthy: Some(true),
+            strict_events_total: Some(0),
+            strict_fast_allowed: Some(0),
             protected_events: 0,
-            fanotify_overflows: 0,
-            classifier_failures: 0,
-            strict_alias_scans: 0,
-            strict_alias_matches: 0,
-            topology_degraded: false,
+            fanotify_overflows: Some(0),
+            classifier_failures: Some(0),
+            strict_alias_scans: Some(0),
+            strict_alias_matches: Some(0),
+            topology_degraded: Some(false),
             protected_files: 1,
             ssh_protected_keys: 0,
             protected_trees: 1,

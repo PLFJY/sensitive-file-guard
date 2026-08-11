@@ -1,0 +1,11 @@
+[package]
+name = "guard-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+guard-core.workspace = true
+guard-platform.workspace = true
+tracing.workspace = true

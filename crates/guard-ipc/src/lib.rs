@@ -287,6 +287,10 @@ pub struct MigrationPendingInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusInfo {
     pub version: String,
+    #[serde(default)]
+    pub backend_kind: String,
+    #[serde(default)]
+    pub backend_diagnostic: Option<String>,
     pub enforcement_active: bool,
     /// Human-readable enforcement state (Phase 14): `"ACTIVE"`,
     /// `"DEGRADED"`, or `"NOT_ENFORCING"`.
@@ -297,30 +301,29 @@ pub struct StatusInfo {
     ///   (e.g. config-check mode, or the group failed to initialize).
     #[serde(default)]
     pub status: String,
-    #[serde(default = "default_enforcement_mode")]
-    pub mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
     #[serde(default)]
-    pub marked_filesystems: usize,
+    pub marked_filesystems: Option<usize>,
     #[serde(default)]
-    pub required_filesystems: usize,
-    #[serde(default = "default_true")]
-    pub filesystem_marks_healthy: bool,
+    pub required_filesystems: Option<usize>,
+    pub filesystem_marks_healthy: Option<bool>,
     #[serde(default)]
-    pub strict_events_total: u64,
+    pub strict_events_total: Option<u64>,
     #[serde(default)]
-    pub strict_fast_allowed: u64,
+    pub strict_fast_allowed: Option<u64>,
     #[serde(default)]
     pub protected_events: u64,
     #[serde(default)]
-    pub fanotify_overflows: u64,
+    pub fanotify_overflows: Option<u64>,
     #[serde(default)]
-    pub classifier_failures: u64,
+    pub classifier_failures: Option<u64>,
     #[serde(default)]
-    pub strict_alias_scans: u64,
+    pub strict_alias_scans: Option<u64>,
     #[serde(default)]
-    pub strict_alias_matches: u64,
+    pub strict_alias_matches: Option<u64>,
     #[serde(default)]
-    pub topology_degraded: bool,
+    pub topology_degraded: Option<bool>,
     pub protected_files: usize,
     #[serde(default)]
     pub ssh_protected_keys: usize,
@@ -332,14 +335,6 @@ pub struct StatusInfo {
     pub unclassified: u64,
     pub audit_dropped: u64,
     pub peer_uid: u32,
-}
-
-fn default_enforcement_mode() -> String {
-    "conservative".to_owned()
-}
-
-fn default_true() -> bool {
-    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -366,7 +361,8 @@ pub struct BrowserInfo {
 /// browser database rows, SSH key bytes, cookies, or credentials.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigurationInfo {
-    pub enforcement_mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enforcement_mode: Option<String>,
     pub browsers: Vec<ConfiguredBrowserInfo>,
     pub enrolled_exes: Vec<String>,
     pub ssh_keys: Vec<String>,
@@ -663,20 +659,22 @@ mod tests {
     fn response_ok_and_err_round_trip() {
         let ok = Response::ok(ResponseBody::Status(StatusInfo {
             version: "0.1.0".into(),
+            backend_kind: "linux-fanotify".into(),
+            backend_diagnostic: None,
             enforcement_active: true,
             status: "ACTIVE".into(),
-            mode: "strict-filesystem".into(),
-            marked_filesystems: 1,
-            required_filesystems: 1,
-            filesystem_marks_healthy: true,
-            strict_events_total: 10,
-            strict_fast_allowed: 8,
+            mode: Some("strict-filesystem".into()),
+            marked_filesystems: Some(1),
+            required_filesystems: Some(1),
+            filesystem_marks_healthy: Some(true),
+            strict_events_total: Some(10),
+            strict_fast_allowed: Some(8),
             protected_events: 2,
-            fanotify_overflows: 0,
-            classifier_failures: 0,
-            strict_alias_scans: 3,
-            strict_alias_matches: 2,
-            topology_degraded: false,
+            fanotify_overflows: Some(0),
+            classifier_failures: Some(0),
+            strict_alias_scans: Some(3),
+            strict_alias_matches: Some(2),
+            topology_degraded: Some(false),
             protected_files: 6,
             protected_trees: 2,
             browsers: 1,
@@ -699,5 +697,21 @@ mod tests {
         assert!(!back.ok);
         assert_eq!(back.error.as_deref(), Some("nope"));
         assert!(back.body.is_none());
+    }
+
+    #[test]
+    fn status_can_omit_linux_backend_details() {
+        let json = r#"{
+            "version":"0.1.0","backend_kind":"macos-endpoint-security",
+            "enforcement_active":true,"status":"ACTIVE","protected_events":1,
+            "protected_files":2,"ssh_protected_keys":1,"protected_trees":1,
+            "browsers":1,"browser_exes":2,"allowed":3,"denied":4,
+            "unclassified":0,"audit_dropped":0,"peer_uid":501
+        }"#;
+        let status: StatusInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(status.backend_kind, "macos-endpoint-security");
+        assert!(status.mode.is_none());
+        assert!(status.marked_filesystems.is_none());
+        assert!(status.fanotify_overflows.is_none());
     }
 }

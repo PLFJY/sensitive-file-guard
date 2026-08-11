@@ -217,6 +217,9 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
     let engine = Arc::new(Mutex::new(engine));
     let pending_migrations = Arc::new(Mutex::new(pending::PendingMigrationStore::default()));
     let pending_ssh_reads = Arc::new(Mutex::new(pending::PendingSshReadStore::default()));
+    let process_liveness = platform_linux::identity::LinuxProcessIdentityResolver::new(
+        platform_linux::enrollment::EnrollmentStore::new(),
+    );
 
     // A startup-only fanotify snapshot is not sufficient: browser databases
     // are routinely replaced with new inodes and profiles gain directories at
@@ -378,7 +381,7 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
         let expired_migrations = pending_migrations
             .lock()
             .expect("pending migration mutex poisoned")
-            .expire(unix_secs());
+            .expire(unix_secs(), &process_liveness);
         for request in expired_migrations {
             let details = request.details.clone();
             request.resolve(false);
@@ -396,7 +399,7 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
         let expired_ssh_reads = pending_ssh_reads
             .lock()
             .expect("pending SSH read mutex poisoned")
-            .expire(unix_secs());
+            .expire(unix_secs(), &process_liveness);
         for request in expired_ssh_reads {
             let details = request.details.clone();
             request.resolve(false);
@@ -521,7 +524,10 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                             .expect("pending migration mutex poisoned")
                             .enqueue(
                                 details,
-                                pending::PendingPermission::new(Arc::clone(&group), ev.fd),
+                                Box::new(platform_linux::fanotify::LinuxPendingPermission::new(
+                                    Arc::clone(&group),
+                                    ev.fd,
+                                )),
                                 unix_secs(),
                             );
                         match outcome {
@@ -554,7 +560,7 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                                     .approve_pending_migration(&details);
                                 match outcome {
                                     Ok((lease_id, expires_at)) => {
-                                        if let Err(error) = permission.resolve(true) {
+                                        if let Err(error) = permission.allow() {
                                             tracing::error!(%error, "failed to allow recently approved browser import permission");
                                         }
                                         audit_record = Some(
@@ -573,7 +579,7 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                                         );
                                     }
                                     Err(error) => {
-                                        if let Err(resolve_error) = permission.resolve(false) {
+                                        if let Err(resolve_error) = permission.deny() {
                                             tracing::error!(%resolve_error, "failed to deny invalid recently approved browser import permission");
                                         }
                                         audit_record = Some(
@@ -649,7 +655,10 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                         .expect("pending SSH read mutex poisoned")
                         .enqueue(
                             details,
-                            pending::PendingPermission::new(Arc::clone(&group), ev.fd),
+                            Box::new(platform_linux::fanotify::LinuxPendingPermission::new(
+                                Arc::clone(&group),
+                                ev.fd,
+                            )),
                             unix_secs(),
                         );
                     match outcome {

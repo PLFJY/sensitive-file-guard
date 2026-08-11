@@ -477,13 +477,13 @@ fn apply_config_transactionally() -> anyhow::Result<()> {
 
 fn validate_candidate_bytes(
     bytes: &[u8],
-) -> anyhow::Result<guard_platform::config::EnforcementConfig> {
+) -> anyhow::Result<platform_linux::config::EnforcementConfig> {
     anyhow::ensure!(
         bytes.len() <= MAX_CONFIG_STDIN,
         "configuration input exceeds {} bytes",
         MAX_CONFIG_STDIN
     );
-    let cfg: guard_platform::config::EnforcementConfig = serde_json::from_slice(bytes)
+    let cfg: platform_linux::config::EnforcementConfig = serde_json::from_slice(bytes)
         .map_err(|e| anyhow::anyhow!("malformed configuration: {e}"))?;
     cfg.validate()?;
     Ok(cfg)
@@ -934,7 +934,13 @@ fn print_human(resp: &Response) {
         Some(ResponseBody::Resources(rs)) => print_resources(rs),
         Some(ResponseBody::Browsers(bs)) => print_browsers(bs),
         Some(ResponseBody::Configuration(configuration)) => {
-            println!("Active configuration: {}", configuration.enforcement_mode);
+            println!(
+                "Active configuration: {}",
+                configuration
+                    .enforcement_mode
+                    .as_deref()
+                    .unwrap_or("platform-default")
+            );
             println!("  browsers : {}", configuration.browsers.len());
             println!("  SSH keys : {}", configuration.ssh_keys.len());
         }
@@ -998,10 +1004,26 @@ fn print_human(resp: &Response) {
 
 fn print_status(s: &StatusInfo) {
     println!("guardd {} — {}", s.version, s.status);
-    println!("  mode            : {}", s.mode);
-    println!("  marked_filesystems: {}", s.marked_filesystems);
-    println!("  required_filesystems: {}", s.required_filesystems);
-    println!("  filesystem_marks_healthy: {}", s.filesystem_marks_healthy);
+    println!(
+        "  backend         : {}",
+        if s.backend_kind.is_empty() {
+            "unknown"
+        } else {
+            &s.backend_kind
+        }
+    );
+    if let Some(mode) = &s.mode {
+        println!("  mode            : {mode}");
+    }
+    if let (Some(marked), Some(required), Some(healthy)) = (
+        s.marked_filesystems,
+        s.required_filesystems,
+        s.filesystem_marks_healthy,
+    ) {
+        println!("  marked_filesystems: {marked}");
+        println!("  required_filesystems: {required}");
+        println!("  filesystem_marks_healthy: {healthy}");
+    }
     println!("  protected_files : {}", s.protected_files);
     println!("  ssh_protected_keys: {}", s.ssh_protected_keys);
     println!("  protected_trees : {}", s.protected_trees);
@@ -1010,14 +1032,28 @@ fn print_status(s: &StatusInfo) {
     println!("  allowed         : {}", s.allowed);
     println!("  denied          : {}", s.denied);
     println!("  unclassified    : {}", s.unclassified);
-    println!("  strict_events   : {}", s.strict_events_total);
-    println!("  strict_fast_allow: {}", s.strict_fast_allowed);
+    if let Some(value) = s.strict_events_total {
+        println!("  strict_events   : {value}");
+    }
+    if let Some(value) = s.strict_fast_allowed {
+        println!("  strict_fast_allow: {value}");
+    }
     println!("  protected_events: {}", s.protected_events);
-    println!("  fanotify_overflows: {}", s.fanotify_overflows);
-    println!("  classifier_failures: {}", s.classifier_failures);
-    println!("  strict_alias_scans: {}", s.strict_alias_scans);
-    println!("  strict_alias_matches: {}", s.strict_alias_matches);
-    println!("  topology_degraded: {}", s.topology_degraded);
+    if let Some(value) = s.fanotify_overflows {
+        println!("  fanotify_overflows: {value}");
+    }
+    if let Some(value) = s.classifier_failures {
+        println!("  classifier_failures: {value}");
+    }
+    if let Some(value) = s.strict_alias_scans {
+        println!("  strict_alias_scans: {value}");
+    }
+    if let Some(value) = s.strict_alias_matches {
+        println!("  strict_alias_matches: {value}");
+    }
+    if let Some(value) = s.topology_degraded {
+        println!("  topology_degraded: {value}");
+    }
     println!("  audit_dropped   : {}", s.audit_dropped);
     println!("  peer_uid        : {}", s.peer_uid);
 }

@@ -5,23 +5,6 @@ use std::path::PathBuf;
 use guard_core::resource::BrowserFamily;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "kebab-case")]
-pub enum EnforcementMode {
-    #[default]
-    Conservative,
-    StrictFilesystem,
-}
-
-impl EnforcementMode {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Conservative => "conservative",
-            Self::StrictFilesystem => "strict-filesystem",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BrowserEnrollmentConfig {
     pub id: String,
@@ -34,9 +17,7 @@ pub struct BrowserEnrollmentConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct EnforcementConfig {
-    #[serde(default)]
-    pub enforcement_mode: EnforcementMode,
+pub struct PolicyConfig {
     pub browsers: Vec<BrowserEnrollmentConfig>,
     #[serde(default)]
     pub enrolled_exes: Vec<PathBuf>,
@@ -44,7 +25,7 @@ pub struct EnforcementConfig {
     pub ssh_keys: Vec<PathBuf>,
 }
 
-impl EnforcementConfig {
+impl PolicyConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.browsers.is_empty() && self.ssh_keys.is_empty() && self.enrolled_exes.is_empty() {
             anyhow::bail!("configuration must enroll at least one browser or SSH key");
@@ -55,15 +36,6 @@ impl EnforcementConfig {
             }
             if !browser.profile_root.is_absolute() {
                 anyhow::bail!("browser {} profile_root must be absolute", browser.id);
-            }
-            if self.enforcement_mode == EnforcementMode::StrictFilesystem
-                && !browser.profile_root.is_dir()
-            {
-                anyhow::bail!(
-                    "browser {} profile root does not exist: {}",
-                    browser.id,
-                    browser.profile_root.display()
-                );
             }
             for exe in &browser.exe_paths {
                 if !exe.is_absolute() {

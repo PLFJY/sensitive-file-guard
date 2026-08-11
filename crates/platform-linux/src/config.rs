@@ -8,9 +8,67 @@ use std::path::{Path, PathBuf};
 
 use guard_core::resource::{BrowserFamily, BrowserId};
 pub use guard_platform::config::{
-    BrowserDiscovery, BrowserEnrollmentConfig, BrowserSuggestion, EnforcementConfig,
-    EnforcementMode, UnsupportedSandboxedBrowser,
+    BrowserDiscovery, BrowserEnrollmentConfig, BrowserSuggestion, PolicyConfig,
+    UnsupportedSandboxedBrowser,
 };
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum EnforcementMode {
+    #[default]
+    Conservative,
+    StrictFilesystem,
+}
+
+impl EnforcementMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Conservative => "conservative",
+            Self::StrictFilesystem => "strict-filesystem",
+        }
+    }
+}
+
+/// Linux composition configuration. The flattened shape preserves existing
+/// `/etc/guardd/config.json` files while keeping backend mode out of portable
+/// policy configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EnforcementConfig {
+    #[serde(default)]
+    pub enforcement_mode: EnforcementMode,
+    pub browsers: Vec<BrowserEnrollmentConfig>,
+    #[serde(default)]
+    pub enrolled_exes: Vec<PathBuf>,
+    #[serde(default)]
+    pub ssh_keys: Vec<PathBuf>,
+}
+
+impl EnforcementConfig {
+    pub fn policy(&self) -> PolicyConfig {
+        PolicyConfig {
+            browsers: self.browsers.clone(),
+            enrolled_exes: self.enrolled_exes.clone(),
+            ssh_keys: self.ssh_keys.clone(),
+        }
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        self.policy().validate()?;
+        if self.enforcement_mode == EnforcementMode::StrictFilesystem {
+            for browser in &self.browsers {
+                if !browser.profile_root.is_dir() {
+                    anyhow::bail!(
+                        "browser {} profile root does not exist: {}",
+                        browser.id,
+                        browser.profile_root.display()
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct NativeBrowserLayout {

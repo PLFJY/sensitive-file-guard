@@ -4,6 +4,7 @@ use std::path::Path;
 
 use anyhow::Context;
 use guard_ipc::{Request, RequestOp, Response, ResponseBody, MAX_REQUEST_BYTES, PROTOCOL_VERSION};
+use guard_platform::{LocalTransport, RequestTimeout};
 
 /// Client-side local transport.  It only connects and exchanges framed
 /// payloads; server-side peer authentication remains in the selected
@@ -14,27 +15,41 @@ pub mod transport {
     use std::path::Path;
     use std::time::Duration;
 
+    use guard_platform::{LocalTransport, RequestTimeout};
+
+    pub struct UnixSocketTransport<'a> {
+        path: &'a Path,
+    }
+
+    impl<'a> UnixSocketTransport<'a> {
+        pub const fn new(path: &'a Path) -> Self {
+            Self { path }
+        }
+    }
+
+    impl LocalTransport for UnixSocketTransport<'_> {
+        fn request(&self, payload: &[u8], timeout: RequestTimeout) -> anyhow::Result<Vec<u8>> {
+            let mut stream = UnixStream::connect(self.path)?;
+            stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+            let read_timeout = match timeout {
+                RequestTimeout::Bounded(duration) => Some(duration),
+                RequestTimeout::Authorization => None,
+            };
+            stream.set_read_timeout(read_timeout)?;
+            write_frame(&mut stream, payload)?;
+            Ok(read_frame(&mut stream, 16 * 1024 * 1024)?)
+        }
+    }
+
+    /// Backward-compatible Unix entry point for clients that exchange custom
+    /// protocol operations. It delegates to the same production transport
+    /// seam as the typed `GuardClient` facade.
     pub struct IpcClient;
 
     impl IpcClient {
-        pub fn request(path: &Path, payload: &[u8]) -> io::Result<Vec<u8>> {
-            Self::request_with_read_timeout(path, payload, Some(Duration::from_secs(2)))
-        }
-
-        /// Send one request with a caller-selected response deadline. Sensitive
-        /// resolution requests keep the socket open while Polkit waits for a
-        /// human; guardd owns the authorization deadline and cancels when the
-        /// peer actually disconnects.
-        pub fn request_with_read_timeout(
-            path: &Path,
-            payload: &[u8],
-            read_timeout: Option<Duration>,
-        ) -> io::Result<Vec<u8>> {
-            let mut stream = UnixStream::connect(path)?;
-            stream.set_write_timeout(Some(Duration::from_secs(2)))?;
-            stream.set_read_timeout(read_timeout)?;
-            write_frame(&mut stream, payload)?;
-            read_frame(&mut stream, 16 * 1024 * 1024)
+        pub fn request(path: &Path, payload: &[u8]) -> anyhow::Result<Vec<u8>> {
+            UnixSocketTransport::new(path)
+                .request(payload, RequestTimeout::Bounded(Duration::from_secs(2)))
         }
     }
 
@@ -66,46 +81,33 @@ pub mod transport {
     }
 }
 
-use transport::IpcClient;
+use transport::UnixSocketTransport;
 
-/// Application-facing service facade. The selected platform CLI owns the
-/// privileged service mechanism; GTK and other clients use these semantic
-/// operations rather than naming a service manager.
-pub mod service {
-    use std::process::Command;
+pub struct GuardClient<T> {
+    transport: T,
+}
 
-    use guard_platform::{ServiceOperation, ServiceStatus};
-
-    pub fn status() -> anyhow::Result<ServiceStatus> {
-        let output = Command::new("guardctl").arg("service-status").output()?;
-        anyhow::ensure!(output.status.success(), "guardctl service status failed");
-        Ok(serde_json::from_slice(&output.stdout)?)
+impl<T: LocalTransport> GuardClient<T> {
+    pub const fn new(transport: T) -> Self {
+        Self { transport }
     }
 
-    pub fn apply(operation: ServiceOperation) -> anyhow::Result<()> {
-        let verb = match operation {
-            ServiceOperation::Start => "start",
-            ServiceOperation::Stop => "stop",
-            ServiceOperation::Restart => "restart",
-        };
-        let status = Command::new("pkexec")
-            .args(["guardctl", "privileged", "service", verb])
-            .status()?;
-        anyhow::ensure!(status.success(), "protection service operation failed");
-        Ok(())
-    }
-
-    pub fn apply_notifications(operation: ServiceOperation) -> anyhow::Result<()> {
-        let verb = match operation {
-            ServiceOperation::Start => "start",
-            ServiceOperation::Stop => "stop",
-            ServiceOperation::Restart => "restart",
-        };
-        let status = Command::new("guardctl")
-            .args(["notification-service", verb])
-            .status()?;
-        anyhow::ensure!(status.success(), "notification service operation failed");
-        Ok(())
+    fn exchange<R>(
+        &self,
+        op: RequestOp,
+        take: fn(ResponseBody) -> Option<R>,
+        timeout: RequestTimeout,
+    ) -> anyhow::Result<R> {
+        let bytes = serde_json::to_vec(&Request {
+            version: PROTOCOL_VERSION,
+            op,
+        })?;
+        anyhow::ensure!(
+            bytes.len() <= MAX_REQUEST_BYTES,
+            "request exceeds MAX_REQUEST_BYTES"
+        );
+        let response = self.transport.request(&bytes, timeout)?;
+        decode_response(&response, take)
     }
 }
 
@@ -114,15 +116,11 @@ fn exchange<T>(
     op: RequestOp,
     take: fn(ResponseBody) -> Option<T>,
 ) -> anyhow::Result<T> {
-    let bytes = serde_json::to_vec(&Request {
-        version: PROTOCOL_VERSION,
+    GuardClient::new(UnixSocketTransport::new(socket)).exchange(
         op,
-    })?;
-    anyhow::ensure!(
-        bytes.len() <= MAX_REQUEST_BYTES,
-        "request exceeds MAX_REQUEST_BYTES"
-    );
-    exchange_bytes(socket, bytes, take, Some(std::time::Duration::from_secs(2)))
+        take,
+        RequestTimeout::Bounded(std::time::Duration::from_secs(2)),
+    )
 }
 
 fn exchange_waiting_for_authorization<T>(
@@ -130,30 +128,17 @@ fn exchange_waiting_for_authorization<T>(
     op: RequestOp,
     take: fn(ResponseBody) -> Option<T>,
 ) -> anyhow::Result<T> {
-    let bytes = serde_json::to_vec(&Request {
-        version: PROTOCOL_VERSION,
+    // Sensitive resolution has its own server/platform deadline. A client read
+    // timeout would close the channel while the user is still authenticating.
+    GuardClient::new(UnixSocketTransport::new(socket)).exchange(
         op,
-    })?;
-    anyhow::ensure!(
-        bytes.len() <= MAX_REQUEST_BYTES,
-        "request exceeds MAX_REQUEST_BYTES"
-    );
-    // `authorize_sensitive` has its own server-side deadline. A client read
-    // timeout would close the peer socket and make guardd cancel Polkit while
-    // the user is still typing the password.
-    exchange_bytes(socket, bytes, take, None)
+        take,
+        RequestTimeout::Authorization,
+    )
 }
 
-fn exchange_bytes<T>(
-    socket: &Path,
-    bytes: Vec<u8>,
-    take: fn(ResponseBody) -> Option<T>,
-    read_timeout: Option<std::time::Duration>,
-) -> anyhow::Result<T> {
-    let response = IpcClient::request_with_read_timeout(socket, &bytes, read_timeout)
-        .map_err(|e| anyhow::anyhow!("IPC request to {}: {e}", socket.display()))?;
-    let response: Response =
-        serde_json::from_slice(&response).context("decoding daemon response")?;
+fn decode_response<T>(bytes: &[u8], take: fn(ResponseBody) -> Option<T>) -> anyhow::Result<T> {
+    let response: Response = serde_json::from_slice(bytes).context("decoding daemon response")?;
     if !response.ok {
         anyhow::bail!(
             "daemon error: {}",
@@ -310,6 +295,7 @@ pub fn resolve_migration(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     #[test]
     fn event_cursor_is_encoded() {
         let request = Request {
@@ -322,5 +308,47 @@ mod tests {
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("before_id"));
+    }
+
+    struct FakeTransport {
+        response: Vec<u8>,
+        timeout: Mutex<Option<RequestTimeout>>,
+    }
+
+    impl LocalTransport for FakeTransport {
+        fn request(&self, _payload: &[u8], timeout: RequestTimeout) -> anyhow::Result<Vec<u8>> {
+            *self.timeout.lock().unwrap() = Some(timeout);
+            Ok(self.response.clone())
+        }
+    }
+
+    #[test]
+    fn typed_client_uses_injected_transport_and_authorization_timeout() {
+        let transport = FakeTransport {
+            response: serde_json::to_vec(&Response::ok(ResponseBody::MigrationResolved(
+                guard_ipc::MigrationResolutionInfo::Allowed,
+            )))
+            .unwrap(),
+            timeout: Mutex::new(None),
+        };
+        let client = GuardClient::new(transport);
+        let result = client
+            .exchange(
+                RequestOp::MigrationResolve {
+                    id: "fixture".into(),
+                    action: guard_ipc::MigrationResolutionAction::AllowImport,
+                },
+                |body| match body {
+                    ResponseBody::MigrationResolved(value) => Some(value),
+                    _ => None,
+                },
+                RequestTimeout::Authorization,
+            )
+            .unwrap();
+        assert_eq!(result, guard_ipc::MigrationResolutionInfo::Allowed);
+        assert_eq!(
+            *client.transport.timeout.lock().unwrap(),
+            Some(RequestTimeout::Authorization)
+        );
     }
 }

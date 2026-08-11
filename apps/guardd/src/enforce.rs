@@ -33,16 +33,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use guard_audit::AuditRecord;
 use guard_browser::{CustomProfile, ProtectedResourceRegistry};
 use guard_core::identity::{ExeIdentity, ProcessIdentity};
-use guard_core::lease::{
-    LeaseId, LeaseSet, MigrationAccessLease, MigrationLeaseState, SshReadAccessLease,
-};
-use guard_core::policy::{
-    evaluate, AccessEvent, AccessOperation, Decision, DenyReason, MigrationCandidate,
-};
+use guard_core::lease::{LeaseId, LeaseSet, MigrationAccessLease, MigrationLeaseState};
+#[cfg(test)]
+use guard_core::policy::evaluate;
+use guard_core::policy::{AccessEvent, AccessOperation, Decision, DenyReason, MigrationCandidate};
 #[cfg(test)]
 use guard_core::resource::BrowserFamily;
 use guard_core::resource::{BrowserId, ProfileId, ProtectedResource, ProtectedResourceKind};
-pub use guard_platform::config::{BrowserEnrollmentConfig, EnforcementConfig, EnforcementMode};
+pub use guard_platform::config::BrowserEnrollmentConfig;
+use guard_runtime::AuthorizationRuntime;
+pub use guard_runtime::{MigrationPendingDetails, SshPendingDetails};
+pub use platform_linux::config::{EnforcementConfig, EnforcementMode};
 use platform_linux::enrollment::EnrollmentStore;
 use platform_linux::fanotify;
 use platform_linux::identity as linux_identity;
@@ -65,32 +66,6 @@ pub const MAX_SSH_LOAD_DURATION_SECS: u64 = 300;
 
 pub type InodeIndex = Arc<RwLock<HashMap<(u64, u64), ProtectedResource>>>;
 
-/// Daemon-owned facts captured for a single pending browser import.  This is
-/// created only after the pure policy has recognized a trusted target browser;
-/// the target identity is checked again before a lease is created.
-#[derive(Debug, Clone)]
-pub struct MigrationPendingDetails {
-    pub candidate: MigrationCandidate,
-    pub resource: ProtectedResource,
-    /// The actual trusted browser process that opened the source resource.
-    pub target: ProcessIdentity,
-    /// Top-most same-executable browser ancestor. Chromium-family import work
-    /// runs in short-lived utility processes; binding/deduplicating at this
-    /// root gives one prompt for the browser instance without trusting an
-    /// arbitrary descendant with a different executable identity.
-    pub target_root: guard_core::ProcessStableId,
-}
-
-/// Daemon-owned facts for one ordinary SSH private-key read waiting on user
-/// confirmation. The root is the reader itself so a shell's unrelated sibling
-/// commands never inherit the authorization.
-#[derive(Debug, Clone)]
-pub struct SshPendingDetails {
-    pub resource: ProtectedResource,
-    pub target: ProcessIdentity,
-    pub target_root: guard_core::ProcessStableId,
-}
-
 /// The enforcement engine. Owns the registry, identity cache, enrollment store,
 /// fd-identity index, and the active lease set. `decide` is the hot-path entry.
 pub struct EnforcementEngine {
@@ -104,13 +79,11 @@ pub struct EnforcementEngine {
     /// PID -> `(start_time, identity)`. Validated against a fresh starttime read
     /// on each lookup so PID reuse invalidates the entry.
     identity_cache: HashMap<u32, (u64, ProcessIdentity)>,
-    pub(crate) leases: LeaseSet,
+    runtime: AuthorizationRuntime,
     /// Lease -> root-pinned SSH agent socket required in the live ssh-add
     /// environment. Kept in the Linux backend because environment inspection
     /// is an OS enforcement fact, not a pure policy-domain concern.
     ssh_agent_bindings: HashMap<LeaseId, PathBuf>,
-    /// Monotonic lease-id counter (migration + ssh leases share this space).
-    next_lease_id: u64,
     /// The browser enrollment config, retained for IPC `browsers list` queries.
     browser_config: Vec<BrowserEnrollmentConfig>,
     /// The metadata-only policy snapshot used by unprivileged UI clients. It
@@ -200,9 +173,8 @@ impl EnforcementEngine {
             browser_exes,
             fd_index: Arc::new(RwLock::new(fd_index)),
             identity_cache: HashMap::new(),
-            leases: LeaseSet::default(),
+            runtime: AuthorizationRuntime::default(),
             ssh_agent_bindings: HashMap::new(),
-            next_lease_id: 0,
             browser_config: cfg.browsers.clone(),
             configuration: cfg.clone(),
             allowed: 0,
@@ -238,7 +210,7 @@ impl EnforcementEngine {
     /// Active leases (for IPC `leases list`). Phase 08 adds creation; Phase 07
     /// exposes the read-only view and revoke.
     pub fn leases(&self) -> &LeaseSet {
-        &self.leases
+        self.runtime.leases()
     }
 
     /// Revoke a lease by its id string. Returns `false` if no lease with that
@@ -249,19 +221,19 @@ impl EnforcementEngine {
             Err(_) => return false,
         };
         let mut found = false;
-        for l in &mut self.leases.migration {
+        for l in &mut self.runtime.leases_mut().migration {
             if l.id == id {
                 l.revoked = true;
                 found = true;
             }
         }
-        for l in &mut self.leases.ssh {
+        for l in &mut self.runtime.leases_mut().ssh {
             if l.id == id {
                 l.revoked = true;
                 found = true;
             }
         }
-        for l in &mut self.leases.ssh_read {
+        for l in &mut self.runtime.leases_mut().ssh_read {
             if l.id == id {
                 l.revoked = true;
                 found = true;
@@ -316,18 +288,20 @@ impl EnforcementEngine {
             .min(MAX_MIGRATION_DURATION_SECS);
         let now = now_secs();
         let expires_at = now.saturating_add(dur);
-        self.next_lease_id = self.next_lease_id.saturating_add(1);
-        let id = LeaseId(self.next_lease_id);
-        self.leases.migration.push(MigrationAccessLease {
-            id,
-            source_browser: BrowserId(source_browser.into()),
-            source_profile: ProfileId(source_profile.into()),
-            target_browser: BrowserId(target_browser.into()),
-            uid,
-            state: MigrationLeaseState::Armed { target },
-            expires_at,
-            revoked: false,
-        });
+        let id = self.runtime.next_lease_id();
+        self.runtime
+            .leases_mut()
+            .migration
+            .push(MigrationAccessLease {
+                id,
+                source_browser: BrowserId(source_browser.into()),
+                source_profile: ProfileId(source_profile.into()),
+                target_browser: BrowserId(target_browser.into()),
+                uid,
+                state: MigrationLeaseState::Armed { target },
+                expires_at,
+                revoked: false,
+            });
         Ok((id, expires_at))
     }
 
@@ -373,34 +347,15 @@ impl EnforcementEngine {
         let (current, _) = self
             .resolve_process(pending.target.stable.pid as i32)
             .ok_or_else(|| "target browser exited before confirmation".to_string())?;
-        if current.stable != pending.target.stable
-            || current.uid != pending.target.uid
-            || !current.is_trusted_browser()
-            || current.browser.as_ref() != Some(&pending.candidate.target_browser)
-        {
-            return Err("target browser identity changed before confirmation".to_string());
-        }
-        if linux_identity::read_start_time(pending.target_root.pid as i32).ok()
-            != Some(pending.target_root.start_time)
-        {
-            return Err("target browser root exited before confirmation".to_string());
-        }
-        self.next_lease_id = self.next_lease_id.saturating_add(1);
-        let id = LeaseId(self.next_lease_id);
-        let expires_at = now_secs().saturating_add(DEFAULT_MIGRATION_DURATION_SECS);
-        self.leases.migration.push(MigrationAccessLease {
-            id,
-            source_browser: pending.candidate.source_browser.clone(),
-            source_profile: pending.candidate.source_profile.clone(),
-            target_browser: pending.candidate.target_browser.clone(),
-            uid: pending.target.uid,
-            state: MigrationLeaseState::Bound {
-                root: pending.target_root.clone(),
-            },
-            expires_at,
-            revoked: false,
-        });
-        Ok((id, expires_at))
+        let root_is_live = linux_identity::read_start_time(pending.target_root.pid as i32).ok()
+            == Some(pending.target_root.start_time);
+        self.runtime.approve_migration(
+            pending,
+            &current,
+            root_is_live,
+            now_secs(),
+            DEFAULT_MIGRATION_DURATION_SECS,
+        )
     }
 
     pub fn migration_audit_record(
@@ -441,24 +396,12 @@ impl EnforcementEngine {
         let (current, _) = self
             .resolve_process(pending.target.stable.pid as i32)
             .ok_or_else(|| "SSH reader exited before confirmation".to_string())?;
-        if current.stable != pending.target.stable
-            || current.uid != pending.target.uid
-            || current.uid != pending.resource.owner_uid
-        {
-            return Err("SSH reader identity changed before confirmation".to_string());
-        }
-        self.next_lease_id = self.next_lease_id.saturating_add(1);
-        let id = LeaseId(self.next_lease_id);
-        let expires_at = now_secs().saturating_add(DEFAULT_SSH_READ_DURATION_SECS);
-        self.leases.ssh_read.push(SshReadAccessLease {
-            id,
-            resource: pending.resource.id.clone(),
-            uid: pending.target.uid,
-            root: pending.target_root.clone(),
-            expires_at,
-            revoked: false,
-        });
-        Ok((id, expires_at))
+        self.runtime.approve_ssh_read(
+            pending,
+            &current,
+            now_secs(),
+            DEFAULT_SSH_READ_DURATION_SECS,
+        )
     }
 
     pub fn ssh_read_audit_record(
@@ -514,17 +457,19 @@ impl EnforcementEngine {
         let dur = DEFAULT_SSH_LOAD_DURATION_SECS.min(MAX_SSH_LOAD_DURATION_SECS);
         let now = now_secs();
         let expires_at = now.saturating_add(dur);
-        self.next_lease_id = self.next_lease_id.saturating_add(1);
-        let id = LeaseId(self.next_lease_id);
-        self.leases.ssh.push(guard_core::lease::SshLoadLease {
-            id,
-            resource: res.id.clone(),
-            uid,
-            target,
-            expires_at,
-            revoked: false,
-            used: false,
-        });
+        let id = self.runtime.next_lease_id();
+        self.runtime
+            .leases_mut()
+            .ssh
+            .push(guard_core::lease::SshLoadLease {
+                id,
+                resource: res.id.clone(),
+                uid,
+                target,
+                expires_at,
+                revoked: false,
+                used: false,
+            });
         match agent_binding {
             SshAgentBinding::Verified(path) => {
                 self.ssh_agent_bindings.insert(id, path);
@@ -734,13 +679,12 @@ impl EnforcementEngine {
         let now = now_secs();
         self.refresh_migration_states(&resource, &process);
         self.refresh_ssh_read_leases();
-        let mut decision = evaluate(
+        let mut decision = self.runtime.evaluate(
             &AccessEvent {
                 resource: resource.clone(),
                 process: process.clone(),
                 operation: AccessOperation::Open,
             },
-            &self.leases,
             now,
         );
         // A client controls the stopped child's original environment and can
@@ -772,7 +716,7 @@ impl EnforcementEngine {
         // the same process — from re-using it.
         if let Decision::AllowByLease(id) = &decision {
             let mut consumed = false;
-            for l in &mut self.leases.ssh {
+            for l in &mut self.runtime.leases_mut().ssh {
                 if l.id == *id {
                     l.used = true;
                     consumed = true;
@@ -804,7 +748,7 @@ impl EnforcementEngine {
     /// entry until its natural expiry makes lease inspection/audit meaningful,
     /// while the policy can no longer authorize a PID-reused process.
     fn refresh_ssh_read_leases(&mut self) {
-        for lease in &mut self.leases.ssh_read {
+        for lease in &mut self.runtime.leases_mut().ssh_read {
             if !lease.revoked
                 && linux_identity::read_start_time(lease.root.pid as i32).ok()
                     != Some(lease.root.start_time)
@@ -823,7 +767,7 @@ impl EnforcementEngine {
         resource: &ProtectedResource,
         process: &ProcessIdentity,
     ) {
-        for lease in &mut self.leases.migration {
+        for lease in &mut self.runtime.leases_mut().migration {
             if let MigrationLeaseState::Bound { root } = &lease.state {
                 if linux_identity::read_start_time(root.pid as i32).ok() != Some(root.start_time) {
                     lease.state = MigrationLeaseState::Dead;

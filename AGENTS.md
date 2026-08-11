@@ -29,9 +29,15 @@ successfully opened. This is an access firewall, not an antivirus/EDR/DLP.
   key bytes, browser DB rows, or private-key material).
 
 ## Authorization hot path
-- The authorization path MUST NOT wait for a human UI.
-- Decision model: `Allow | Deny(reason) | AllowByLease(lease_id)`. No risk
-  scores. No ML.
+- Deterministic decisions MUST return immediately; the platform callback
+  thread MUST NOT wait for a human UI.
+- A typed browser-migration or SSH-read confirmation may retain an opaque OS
+  authorization operation asynchronously, but only until its bounded platform
+  deadline. Drop, timeout, identity change, process exit, and queue pressure
+  fail closed.
+- Decision model: `Allow | Deny(reason) | AllowByLease(lease_id) |
+  RequireMigrationConfirmation(candidate) | RequireSshKeyConfirmation`. No
+  risk scores. No ML.
 - Deny immediately when policy says deny, then audit, then notify out-of-band.
 
 ## Process identity
