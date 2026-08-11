@@ -5,27 +5,24 @@ Linux V1 implementation of the Sensitive Data Firewall (`guardd`). It is the
 authoritative reference for what the firewall does and does not protect against.
 
 **Acceptance state:** **SECURITY-ACCEPTED ALPHA ON TESTED ARCH HOST only in
-`strict-filesystem` mode for browser protection.** SSH behavioral containment
-requires a separate privileged BPF acceptance matrix and is not accepted until
-that matrix passes. Previously accepted browser suites were executed.
+`strict-filesystem` mode for browser protection.** Interactive SSH read
+authorization is implemented and covered by synthetic workspace tests; live
+fanotify/Polkit desktop acceptance remains environment-dependent.
 Conservative mode remains implementation-complete but is not promoted because
 its replacement race remained readable in 10,000/10,000 iterations.
 
 ## Mission
 
 Prevent unauthorized local processes from reading protected browser-session
-data **before** access and protect SSH keys through a separate, capability-
-gated model. This is not an antivirus, EDR, DLP, or payload-inspection product.
+data and SSH private keys **before** access. This is not an antivirus, EDR, DLP,
+or payload-inspection product.
 
 Browser resources remain denied before access. SSH private keys use an exact
-`FAN_ACCESS_PERM` file mark so the daemon observes an actual read request,
-rather than adding filesystem-wide read mediation. Protected SSH-key reads are
-always allowed and reported, including when the behavioral backend is
-unavailable. When active, the BPF LSM backend correlates the exact reader
-process tree and blocks actual external IPv4/IPv6 sends at `socket_sendmsg`
-while allowing AF_UNIX, AF_NETLINK, and IPv4/IPv6 loopback. Backend status is
-reported separately and is never filesystem-read authority. The canonical
-contract and state machine are in [SSH_BEHAVIOR_MODEL.md](SSH_BEHAVIOR_MODEL.md).
+`FAN_ACCESS_PERM` file mark so the daemon holds an actual read request. Allow
+requires a non-cached Polkit check and creates a ten-minute in-memory lease
+bound to one key, UID, and verified process tree. Block, timeout, close, or
+identity change denies the request. The full flow is in
+[SSH_ACCESS_MODEL.md](SSH_ACCESS_MODEL.md).
 
 ## Guarantees
 

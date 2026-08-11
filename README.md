@@ -6,17 +6,15 @@
 > This is an Alpha with the explicit non-goals below, not a claim of protection
 > against root, browser compromise, or already-open descriptors.
 
-> SSH private-key reads are always allowed and reported. When the behavioral
-> backend is active, the exact reader process tree is watched briefly and its
-> immediate external sends are blocked pending a user decision. See the
-> [canonical SSH behavior contract](docs/SSH_BEHAVIOR_MODEL.md).
+> SSH private-key reads are held for explicit confirmation and scoped to a
+> short-lived process-tree lease. See the [SSH access model](docs/SSH_ACCESS_MODEL.md).
 
 A narrow local capability firewall. Browser auth/session resources retain
-pre-open access denial. Protected SSH-key reads use a separate behavioral
-model: allow and report the read, then briefly block immediate external sends.
+pre-open access denial. Protected SSH-key reads use interactive pre-read
+confirmation and a short-lived in-memory lease.
 
-> Core principle: **Prevent browser-secret access. Correlate SSH-key access
-> with immediate external sends without claiming payload provenance.**
+> Core principle: **Prevent unauthorized browser-secret and SSH-key reads before
+> protected data is opened.**
 
 ## ⚠️ Do not test on real secrets
 
@@ -33,9 +31,8 @@ contacts the Internet.
    browser key material, selected Local/Session Storage and IndexedDB trees,
    saved-login databases (secondary priority).
 2. SSH private keys: the existing hardened `ssh-agent` path remains supported.
-   Every protected-key read is allowed and reported. When BPF-LSM is active,
-   the exact process tree is watched briefly and immediate external sends are
-   blocked. Backend failure never turns a key read into a denial.
+   Ordinary protected-key reads require an interactive Allow/Block decision;
+   the existing `ssh-add`/`ssh-agent` one-shot load exception remains supported.
 
 ## Threat model
 
