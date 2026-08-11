@@ -45,7 +45,10 @@ interactive polkit authorization. Selecting **No, block**, closing the dialog,
 target process exit, or the 60-second timeout denies every queued operation.
 `guard-ui` is a single GTK application instance: repeated desktop notification
 activations bring its existing window forward instead of creating independent
-pollers and duplicate dialogs.
+pollers and duplicate dialogs. After **Yes** it keeps the dialog visible and
+disables both choices while the system polkit prompt is active; only a confirmed
+allow closes it. If authentication is cancelled or fails, the request remains
+pending and the user can retry or block it.
 
 ## Approved import
 

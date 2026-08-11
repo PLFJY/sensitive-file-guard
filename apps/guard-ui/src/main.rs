@@ -116,6 +116,13 @@ struct UiState {
     shown_migrations: Rc<RefCell<HashSet<String>>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MigrationDialogState {
+    AwaitingChoice,
+    Authorizing,
+    Terminal,
+}
+
 fn main() {
     adw::init().expect("libadwaita initialization");
     // Let libadwaita own the color preference instead of inheriting the
@@ -1120,56 +1127,131 @@ fn present_migration_dialog(
 ) {
     let source = browser_label(&migration.source_browser);
     let target = browser_label(&migration.target_browser);
+    let details = format!(
+        "{target} is trying to access protected {source} data.\n\nAre you importing data from {source} into {target}?\n\nSource browser: {source}\nSource profile: {}\nTarget browser: {target}\nTarget process: {}\nPID: {}\nRequested data: {}",
+        migration.source_profile,
+        migration.target_exe,
+        migration.target_pid,
+        migration.requested_data,
+    );
     let dialog = gtk::MessageDialog::builder()
         .transient_for(window)
         .modal(true)
         .message_type(gtk::MessageType::Warning)
         .text("Browser data import detected")
-        .secondary_text(format!(
-            "{target} is trying to access protected {source} data.\n\nAre you importing data from {source} into {target}?\n\nSource browser: {source}\nSource profile: {}\nTarget browser: {target}\nTarget process: {}\nPID: {}\nRequested data: {}",
-            migration.source_profile,
-            migration.target_exe,
-            migration.target_pid,
-            migration.requested_data,
-        ))
+        .secondary_text(&details)
         .build();
     let block = dialog.add_button("No, block", gtk::ResponseType::Reject);
     block.add_css_class("destructive-action");
     let allow = dialog.add_button("Yes, allow this import", gtk::ResponseType::Accept);
     allow.add_css_class("suggested-action");
-    let resolved = Rc::new(Cell::new(false));
-    let resolve = {
-        let id = migration.id.clone();
-        let resolved = resolved.clone();
-        move |action: guard_ipc::MigrationResolutionAction| {
-            if resolved.replace(true) {
+    let state = Rc::new(Cell::new(MigrationDialogState::AwaitingChoice));
+    let id = migration.id.clone();
+    let response_state = state.clone();
+    let response_id = id.clone();
+    let response_allow = allow.clone();
+    let response_block = block.clone();
+    let response_details = details.clone();
+    dialog.connect_response(move |dialog, response| {
+        if response == gtk::ResponseType::Accept {
+            if response_state.get() != MigrationDialogState::AwaitingChoice {
                 return;
             }
+            // Keep the dialog visible while pkcheck presents its own desktop
+            // authentication prompt. Closing now would look like a denial and
+            // previously hid the in-progress authorization from the user.
+            response_state.set(MigrationDialogState::Authorizing);
+            response_allow.set_sensitive(false);
+            response_block.set_sensitive(false);
+            dialog.set_secondary_text(Some(&format!(
+                "{response_details}\n\nWaiting for system authentication…"
+            )));
             let socket = PathBuf::from(SOCKET);
-            let id = id.clone();
+            let id = response_id.clone();
+            let state = response_state.clone();
+            let dialog = dialog.clone();
+            let allow = response_allow.clone();
+            let block = response_block.clone();
+            let details = response_details.clone();
             glib::MainContext::default().spawn_local(async move {
-                let _ = gio::spawn_blocking(move || {
-                    guard_client::resolve_migration(&socket, &id, action)
+                let result = gio::spawn_blocking(move || {
+                    guard_client::resolve_migration(
+                        &socket,
+                        &id,
+                        guard_ipc::MigrationResolutionAction::AllowImport,
+                    )
                 })
                 .await;
+                match result {
+                    Ok(Ok(guard_ipc::MigrationResolutionInfo::Allowed))
+                    | Ok(Ok(guard_ipc::MigrationResolutionInfo::Blocked))
+                        if state.get() == MigrationDialogState::Authorizing =>
+                    {
+                        state.set(MigrationDialogState::Terminal);
+                        dialog.close();
+                    }
+                    Ok(Err(error)) => {
+                        eprintln!("guard-ui: import authorization failed: {error}");
+                        if state.get() == MigrationDialogState::Authorizing {
+                            state.set(MigrationDialogState::AwaitingChoice);
+                            allow.set_sensitive(true);
+                            block.set_sensitive(true);
+                            dialog.set_secondary_text(Some(&format!(
+                                "{details}\n\nAuthentication was not completed. You can try again or block this import."
+                            )));
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("guard-ui: import authorization task failed: {error:?}");
+                        if state.get() == MigrationDialogState::Authorizing {
+                            state.set(MigrationDialogState::AwaitingChoice);
+                            allow.set_sensitive(true);
+                            block.set_sensitive(true);
+                            dialog.set_secondary_text(Some(&format!(
+                                "{details}\n\nAuthorization could not be completed. You can try again or block this import."
+                            )));
+                        }
+                    }
+                    _ => {}
+                }
             });
+            return;
         }
-    };
-    let resolve_response = resolve.clone();
-    dialog.connect_response(move |dialog, response| {
-        let action = if response == gtk::ResponseType::Accept {
-            guard_ipc::MigrationResolutionAction::AllowImport
-        } else {
-            guard_ipc::MigrationResolutionAction::Block
-        };
-        resolve_response(action);
+
+        if response_state.replace(MigrationDialogState::Terminal) != MigrationDialogState::Terminal
+        {
+            resolve_migration_in_background(
+                response_id.clone(),
+                guard_ipc::MigrationResolutionAction::Block,
+            );
+        }
         dialog.close();
     });
+    let close_state = state.clone();
+    let close_id = id;
     dialog.connect_close_request(move |_| {
-        resolve(guard_ipc::MigrationResolutionAction::Block);
+        if close_state.replace(MigrationDialogState::Terminal) != MigrationDialogState::Terminal {
+            resolve_migration_in_background(
+                close_id.clone(),
+                guard_ipc::MigrationResolutionAction::Block,
+            );
+        }
         glib::Propagation::Proceed
     });
     dialog.present();
+}
+
+fn resolve_migration_in_background(id: String, action: guard_ipc::MigrationResolutionAction) {
+    let socket = PathBuf::from(SOCKET);
+    glib::MainContext::default().spawn_local(async move {
+        match gio::spawn_blocking(move || guard_client::resolve_migration(&socket, &id, action))
+            .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => eprintln!("guard-ui: migration resolution failed: {error}"),
+            Err(error) => eprintln!("guard-ui: migration resolution task failed: {error:?}"),
+        }
+    });
 }
 
 fn present_incident_dialog(window: &adw::ApplicationWindow, incident: guard_ipc::SshIncidentInfo) {
