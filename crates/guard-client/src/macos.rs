@@ -99,6 +99,20 @@ impl<T: LocalTransport, A: DeviceOwnerAuthenticator> MacGuardClient<T, A> {
         })
     }
 
+    pub fn pending_helper_poll(&self) -> anyhow::Result<guard_ipc::PendingHelperSnapshotInfo> {
+        self.metadata(RequestOp::PendingHelperPoll, |body| match body {
+            ResponseBody::PendingHelperSnapshot(value) => Some(value),
+            _ => None,
+        })
+    }
+
+    pub fn pending_helper_status(&self) -> anyhow::Result<guard_ipc::PendingHelperInfo> {
+        self.metadata(RequestOp::PendingHelperStatus, |body| match body {
+            ResponseBody::PendingHelper(value) => Some(value),
+            _ => None,
+        })
+    }
+
     pub fn apply_configuration(
         &self,
         config: &platform_macos::config::MacBackendConfig,
@@ -381,6 +395,18 @@ mod tests {
             self.requests.lock().unwrap().push(request.op.clone());
             let body = match request.op {
                 RequestOp::Status => ResponseBody::Status(status()),
+                RequestOp::PendingHelperStatus => {
+                    ResponseBody::PendingHelper(guard_ipc::PendingHelperInfo {
+                        running: true,
+                        last_seen_ms_ago: Some(0),
+                    })
+                }
+                RequestOp::PendingHelperPoll => {
+                    ResponseBody::PendingHelperSnapshot(guard_ipc::PendingHelperSnapshotInfo {
+                        migrations: Vec::new(),
+                        ssh_reads: Vec::new(),
+                    })
+                }
                 RequestOp::MigrationResolve { action, .. } => {
                     ResponseBody::MigrationResolved(match action {
                         MigrationResolutionAction::AllowImport => MigrationResolutionInfo::Allowed,
@@ -506,10 +532,24 @@ mod tests {
     }
 
     #[test]
+    fn helper_poll_is_metadata_only_and_never_authenticates() {
+        let (client, requests, calls) = client(Err(AuthenticationFailure::Failed));
+        let snapshot = client.pending_helper_poll().unwrap();
+        assert!(snapshot.migrations.is_empty());
+        assert!(snapshot.ssh_reads.is_empty());
+        assert_eq!(calls.load(Ordering::Acquire), 0);
+        assert!(matches!(
+            requests.lock().unwrap().as_slice(),
+            [RequestOp::PendingHelperPoll]
+        ));
+    }
+
+    #[test]
     fn configuration_apply_has_no_noninteractive_client_path() {
         let (client, requests, calls) = client(Err(AuthenticationFailure::Cancelled));
         let config = platform_macos::config::MacBackendConfig {
             version: platform_macos::config::MAC_CONFIG_VERSION,
+            policy_enabled: true,
             common_policy: guard_platform::config::PolicyConfig {
                 browsers: Vec::new(),
                 enrolled_exes: Vec::new(),

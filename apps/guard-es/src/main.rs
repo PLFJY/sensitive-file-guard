@@ -27,6 +27,7 @@ fn run_extension_service() -> ExitCode {
 
     struct ControlHandler {
         diagnostic: Option<String>,
+        helper_heartbeats: std::sync::Mutex<std::collections::HashMap<u32, std::time::Instant>>,
     }
 
     impl XpcRequestHandler for ControlHandler {
@@ -60,6 +61,44 @@ fn run_extension_service() -> ExitCode {
                         }),
                         Err(error) => Response::err(format!("configuration_apply_failed: {error}")),
                     }
+                }
+                guard_ipc::RequestOp::PendingHelperPoll => {
+                    if let Ok(mut heartbeats) = self.helper_heartbeats.lock() {
+                        heartbeats.insert(peer.euid, std::time::Instant::now());
+                        Response::ok(ResponseBody::PendingHelperSnapshot(
+                            guard_ipc::PendingHelperSnapshotInfo {
+                                migrations: Vec::new(),
+                                ssh_reads: Vec::new(),
+                            },
+                        ))
+                    } else {
+                        Response::err("pending_helper_health_unavailable")
+                    }
+                }
+                guard_ipc::RequestOp::PendingHelperStatus => {
+                    let Ok(heartbeats) = self.helper_heartbeats.lock() else {
+                        return Response::err("pending_helper_health_unavailable");
+                    };
+                    let elapsed = heartbeats.get(&peer.euid).map(std::time::Instant::elapsed);
+                    let running =
+                        elapsed.is_some_and(|age| age < std::time::Duration::from_secs(3));
+                    Response::ok(ResponseBody::PendingHelper(guard_ipc::PendingHelperInfo {
+                        running,
+                        last_seen_ms_ago: elapsed
+                            .map(|age| u64::try_from(age.as_millis()).unwrap_or(u64::MAX)),
+                    }))
+                }
+                guard_ipc::RequestOp::MigrationPendingList => {
+                    Response::ok(ResponseBody::MigrationPending(Vec::new()))
+                }
+                guard_ipc::RequestOp::SshPendingList => {
+                    Response::ok(ResponseBody::SshPending(Vec::new()))
+                }
+                guard_ipc::RequestOp::ResourcesList => {
+                    Response::ok(ResponseBody::Resources(Vec::new()))
+                }
+                guard_ipc::RequestOp::Events { .. } => {
+                    Response::ok(ResponseBody::Events(Vec::new()))
                 }
                 _ => Response::err("operation_not_available_before_policy_start"),
             }
@@ -123,14 +162,20 @@ fn run_extension_service() -> ExitCode {
                     .into(),
             )
         });
-    let server =
-        match MacXpcServer::new(&requirements, [console_uid], ControlHandler { diagnostic }) {
-            Ok(server) => server,
-            Err(error) => {
-                eprintln!("guard-es: could not start authenticated XPC service: {error}");
-                return ExitCode::FAILURE;
-            }
-        };
+    let server = match MacXpcServer::new(
+        &requirements,
+        [console_uid],
+        ControlHandler {
+            diagnostic,
+            helper_heartbeats: std::sync::Mutex::new(std::collections::HashMap::new()),
+        },
+    ) {
+        Ok(server) => server,
+        Err(error) => {
+            eprintln!("guard-es: could not start authenticated XPC service: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     eprintln!(
         "guard-es: authenticated XPC service active for console uid={console_uid}; enforcement is not active"
     );

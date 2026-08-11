@@ -1,9 +1,12 @@
 # Sensitive Data Firewall (Linux V1)
 
 > **macOS development status:** the native app and Endpoint Security system
-> extension skeleton are documented in
+> extension and GTK control-plane work are documented in
 > [the macOS development guide](docs/INSTALL_MACOS_DEV.md). Phase 02 provides
-> bundle/signing/lifecycle plumbing only; it does not yet enforce file access.
+> bundle/signing/lifecycle plumbing; Phases 03–06 add the deadline-safe ES
+> adapter, signer-aware identity, authenticated XPC/LocalAuthentication, and a
+> macOS-specific GTK status/pending-helper flow. Live protection is not claimed
+> until the entitled policy runtime and acceptance phases pass.
 
 > **Current status: SECURITY-ACCEPTED ALPHA ON TESTED ARCH HOST when configured
 > with `strict-filesystem`.** Conservative mode remains available and retains

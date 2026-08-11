@@ -671,9 +671,11 @@ dependencies = [
 name = "guard-notify"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "clap",
  "guard-client",
  "guard-ipc",
+ "platform-macos",
  "serde_json",
 ]
 
@@ -734,6 +736,7 @@ dependencies = [
  "guard-platform",
  "guard-ssh",
  "libadwaita",
+ "libc",
  "platform-macos",
  "serde",
  "serde_json",

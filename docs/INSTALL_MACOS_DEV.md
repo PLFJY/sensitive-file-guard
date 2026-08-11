@@ -70,3 +70,6 @@ format are described in [the macOS identity/config guide](MACOS_IDENTITY_AND_CON
 Authenticated XPC, its explicit Endpoint Security Mach service, exact signing
 requirements, and the LocalAuthentication Allow gate are described in
 [the macOS XPC/authorization guide](MACOS_XPC_AND_AUTHORIZATION.md).
+The GTK status model, policy-switch semantics, SMAppService LaunchAgent, and
+pending-only lifecycle are described in
+[the macOS UI/user-agent guide](MACOS_UI_AND_USER_AGENT.md).

@@ -59,6 +59,20 @@ if ! rg -q 'LAPolicyDeviceOwnerAuthentication' \
     echo "macOS boundary violation: Allow gate is not device-owner authentication" >&2
     failed=1
 fi
+if ! rg -q 'agentServiceWithPlistName' "$repo_dir/native/macos/user_agent_bridge.m"; then
+    echo "macOS boundary violation: pending helper is not managed by SMAppService" >&2
+    failed=1
+fi
+if ! rg -q '<key>BundleProgram</key>' \
+    "$repo_dir/packaging/macos/GuardNotify.LaunchAgent.plist.in"; then
+    echo "macOS boundary violation: embedded user LaunchAgent is missing BundleProgram" >&2
+    failed=1
+fi
+if rg -n '\.(allow_migration|allow_ssh_read|block_migration|block_ssh_read)\(' \
+    "$repo_dir/apps/guard-notify/src/main.rs"; then
+    echo "macOS boundary violation: pending helper contains a policy resolver" >&2
+    failed=1
+fi
 if rg -n 'authenticated[[:space:]_-]*=[[:space:]]*true|GUARD_.*AUTH.*BYPASS' \
     "$repo_dir/crates/platform-macos" "$repo_dir/crates/guard-client" \
     "$repo_dir/apps/guard-ui" "$repo_dir/apps/guardctl"; then

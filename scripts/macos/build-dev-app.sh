@@ -13,6 +13,8 @@ app_bundle="$build_root/Guard.app"
 app_bundle_id=${APP_BUNDLE_ID:-io.github.plfjy.SensitiveFileGuard}
 extension_bundle_id=${SYSTEM_EXTENSION_BUNDLE_ID:-"$app_bundle_id.guard-es"}
 guard_xpc_service_name=${GUARD_XPC_SERVICE_NAME:-"$extension_bundle_id.control"}
+notify_label="$app_bundle_id.guard-notify"
+user_agent_plist_name="$notify_label.plist"
 version=${GUARD_VERSION:-0.1.0}
 build_number=${GUARD_BUILD_NUMBER:-1}
 build_profile=${BUILD_PROFILE:-debug}
@@ -69,6 +71,7 @@ cd "$repo_dir"
 GUARD_APP_BUNDLE_ID="$app_bundle_id" \
 GUARD_SYSTEM_EXTENSION_BUNDLE_ID="$extension_bundle_id" \
 GUARD_XPC_SERVICE_NAME="$guard_xpc_service_name" \
+GUARD_USER_AGENT_PLIST_NAME="$user_agent_plist_name" \
     cargo build -p guard-ui -p guard-es -p guardctl -p guard-notify $cargo_flags $feature_flags
 
 if [ -e "$app_bundle" ]; then
@@ -76,6 +79,7 @@ if [ -e "$app_bundle" ]; then
 fi
 extension_bundle="$app_bundle/Contents/Library/SystemExtensions/$extension_bundle_id.systemextension"
 mkdir -p "$app_bundle/Contents/MacOS" "$extension_bundle/Contents/MacOS"
+mkdir -p "$app_bundle/Contents/Library/LaunchAgents"
 cp "target/$cargo_profile/guard-ui" "$app_bundle/Contents/MacOS/Guard"
 cp "target/$cargo_profile/guardctl" "$app_bundle/Contents/MacOS/guardctl"
 cp "target/$cargo_profile/guard-notify" "$app_bundle/Contents/MacOS/guard-notify"
@@ -88,6 +92,7 @@ render_plist() {
         -e "s|@APP_BUNDLE_ID@|$app_bundle_id|g" \
         -e "s|@EXTENSION_BUNDLE_ID@|$extension_bundle_id|g" \
         -e "s|@XPC_SERVICE_NAME@|$guard_xpc_service_name|g" \
+        -e "s|@NOTIFY_LABEL@|$notify_label|g" \
         -e "s|@VERSION@|$version|g" \
         -e "s|@BUILD_NUMBER@|$build_number|g" \
         "$input" >"$output"
@@ -96,6 +101,8 @@ render_plist() {
 
 render_plist packaging/macos/Guard.Info.plist.in "$app_bundle/Contents/Info.plist"
 render_plist packaging/macos/GuardES.Info.plist.in "$extension_bundle/Contents/Info.plist"
+render_plist packaging/macos/GuardNotify.LaunchAgent.plist.in \
+    "$app_bundle/Contents/Library/LaunchAgents/$user_agent_plist_name"
 
 if [ -n "${HOST_PROVISIONING_PROFILE:-}" ] || [ -n "${EXTENSION_PROVISIONING_PROFILE:-}" ]; then
     : "${HOST_PROVISIONING_PROFILE:?both host and extension provisioning profiles are required}"
@@ -141,6 +148,7 @@ echo "assembled development bundle: $app_bundle"
 echo "app bundle id: $app_bundle_id"
 echo "system extension bundle id: $extension_bundle_id"
 echo "Endpoint Security Mach service: $guard_xpc_service_name"
+echo "pending helper LaunchAgent: $user_agent_plist_name"
 echo "signing identity: $signing_identity"
 if [ "${SKIP_SIGNING:-0}" = "1" ]; then
     echo "signing skipped"

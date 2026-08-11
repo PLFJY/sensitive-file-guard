@@ -15,6 +15,7 @@ pub mod local_auth;
 mod pending;
 pub mod resource_index;
 pub mod system_extension;
+pub mod user_agent;
 pub mod xpc;
 
 pub const DEFAULT_APP_BUNDLE_ID: &str = match option_env!("GUARD_APP_BUNDLE_ID") {
@@ -29,4 +30,8 @@ pub const DEFAULT_EXTENSION_BUNDLE_ID: &str = match option_env!("GUARD_SYSTEM_EX
 pub const DEFAULT_XPC_SERVICE_NAME: &str = match option_env!("GUARD_XPC_SERVICE_NAME") {
     Some(identifier) => identifier,
     None => "io.github.plfjy.SensitiveFileGuard.guard-es.control",
+};
+pub const DEFAULT_USER_AGENT_PLIST_NAME: &str = match option_env!("GUARD_USER_AGENT_PLIST_NAME") {
+    Some(name) => name,
+    None => "io.github.plfjy.SensitiveFileGuard.guard-notify.plist",
 };

@@ -72,6 +72,17 @@ impl MacBrowserDiscovery {
             if !profile_root.is_dir() {
                 continue;
             }
+            let profile_root = match std::fs::canonicalize(&profile_root) {
+                Ok(profile_root) => profile_root,
+                Err(error) => {
+                    unsupported.push(unsupported_browser(
+                        definition,
+                        profile_root,
+                        &format!("profile root cannot be canonicalized: {error}"),
+                    ));
+                    continue;
+                }
+            };
             let Some(app) = self
                 .application_roots
                 .iter()

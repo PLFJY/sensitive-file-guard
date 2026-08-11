@@ -20,6 +20,7 @@ gio.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 platform-macos.workspace = true
+libc.workspace = true
 
 [[bin]]
 name = "guard-ui"

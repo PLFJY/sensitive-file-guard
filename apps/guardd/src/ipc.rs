@@ -128,6 +128,9 @@ fn handle_request_with_connection(
         RequestOp::ConfigurationApply { .. } => {
             Response::err("configuration_apply is unavailable on the Linux transport")
         }
+        RequestOp::PendingHelperPoll | RequestOp::PendingHelperStatus => {
+            Response::err("pending_helper_health is unavailable on the Linux transport")
+        }
         RequestOp::ConfigCheck => handle_config_check(state, creds),
         RequestOp::Events {
             limit,
@@ -295,6 +298,7 @@ fn handle_configuration_get(state: &IpcState, _creds: PeerCreds) -> Response {
     let cfg = engine.configuration();
     Response::ok(ResponseBody::Configuration(ConfigurationInfo {
         enforcement_mode: Some(cfg.enforcement_mode.as_str().to_owned()),
+        policy_enabled: None,
         browsers: cfg
             .browsers
             .iter()

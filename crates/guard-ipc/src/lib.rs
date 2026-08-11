@@ -54,6 +54,12 @@ pub enum RequestOp {
     ConfigurationApply {
         config: serde_json::Value,
     },
+    /// Authenticated liveness signal plus peer-scoped pending snapshot for the
+    /// unprivileged user-session observer. It carries no policy decision or
+    /// caller identity and avoids three separate polling connections.
+    PendingHelperPoll,
+    /// Read the recent helper liveness state for the transport peer's UID.
+    PendingHelperStatus,
     Events {
         limit: Option<u32>,
         #[serde(default)]
@@ -144,6 +150,8 @@ impl RequestOp {
             | Self::ResourcesList
             | Self::BrowsersList
             | Self::ConfigurationGet
+            | Self::PendingHelperPoll
+            | Self::PendingHelperStatus
             | Self::Events { .. }
             | Self::Explain { .. }
             | Self::LeasesList
@@ -219,6 +227,8 @@ pub enum ResponseBody {
     ConfigurationApplied {
         version: u32,
     },
+    PendingHelper(PendingHelperInfo),
+    PendingHelperSnapshot(PendingHelperSnapshotInfo),
     Events(Vec<EventInfo>),
     // Boxed: `EventInfo` is ~328 bytes; boxing keeps the enum small on the
     // hot path (status/events queries) where this variant is never used.
@@ -424,9 +434,24 @@ pub struct BrowserInfo {
 pub struct ConfigurationInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enforcement_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_enabled: Option<bool>,
     pub browsers: Vec<ConfiguredBrowserInfo>,
     pub enrolled_exes: Vec<String>,
     pub ssh_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingHelperInfo {
+    pub running: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_ms_ago: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingHelperSnapshotInfo {
+    pub migrations: Vec<MigrationPendingInfo>,
+    pub ssh_reads: Vec<SshPendingInfo>,
 }
 
 /// Browser enrollment exactly as configured, including whether ownership was
@@ -523,6 +548,8 @@ mod tests {
             RequestOp::ConfigurationApply {
                 config: serde_json::json!({"version": 1}),
             },
+            RequestOp::PendingHelperPoll,
+            RequestOp::PendingHelperStatus,
             RequestOp::Events {
                 limit: Some(50),
                 before_id: None,

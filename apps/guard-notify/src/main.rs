@@ -1,26 +1,33 @@
 //! Unprivileged user-session notification presenter.
 //!
-//! This process contains no policy engine. It polls the authenticated guardd
-//! IPC API (which filters events by SO_PEERCRED UID) and presents new denies on
-//! the user's desktop session via notify-send.
+//! This process contains no policy engine. On Linux it polls guardd's
+//! credential-filtered IPC event feed and presents denies via notify-send. On
+//! macOS it polls the authenticated system-extension XPC service and opens the
+//! sibling GTK pending-only UI when an interactive decision is waiting.
 
+#[cfg(target_os = "linux")]
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::Duration;
 
 use clap::Parser;
+#[cfg(target_os = "linux")]
 use guard_client::transport::IpcClient;
+#[cfg(target_os = "linux")]
 use guard_ipc::{EventInfo, Request, RequestOp, Response, ResponseBody, PROTOCOL_VERSION};
 
+#[cfg(target_os = "linux")]
 const DEFAULT_SOCKET_PATH: &str = "/run/guardd/guardd.sock";
 
 #[derive(Debug, Parser)]
 #[command(name = "guard-notify", version)]
 struct Cli {
+    #[cfg(target_os = "linux")]
     #[arg(long, default_value = DEFAULT_SOCKET_PATH)]
     socket: PathBuf,
-    #[arg(long, default_value_t = 1_000)]
+    #[arg(long, default_value_t = default_poll_ms())]
     poll_ms: u64,
     /// Fetch once and exit. Intended for diagnostics/tests.
     #[arg(long)]
@@ -29,6 +36,35 @@ struct Cli {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    #[cfg(target_os = "macos")]
+    return run_macos(&cli);
+    #[cfg(target_os = "linux")]
+    return run_linux(&cli);
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = cli;
+        eprintln!("guard-notify: unsupported platform");
+        ExitCode::from(78)
+    }
+}
+
+#[cfg(target_os = "linux")]
+const fn default_poll_ms() -> u64 {
+    1_000
+}
+
+#[cfg(target_os = "macos")]
+const fn default_poll_ms() -> u64 {
+    500
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+const fn default_poll_ms() -> u64 {
+    1_000
+}
+
+#[cfg(target_os = "linux")]
+fn run_linux(cli: &Cli) -> ExitCode {
     let mut last_seen = None;
     let mut last_notified = HashMap::new();
     loop {
@@ -84,8 +120,131 @@ fn main() -> ExitCode {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn run_macos(cli: &Cli) -> ExitCode {
+    let client = match guard_client::macos::MacGuardClient::for_current_process() {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!("guard-notify: authenticated XPC unavailable: {error:#}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut observer = PendingObserver::default();
+    let normal_delay = Duration::from_millis(cli.poll_ms.clamp(100, 1_000));
+    let mut delay = normal_delay;
+    loop {
+        let succeeded = match fetch_macos_pending(&client) {
+            Ok(pending) => {
+                if observer.observe(pending) {
+                    activate_guard_ui_macos();
+                }
+                delay = normal_delay;
+                true
+            }
+            Err(error) => {
+                eprintln!("guard-notify: {error:#}");
+                delay = delay.saturating_mul(2).min(Duration::from_secs(5));
+                false
+            }
+        };
+        if cli.once {
+            return if succeeded {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            };
+        }
+        std::thread::sleep(delay);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn fetch_macos_pending(
+    client: &guard_client::macos::MacGuardClient,
+) -> anyhow::Result<HashSet<PendingKey>> {
+    let snapshot = client.pending_helper_poll()?;
+    Ok(snapshot
+        .migrations
+        .into_iter()
+        .map(|pending| PendingKey::Migration(pending.id))
+        .chain(
+            snapshot
+                .ssh_reads
+                .into_iter()
+                .map(|pending| PendingKey::SshRead(pending.id)),
+        )
+        .collect())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum PendingKey {
+    Migration(String),
+    SshRead(String),
+}
+
+#[derive(Default)]
+struct PendingObserver {
+    presented: HashSet<PendingKey>,
+}
+
+impl PendingObserver {
+    /// Returns true exactly once for each item while it remains in successful
+    /// snapshots. The helper launches the UI but never resolves policy.
+    fn observe(&mut self, current: HashSet<PendingKey>) -> bool {
+        let has_new = current
+            .iter()
+            .any(|pending| !self.presented.contains(pending));
+        self.presented = current;
+        has_new
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn activate_guard_ui_macos() {
+    let executable = match std::env::current_exe() {
+        Ok(executable) => executable,
+        Err(error) => {
+            eprintln!("guard-notify: cannot locate app bundle: {error}");
+            return;
+        }
+    };
+    let guard = match guard_ui_executable(&executable) {
+        Ok(guard) => guard,
+        Err(error) => {
+            eprintln!("guard-notify: {error}");
+            return;
+        }
+    };
+    if let Err(error) = Command::new(&guard)
+        .arg("--pending-only")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        eprintln!(
+            "guard-notify: could not activate {}: {error}",
+            guard.display()
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn guard_ui_executable(helper: &Path) -> anyhow::Result<PathBuf> {
+    let macos_dir = helper
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("helper executable has no parent directory"))?;
+    anyhow::ensure!(
+        macos_dir.file_name().is_some_and(|name| name == "MacOS"),
+        "pending helper is not inside an app Contents/MacOS directory"
+    );
+    Ok(macos_dir.join("Guard"))
+}
+
+#[cfg(target_os = "linux")]
 type NotificationKey = (u32, String, String, String, String);
 
+#[cfg(target_os = "linux")]
 fn should_notify(
     last_notified: &mut HashMap<NotificationKey, u64>,
     event: &EventInfo,
@@ -115,6 +274,7 @@ fn should_notify(
     true
 }
 
+#[cfg(target_os = "linux")]
 fn unix_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -122,6 +282,7 @@ fn unix_ms() -> u64 {
         .unwrap_or(0)
 }
 
+#[cfg(target_os = "linux")]
 fn fetch_events(socket: &Path) -> Result<Vec<EventInfo>, String> {
     let request = Request {
         version: PROTOCOL_VERSION,
@@ -146,6 +307,7 @@ fn fetch_events(socket: &Path) -> Result<Vec<EventInfo>, String> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn notification_text(event: &EventInfo) -> (String, String, &'static str) {
     let exe = Path::new(&event.exe)
         .file_name()
@@ -193,6 +355,7 @@ fn notification_text(event: &EventInfo) -> (String, String, &'static str) {
     )
 }
 
+#[cfg(target_os = "linux")]
 fn notify(summary: &str, body: &str, urgency: &str) -> std::io::Result<()> {
     let output = Command::new("notify-send")
         .args([
@@ -218,6 +381,7 @@ fn notify(summary: &str, body: &str, urgency: &str) -> std::io::Result<()> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn activate_guard_ui() {
     // The UI remains an unprivileged presenter: it polls the authenticated
     // incident API and asks guardd to cross polkit for any resolution.
@@ -236,6 +400,7 @@ fn activate_guard_ui() {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
     fn event(pid: u32, path: &str) -> EventInfo {
         EventInfo {
             id: 1,
@@ -263,6 +428,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn coalesces_same_process_and_resource_for_ten_seconds() {
         let mut sent = HashMap::new();
@@ -277,6 +443,7 @@ mod tests {
         ));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn distinct_ssh_confirmation_requests_are_not_coalesced() {
         let mut sent = HashMap::new();
@@ -289,6 +456,7 @@ mod tests {
         assert!(should_notify(&mut sent, &second, 1_001));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn matching_ssh_confirmation_is_coalesced() {
         let mut sent = HashMap::new();
@@ -299,5 +467,46 @@ mod tests {
         second.backend_diag = "ssh_key_access_confirmation_required;request=ssh-0001".into();
         assert!(should_notify(&mut sent, &first, 1_000));
         assert!(!should_notify(&mut sent, &second, 1_001));
+    }
+
+    #[test]
+    fn pending_observer_launches_once_and_deduplicates_snapshots() {
+        let mut observer = PendingObserver::default();
+        let first = HashSet::from([PendingKey::Migration("m1".into())]);
+        assert!(observer.observe(first.clone()));
+        assert!(!observer.observe(first));
+        assert!(observer.observe(HashSet::from([
+            PendingKey::Migration("m1".into()),
+            PendingKey::SshRead("s1".into()),
+        ])));
+        assert!(!observer.observe(HashSet::from([
+            PendingKey::Migration("m1".into()),
+            PendingKey::SshRead("s1".into()),
+        ])));
+    }
+
+    #[test]
+    fn pending_observer_never_contains_a_resolution_action() {
+        let source = include_str!("main.rs");
+        let mac_section = source
+            .split("fn run_macos")
+            .nth(1)
+            .and_then(|section| section.split("fn should_notify").next())
+            .unwrap();
+        assert!(!mac_section.contains("allow_migration"));
+        assert!(!mac_section.contains("allow_ssh_read"));
+        assert!(!mac_section.contains("block_migration"));
+        assert!(!mac_section.contains("block_ssh_read"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pending_helper_launches_only_the_sibling_guard_pending_client() {
+        let helper = Path::new("/Applications/Guard.app/Contents/MacOS/guard-notify");
+        assert_eq!(
+            guard_ui_executable(helper).unwrap(),
+            PathBuf::from("/Applications/Guard.app/Contents/MacOS/Guard")
+        );
+        assert!(guard_ui_executable(Path::new("/tmp/guard-notify")).is_err());
     }
 }

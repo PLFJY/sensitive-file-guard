@@ -4,7 +4,6 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::process::Command;
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -55,7 +54,9 @@ fn health_from_evidence(
             return Health::Degraded;
         }
         return match daemon {
-            Some(status) if status.status == "ACTIVE" => Health::Active,
+            Some(status) if status.status == "ACTIVE" && status.enforcement_active => {
+                Health::Active
+            }
             Some(status) if status.status == "ACTIVE" => Health::Degraded,
             Some(status) if matches!(status.status.as_str(), "DEGRADED" | "NOT_ENFORCING") => {
                 Health::Degraded
@@ -86,7 +87,7 @@ fn ssh_key_subtitle(active: bool, configured: bool) -> &'static str {
 
 #[derive(Clone)]
 struct UiState {
-    candidate: Rc<RefCell<Option<platform_service::LinuxConfiguration>>>,
+    candidate: Rc<RefCell<Option<platform_service::EditableConfiguration>>>,
     status: gtk::Label,
     detail: gtk::Label,
     apply: gtk::Button,
@@ -103,6 +104,10 @@ struct UiState {
     poll_in_flight: Rc<Cell<bool>>,
     protection: Rc<RefCell<Option<adw::SwitchRow>>>,
     protection_syncing: Rc<Cell<bool>>,
+    helper: Rc<RefCell<Option<adw::SwitchRow>>>,
+    helper_syncing: Rc<Cell<bool>>,
+    extension_status: adw::ActionRow,
+    fda_status: adw::ActionRow,
     pending_dialogs: Rc<RefCell<PendingDialogController>>,
 }
 
@@ -117,7 +122,8 @@ fn main() {
     adw::StyleManager::default().set_color_scheme(adw::ColorScheme::Default);
     let app = adw::Application::new(Some(APP_ID), gio::ApplicationFlags::empty());
     app.connect_activate(move |app| build_ui(app, pending_only));
-    app.run();
+    let process_name = std::env::args().next().unwrap_or_else(|| "guard-ui".into());
+    app.run_with_args(&[process_name]);
 }
 
 fn build_ui(app: &adw::Application, pending_only: bool) {
@@ -137,18 +143,26 @@ fn build_ui(app: &adw::Application, pending_only: bool) {
     ));
     detail.set_wrap(true);
     detail.set_xalign(0.0);
-    let apply = gtk::Button::with_label("Apply & Restart");
+    let apply = gtk::Button::with_label(platform_service::apply_button_label());
     apply.set_sensitive(false);
     let mode = gtk::ComboBoxText::new();
-    mode.append(Some("strict-filesystem"), "Strict Filesystem (recommended)");
-    mode.append(Some("conservative"), "Conservative (compatibility)");
-    mode.set_active_id(Some("strict-filesystem"));
+    if platform_service::shows_linux_mode() {
+        mode.append(Some("strict-filesystem"), "Strict Filesystem (recommended)");
+        mode.append(Some("conservative"), "Conservative (compatibility)");
+        mode.set_active_id(Some("strict-filesystem"));
+    }
     let browsers = gtk::ListBox::new();
     browsers.set_selection_mode(gtk::SelectionMode::None);
     let keys = gtk::ListBox::new();
     keys.set_selection_mode(gtk::SelectionMode::None);
     let events = gtk::ListBox::new();
     events.set_selection_mode(gtk::SelectionMode::None);
+    let extension_status = adw::ActionRow::new();
+    extension_status.set_title("Endpoint Security extension");
+    extension_status.set_subtitle("Checking installation state…");
+    let fda_status = adw::ActionRow::new();
+    fda_status.set_title("Full Disk Access");
+    fda_status.set_subtitle("Checking permission state…");
 
     let state = UiState {
         candidate: Rc::new(RefCell::new(None)),
@@ -166,6 +180,10 @@ fn build_ui(app: &adw::Application, pending_only: bool) {
         poll_in_flight: Rc::new(Cell::new(false)),
         protection: Rc::new(RefCell::new(None)),
         protection_syncing: Rc::new(Cell::new(false)),
+        helper: Rc::new(RefCell::new(None)),
+        helper_syncing: Rc::new(Cell::new(false)),
+        extension_status,
+        fda_status,
         pending_dialogs: Rc::new(RefCell::new(PendingDialogController::default())),
     };
     let overview = scroll_page(overview_page(&state));
@@ -236,25 +254,25 @@ fn overview_page(state: &UiState) -> gtk::Box {
     page.append(&state.status);
     page.append(&state.detail);
     let row = adw::SwitchRow::new();
-    row.set_title("Protection + notifications");
-    row.set_subtitle(
-        "Controls guardd.service and guard-notify.service together; turning it off makes protected files accessible normally.",
-    );
+    row.set_title(platform_service::protection_switch_title());
+    row.set_subtitle(platform_service::protection_switch_subtitle());
     row.set_active(false);
     *state.protection.borrow_mut() = Some(row.clone());
     let start_row = row.clone();
     let syncing = state.protection_syncing.clone();
+    let candidate = state.candidate.clone();
     row.connect_active_notify(move |switch_row| {
         if syncing.get() {
             return;
         }
-        let verb = if switch_row.is_active() {
-            "start"
-        } else {
-            "stop"
-        };
+        let enabled = switch_row.is_active();
         start_row.set_sensitive(false);
-        spawn_protection_bundle(verb.to_owned(), start_row.clone(), syncing.clone());
+        spawn_protection_change(
+            enabled,
+            candidate.clone(),
+            start_row.clone(),
+            syncing.clone(),
+        );
     });
     page.append(&row);
     page
@@ -266,24 +284,56 @@ fn protection_page(state: &UiState) -> gtk::Box {
     page.set_margin_bottom(20);
     page.set_margin_start(20);
     page.set_margin_end(20);
-    let heading = gtk::Label::new(Some("Enforcement strategy"));
-    heading.set_xalign(0.0);
-    heading.add_css_class("title-2");
-    page.append(&heading);
-    page.append(&state.mode);
-    let mode = state.mode.clone();
-    let candidate = state.candidate.clone();
-    let apply = state.apply.clone();
-    mode.connect_changed(move |m| {
-        if let Some(cfg) = candidate.borrow_mut().as_mut() {
-            cfg.enforcement_mode = if m.active_id().as_deref() == Some("strict-filesystem") {
-                platform_service::LinuxEnforcementMode::StrictFilesystem
-            } else {
-                platform_service::LinuxEnforcementMode::Conservative
-            };
-            apply.set_sensitive(true);
-        }
-    });
+    if platform_service::shows_linux_mode() {
+        let heading = gtk::Label::new(Some("Enforcement strategy"));
+        heading.set_xalign(0.0);
+        heading.add_css_class("title-2");
+        page.append(&heading);
+        page.append(&state.mode);
+        let mode = state.mode.clone();
+        let candidate = state.candidate.clone();
+        let apply = state.apply.clone();
+        mode.connect_changed(move |m| {
+            if let Some(cfg) = candidate.borrow_mut().as_mut() {
+                cfg.enforcement_mode =
+                    Some(if m.active_id().as_deref() == Some("strict-filesystem") {
+                        platform_service::LinuxEnforcementMode::StrictFilesystem
+                    } else {
+                        platform_service::LinuxEnforcementMode::Conservative
+                    });
+                apply.set_sensitive(true);
+            }
+        });
+    } else {
+        let heading = gtk::Label::new(Some("macOS protection status"));
+        heading.set_xalign(0.0);
+        heading.add_css_class("title-2");
+        page.append(&heading);
+        let group = adw::PreferencesGroup::new();
+        group.add(&state.extension_status);
+        group.add(&state.fda_status);
+        let helper = adw::SwitchRow::new();
+        helper.set_title("Pending authorization helper");
+        helper
+            .set_subtitle("Starts in this user session and opens Guard only for pending prompts.");
+        helper.set_active(false);
+        let helper_row = helper.clone();
+        let helper_syncing = state.helper_syncing.clone();
+        helper.connect_active_notify(move |row| {
+            if helper_syncing.get() {
+                return;
+            }
+            helper_row.set_sensitive(false);
+            spawn_user_agent_change(row.is_active(), helper_row.clone(), helper_syncing.clone());
+        });
+        *state.helper.borrow_mut() = Some(helper.clone());
+        group.add(&helper);
+        let settings = gtk::Button::with_label("Open Login Items Settings");
+        settings.set_halign(gtk::Align::Start);
+        settings.connect_clicked(|_| platform_service::open_user_agent_settings());
+        group.add(&settings);
+        page.append(&group);
+    }
     let browsers_heading = gtk::Label::new(Some("Protected browsers"));
     browsers_heading.set_xalign(0.0);
     browsers_heading.add_css_class("title-2");
@@ -437,34 +487,8 @@ fn load_configuration(state: &UiState) {
 /// browser data.
 fn configuration_from_daemon(
     info: guard_ipc::ConfigurationInfo,
-) -> Option<platform_service::LinuxConfiguration> {
-    let enforcement_mode = match info.enforcement_mode.as_deref()? {
-        "strict-filesystem" => platform_service::LinuxEnforcementMode::StrictFilesystem,
-        "conservative" => platform_service::LinuxEnforcementMode::Conservative,
-        _ => return None,
-    };
-    let mut browsers = Vec::with_capacity(info.browsers.len());
-    for browser in info.browsers {
-        let family = match browser.family.as_str() {
-            "Chromium" | "chromium" => guard_core::BrowserFamily::Chromium,
-            "Firefox" | "firefox" => guard_core::BrowserFamily::Firefox,
-            "Zen" | "zen" => guard_core::BrowserFamily::Zen,
-            _ => return None,
-        };
-        browsers.push(guard_platform::config::BrowserEnrollmentConfig {
-            id: browser.id,
-            family,
-            profile_root: PathBuf::from(browser.profile_root),
-            owner_uid: browser.owner_uid,
-            exe_paths: browser.exe_paths.into_iter().map(PathBuf::from).collect(),
-        });
-    }
-    Some(platform_service::LinuxConfiguration {
-        enforcement_mode,
-        browsers,
-        enrolled_exes: info.enrolled_exes.into_iter().map(PathBuf::from).collect(),
-        ssh_keys: info.ssh_keys.into_iter().map(PathBuf::from).collect(),
-    })
+) -> Option<platform_service::EditableConfiguration> {
+    platform_service::editable_from_metadata(info)
 }
 
 fn hydrate_configuration_from_daemon(state: &UiState, info: guard_ipc::ConfigurationInfo) -> bool {
@@ -479,9 +503,9 @@ fn hydrate_configuration_from_daemon(state: &UiState, info: guard_ipc::Configura
             return false;
         };
         *state.candidate.borrow_mut() = Some(cfg.clone());
-        state
-            .mode
-            .set_active_id(Some(cfg.enforcement_mode.as_str()));
+        if let Some(mode) = cfg.enforcement_mode {
+            state.mode.set_active_id(Some(mode.as_str()));
+        }
         state.apply.set_sensitive(false);
         state.apply.set_tooltip_text(None);
         return true;
@@ -504,7 +528,7 @@ fn refresh_browser_sources(state: &UiState) {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/nonexistent"));
-    let discovered = discover_native_browsers(&home);
+    let discovered = platform_service::discover_native_browsers(&home);
     let discovered = discovered
         .browsers
         .into_iter()
@@ -604,24 +628,6 @@ fn refresh_ssh_sources(state: &UiState) {
     *state.ssh_sources.borrow_mut() = sources;
 }
 
-/// Browser layouts belong to the selected platform helper.  The GTK client
-/// consumes the portable discovery DTO and therefore does not link the Linux
-/// implementation crate merely to render policy sources.
-fn discover_native_browsers(home: &std::path::Path) -> guard_platform::config::BrowserDiscovery {
-    let output = Command::new("guardctl")
-        .args(["browser", "discover", "--home"])
-        .arg(home)
-        .output();
-    output
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| serde_json::from_slice(&output.stdout).ok())
-        .unwrap_or_else(|| guard_platform::config::BrowserDiscovery {
-            browsers: Vec::new(),
-            unsupported_sandboxed: Vec::new(),
-        })
-}
-
 fn browser_family_name(family: guard_core::BrowserFamily) -> &'static str {
     match family {
         guard_core::BrowserFamily::Firefox => "Firefox",
@@ -673,7 +679,7 @@ fn same_native_browser(
         && left.exe_paths == right.exe_paths
 }
 
-fn render_objects(state: &UiState, cfg: &platform_service::LinuxConfiguration) {
+fn render_objects(state: &UiState, cfg: &platform_service::EditableConfiguration) {
     while let Some(child) = state.browsers.first_child() {
         state.browsers.remove(&child);
     }
@@ -997,6 +1003,10 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
     let poll_in_flight = state.poll_in_flight.clone();
     let protection = state.protection.clone();
     let protection_syncing = state.protection_syncing.clone();
+    let helper = state.helper.clone();
+    let helper_syncing = state.helper_syncing.clone();
+    let extension_status = state.extension_status.clone();
+    let fda_status = state.fda_status.clone();
     let pending_dialogs = state.pending_dialogs.clone();
     let config_state = state.clone();
     let window = window.clone();
@@ -1018,28 +1028,59 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
                 .collect::<Vec<_>>();
             let pending_ssh_reads = platform_service::ssh_pending();
             let pending_migrations = platform_service::migration_pending();
-            let service_status = platform_service::status().ok();
-            let service_active = service_status
-                .as_ref()
-                .map(|status| status.protection_active)
-                .unwrap_or(false);
-            let notification_active = service_status
-                .as_ref()
-                .and_then(|status| status.notification_active)
-                .unwrap_or(false);
-            (service_active, notification_active, daemon, configuration, active_ssh_keys, recent_events, pending_ssh_reads, pending_migrations)
-        }).await;
-        if let Ok((service_active, notification_active, daemon, configuration, active_ssh_keys, recent_events, pending_ssh_reads, pending_migrations)) = result {
+            let overview =
+                platform_service::platform_overview(daemon.as_ref(), configuration.as_ref());
+            (
+                overview,
+                daemon,
+                configuration,
+                active_ssh_keys,
+                recent_events,
+                pending_ssh_reads,
+                pending_migrations,
+            )
+        })
+        .await;
+        if let Ok((
+            overview,
+            daemon,
+            configuration,
+            active_ssh_keys,
+            recent_events,
+            pending_ssh_reads,
+            pending_migrations,
+        )) = result
+        {
             let active_ssh_changed = update_active_ssh_keys(&config_state, active_ssh_keys);
+            let configuration_available = configuration.is_some();
             let configuration_hydrated = configuration
-                .map(|configuration| hydrate_configuration_from_daemon(&config_state, configuration))
+                .map(|configuration| {
+                    hydrate_configuration_from_daemon(&config_state, configuration)
+                })
                 .unwrap_or(false);
-            if active_ssh_changed || configuration_hydrated {
+            let first_run = if !configuration_available
+                && config_state.candidate.borrow().is_none()
+            {
+                let initial =
+                    platform_service::initial_configuration_if_missing(daemon.is_some());
+                let initialized = initial.is_some();
+                if let Some(initial) = initial {
+                    *config_state.candidate.borrow_mut() = Some(initial);
+                    config_state.detail.set_text(
+                        "No saved macOS policy exists yet. Select protected resources and apply the policy.",
+                    );
+                }
+                initialized
+            } else {
+                false
+            };
+            if active_ssh_changed || configuration_hydrated || first_run {
                 refresh_browser_sources(&config_state);
             }
             let health = health_from_evidence(
-                service_active,
-                notification_active,
+                overview.service_active
+                    && (platform_service::shows_linux_mode() || overview.policy_enabled),
+                overview.helper_running,
                 daemon.as_ref(),
             );
             status.set_text(health_label(health));
@@ -1048,30 +1089,50 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
             // while suppressing its callback so a refresh never starts a new
             // privileged operation.
             if let Some(row) = protection.borrow().as_ref() {
-                let bundle_active = service_active && notification_active;
-                if row.is_active() != bundle_active {
+                let requested_active = if platform_service::shows_linux_mode() {
+                    overview.service_active && overview.helper_running
+                } else {
+                    overview.policy_enabled
+                };
+                if row.is_active() != requested_active {
                     protection_syncing.set(true);
-                    row.set_active(bundle_active);
+                    row.set_active(requested_active);
                     protection_syncing.set(false);
                 }
+                row.set_sensitive(
+                    platform_service::shows_linux_mode()
+                        || config_state.candidate.borrow().as_ref().is_some_and(|candidate| {
+                            !candidate.browsers.is_empty()
+                                || !candidate.ssh_keys.is_empty()
+                                || !candidate.enrolled_exes.is_empty()
+                        }),
+                );
+            }
+            if let Some(row) = helper.borrow().as_ref() {
+                if row.is_active() != overview.helper_running {
+                    helper_syncing.set(true);
+                    row.set_active(overview.helper_running);
+                    helper_syncing.set(false);
+                }
+                row.set_subtitle(&overview.helper_state);
                 row.set_sensitive(true);
             }
-            let service_state = if service_active { "active" } else { "inactive" };
-            let notification_state = if notification_active { "active" } else { "inactive" };
-            detail.set_text(&daemon.map(|s| {
-                let mode = s.mode.as_deref().unwrap_or("platform-default");
-                let marks = match (s.marked_filesystems, s.required_filesystems) {
-                    (Some(marked), Some(required)) => format!(" · marks: {marked}/{required}"),
-                    _ => String::new(),
-                };
-                format!("Backend: {} · mode: {} · browsers: {} · SSH keys: {} · allowed: {} · denied: {}{} · service: {} · notifications: {}", s.backend_kind, mode, s.browsers, s.ssh_protected_keys, s.allowed, s.denied, marks, service_state, notification_state)
-            }).unwrap_or_else(|| format!("guardd IPC is unavailable · service: {} · notifications: {}", service_state, notification_state)));
+            extension_status.set_subtitle(&overview.extension_state);
+            fda_status.set_subtitle(&overview.full_disk_access);
+            detail.set_text(&platform_service::overview_detail(
+                daemon.as_ref(),
+                &overview,
+            ));
             if after_id.is_none() {
-                while let Some(child) = events.first_child() { events.remove(&child); }
+                while let Some(child) = events.first_child() {
+                    events.remove(&child);
+                }
                 *event_data.borrow_mut() = recent_events.clone();
             } else {
                 let mut existing = event_data.borrow_mut();
-                for event in recent_events.iter().rev() { existing.insert(0, event.clone()); }
+                for event in recent_events.iter().rev() {
+                    existing.insert(0, event.clone());
+                }
             }
             for event in recent_events {
                 let row = gtk::ListBoxRow::new();
@@ -1089,13 +1150,30 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
                     _ => "ALLOWED",
                 };
                 let title = gtk::Label::new(Some(&format!("{}  ·  {}", decision, event.exe)));
-                title.set_xalign(0.0); title.add_css_class(if matches!(decision, "BLOCKED" | "NETWORK BLOCKED") { "error" } else { "success" });
-                let subtitle = gtk::Label::new(Some(&format!("#{} · {} · {}", event.id, event.resource_kind, event.path)));
-                subtitle.set_xalign(0.0); subtitle.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
-                box_.append(&title); box_.append(&subtitle); row.set_child(Some(&box_));
-                if after_id.is_some() { events.insert(&row, 0); } else { events.append(&row); }
+                title.set_xalign(0.0);
+                title.add_css_class(if matches!(decision, "BLOCKED" | "NETWORK BLOCKED") {
+                    "error"
+                } else {
+                    "success"
+                });
+                let subtitle = gtk::Label::new(Some(&format!(
+                    "#{} · {} · {}",
+                    event.id, event.resource_kind, event.path
+                )));
+                subtitle.set_xalign(0.0);
+                subtitle.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+                box_.append(&title);
+                box_.append(&subtitle);
+                row.set_child(Some(&box_));
+                if after_id.is_some() {
+                    events.insert(&row, 0);
+                } else {
+                    events.append(&row);
+                }
             }
-            let next_prompt = {
+            let complete_pending_snapshot =
+                pending_migrations.is_ok() && pending_ssh_reads.is_ok();
+            let (next_prompt, pending_queue_empty) = {
                 let mut controller = pending_dialogs.borrow_mut();
                 match (pending_migrations, pending_ssh_reads) {
                     (Ok(migrations), Ok(ssh_reads)) => controller.reconcile_snapshot(
@@ -1104,27 +1182,27 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
                             .map(migration_prompt)
                             .chain(ssh_reads.into_iter().map(ssh_read_prompt)),
                     ),
-                    (Ok(migrations), Err(_)) => controller.reconcile(
-                        migrations.into_iter().map(migration_prompt),
-                    ),
+                    (Ok(migrations), Err(_)) => {
+                        controller.reconcile(migrations.into_iter().map(migration_prompt))
+                    }
                     (Err(_), Ok(ssh_reads)) => {
                         controller.reconcile(ssh_reads.into_iter().map(ssh_read_prompt))
                     }
                     (Err(_), Err(_)) => {}
                 }
-                controller
+                let next = controller
                     .active()
                     .is_none()
                     .then(|| controller.activate_next())
-                    .flatten()
+                    .flatten();
+                (next, controller.is_empty())
             };
             if let Some(prompt) = next_prompt {
-                present_pending_dialog(
-                    &window,
-                    pending_dialogs.clone(),
-                    prompt,
-                    pending_only,
-                );
+                present_pending_dialog(&window, pending_dialogs.clone(), prompt, pending_only);
+            } else if complete_pending_snapshot
+                && should_close_pending_window(pending_only, pending_queue_empty)
+            {
+                window.close();
             }
         }
         poll_in_flight.set(false);
@@ -1415,11 +1493,12 @@ fn migration_prompt(migration: guard_ipc::MigrationPendingInfo) -> PendingPrompt
     let source = browser_label(&migration.source_browser);
     let target = browser_label(&migration.target_browser);
     let details = format!(
-        "{target} is trying to access protected {source} data.\n\nAre you importing data from {source} into {target}?\n\nSource browser: {source}\nSource profile: {}\nTarget browser: {target}\nTarget process: {}\nPID: {}\nRequested data: {}",
+        "{target} is trying to access protected {source} data.\n\nAre you importing data from {source} into {target}?\n\nSource browser: {source}\nSource profile: {}\nTarget browser: {target}\nTarget process: {}\nPID: {}\nRequested data: {}\n{}",
         migration.source_profile,
         migration.target_exe,
         migration.target_pid,
         migration.requested_data,
+        remaining_authorization_text(migration.expires_at, unix_seconds()),
     );
     PendingPrompt {
         key: PromptKey {
@@ -1432,6 +1511,22 @@ fn migration_prompt(migration: guard_ipc::MigrationPendingInfo) -> PendingPrompt
         expires_at: migration.expires_at,
         allow_label: "Yes, allow this import".into(),
         block_label: "No, block".into(),
+    }
+}
+
+fn unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn remaining_authorization_text(expires_at: u64, now: u64) -> String {
+    let remaining = expires_at.saturating_sub(now);
+    if remaining == 0 {
+        "Authorization deadline: expired".into()
+    } else {
+        format!("Authorization time remaining: {remaining} seconds")
     }
 }
 
@@ -1448,8 +1543,11 @@ fn ssh_read_prompt(pending: guard_ipc::SshPendingInfo) -> PendingPrompt {
         request_id: pending.id,
         title: "SSH private-key access detected".into(),
         details: format!(
-            "Program: {process}\nExecutable: {}\nPID: {}\nSSH private key: {}\n\nAllow this verified process tree to read this key for 10 seconds?",
-            pending.process_exe, pending.pid, pending.key_path
+            "Program: {process}\nExecutable: {}\nPID: {}\nSSH private key: {}\n{}\n\nAllow this verified process tree to read this key for 10 seconds?",
+            pending.process_exe,
+            pending.pid,
+            pending.key_path,
+            remaining_authorization_text(pending.expires_at, unix_seconds()),
         ),
         expires_at: pending.expires_at,
         allow_label: "Allow".into(),
@@ -1604,6 +1702,9 @@ fn resolve_pending_in_background(
                 Ok(Ok(())) => {
                     complete_pending_dialog(&window, &controller, &ui.dialog, pending_only, true)
                 }
+                Ok(Err(error)) if platform_service::pending_error_is_terminal(&error) => {
+                    complete_pending_dialog(&window, &controller, &ui.dialog, pending_only, true)
+                }
                 Ok(Err(error)) => retry_pending_dialog(
                     &controller,
                     &ui.allow_button,
@@ -1622,7 +1723,7 @@ fn resolve_pending_in_background(
                 ),
             }
         } else {
-            complete_pending_dialog(&window, &controller, &ui.dialog, pending_only, false);
+            complete_pending_dialog(&window, &controller, &ui.dialog, pending_only, true);
         }
     });
 }
@@ -1654,12 +1755,18 @@ fn complete_pending_dialog(
     if controller.borrow_mut().finish() {
         dialog.close();
         controller.borrow_mut().release_terminal();
-        if close_when_empty && pending_only && controller.borrow().is_empty() {
+        if close_when_empty
+            && should_close_pending_window(pending_only, controller.borrow().is_empty())
+        {
             window.close();
         } else {
             present_next_pending_dialog(window, controller.clone(), pending_only);
         }
     }
+}
+
+const fn should_close_pending_window(pending_only: bool, queue_empty: bool) -> bool {
+    pending_only && queue_empty
 }
 
 #[cfg(any())]
@@ -1749,70 +1856,64 @@ fn present_incident_dialog(window: &adw::ApplicationWindow, incident: guard_ipc:
     dialog.show();
 }
 
-fn spawn_protection_bundle(verb: String, switch: adw::SwitchRow, syncing: Rc<Cell<bool>>) {
-    let requested_on = verb == "start";
+fn spawn_protection_change(
+    enabled: bool,
+    candidate: Rc<RefCell<Option<platform_service::EditableConfiguration>>>,
+    switch: adw::SwitchRow,
+    syncing: Rc<Cell<bool>>,
+) {
+    let current = candidate.borrow().clone();
     glib::MainContext::default().spawn_local(async move {
-        let ok = gio::spawn_blocking(move || run_protection_bundle(&verb))
-            .await
-            .unwrap_or(false);
+        let result =
+            gio::spawn_blocking(move || platform_service::set_protection_enabled(enabled, current))
+                .await;
         switch.set_sensitive(true);
         syncing.set(true);
-        switch.set_active(ok && requested_on);
+        match result {
+            Ok(Ok(updated)) => {
+                *candidate.borrow_mut() = Some(updated);
+                switch.set_active(enabled);
+                switch.set_tooltip_text(None);
+            }
+            Ok(Err(error)) => {
+                switch.set_active(!enabled);
+                switch.set_tooltip_text(Some(&format!("Protection change failed: {error}")));
+            }
+            Err(error) => {
+                switch.set_active(!enabled);
+                switch.set_tooltip_text(Some(&format!(
+                    "Protection task stopped unexpectedly: {error:?}"
+                )));
+            }
+        }
         syncing.set(false);
     });
 }
 
-fn run_main_service(verb: &str) -> bool {
-    let operation = match verb {
-        "start" => guard_platform::ServiceOperation::Start,
-        "stop" => guard_platform::ServiceOperation::Stop,
-        "restart" => guard_platform::ServiceOperation::Restart,
-        _ => return false,
-    };
-    platform_service::apply(operation).is_ok()
-}
-
-fn run_notification_service(verb: &str) -> bool {
-    let operation = match verb {
-        "start" => guard_platform::ServiceOperation::Start,
-        "stop" => guard_platform::ServiceOperation::Stop,
-        "restart" => guard_platform::ServiceOperation::Restart,
-        _ => return false,
-    };
-    platform_service::apply_notifications(operation).is_ok()
-}
-
-fn run_protection_bundle(verb: &str) -> bool {
-    match verb {
-        "start" => {
-            if !run_main_service("start") {
-                return false;
+fn spawn_user_agent_change(enabled: bool, row: adw::SwitchRow, syncing: Rc<Cell<bool>>) {
+    glib::MainContext::default().spawn_local(async move {
+        let result =
+            gio::spawn_blocking(move || platform_service::set_user_agent_enabled(enabled)).await;
+        row.set_sensitive(true);
+        syncing.set(true);
+        match result {
+            Ok(Ok(())) => {
+                row.set_active(enabled);
+                row.set_tooltip_text(None);
             }
-            if run_notification_service("start") {
-                true
-            } else {
-                // Do not leave the protection daemon running alone when the
-                // desktop notification half could not be started.
-                let _ = run_main_service("stop");
-                false
+            Ok(Err(error)) => {
+                row.set_active(!enabled);
+                row.set_tooltip_text(Some(&format!("Pending helper change failed: {error}")));
+            }
+            Err(error) => {
+                row.set_active(!enabled);
+                row.set_tooltip_text(Some(&format!(
+                    "Pending helper task stopped unexpectedly: {error:?}"
+                )));
             }
         }
-        "stop" => {
-            let notification_stopped = run_notification_service("stop");
-            let main_stopped = run_main_service("stop");
-            if main_stopped {
-                true
-            } else {
-                // Preserve the previous bundle when stopping the daemon
-                // failed after notifications were stopped.
-                if notification_stopped {
-                    let _ = run_notification_service("start");
-                }
-                false
-            }
-        }
-        _ => false,
-    }
+        syncing.set(false);
+    });
 }
 
 fn spawn_apply(bytes: Vec<u8>, button: gtk::Button) {
@@ -1821,8 +1922,10 @@ fn spawn_apply(bytes: Vec<u8>, button: gtk::Button) {
         let ok = gio::spawn_blocking(move || platform_service::apply_config(&write_bytes).is_ok())
             .await
             .unwrap_or(false);
-        button.set_sensitive(true);
-        if !ok {
+        button.set_sensitive(!ok);
+        if ok {
+            button.set_tooltip_text(None);
+        } else {
             button.set_tooltip_text(Some(
                 "Apply failed; previous configuration was restored when possible.",
             ));
@@ -1834,10 +1937,12 @@ fn spawn_apply(bytes: Vec<u8>, button: gtk::Button) {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn daemon_configuration_preserves_ssh_enrollment_for_the_ui() {
         let config = configuration_from_daemon(guard_ipc::ConfigurationInfo {
             enforcement_mode: Some("strict-filesystem".into()),
+            policy_enabled: None,
             browsers: vec![guard_ipc::ConfiguredBrowserInfo {
                 id: "firefox".into(),
                 family: "Firefox".into(),
@@ -1851,13 +1956,67 @@ mod tests {
         .expect("supported daemon snapshot");
         assert_eq!(
             config.enforcement_mode,
-            platform_service::LinuxEnforcementMode::StrictFilesystem
+            Some(platform_service::LinuxEnforcementMode::StrictFilesystem)
         );
         assert_eq!(
             config.ssh_keys,
             vec![PathBuf::from("/home/test/.ssh/id_ed25519")]
         );
         assert_eq!(config.browsers[0].owner_uid, None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_configuration_has_policy_state_and_no_linux_mode() {
+        let config = configuration_from_daemon(guard_ipc::ConfigurationInfo {
+            enforcement_mode: None,
+            policy_enabled: Some(true),
+            browsers: vec![guard_ipc::ConfiguredBrowserInfo {
+                id: "firefox".into(),
+                family: "firefox".into(),
+                profile_root: "/Users/test/Library/Application Support/Firefox".into(),
+                owner_uid: Some(501),
+                exe_paths: vec!["/Applications/Firefox.app/Contents/MacOS/firefox".into()],
+            }],
+            enrolled_exes: Vec::new(),
+            ssh_keys: Vec::new(),
+        })
+        .unwrap();
+        assert_eq!(config.enforcement_mode, None);
+        assert!(config.policy_enabled);
+        assert!(!platform_service::shows_linux_mode());
+    }
+
+    #[test]
+    fn pending_only_closes_but_manual_control_center_stays_open() {
+        assert!(should_close_pending_window(true, true));
+        assert!(!should_close_pending_window(false, true));
+        assert!(!should_close_pending_window(true, false));
+    }
+
+    #[test]
+    fn pending_prompt_reports_remaining_or_expired_deadline() {
+        assert_eq!(
+            remaining_authorization_text(160, 100),
+            "Authorization time remaining: 60 seconds"
+        );
+        assert_eq!(
+            remaining_authorization_text(100, 100),
+            "Authorization deadline: expired"
+        );
+    }
+
+    #[test]
+    fn timeout_and_replay_errors_are_terminal_but_cancellation_is_retryable() {
+        assert!(platform_service::pending_error_is_terminal(
+            &anyhow::anyhow!("system extension error: timed_out")
+        ));
+        assert!(platform_service::pending_error_is_terminal(
+            &anyhow::anyhow!("system extension error: already_resolved")
+        ));
+        assert!(!platform_service::pending_error_is_terminal(
+            &anyhow::anyhow!("device-owner authentication was cancelled")
+        ));
     }
 
     #[test]

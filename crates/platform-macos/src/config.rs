@@ -17,6 +17,8 @@ static NEXT_TEMP_CONFIG: AtomicU64 = AtomicU64::new(0);
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MacBackendConfig {
     pub version: u32,
+    #[serde(default)]
+    pub policy_enabled: bool,
     pub common_policy: PolicyConfig,
     pub browser_trust: Vec<MacBrowserEnrollment>,
 }
@@ -93,6 +95,34 @@ impl MacBackendConfig {
                 .all(|browser| browser.owner_uid == Some(peer_uid)),
             "macOS configuration may change only the authenticated peer's browser scope"
         );
+        for browser in &self.browser_trust {
+            let canonical = std::fs::canonicalize(&browser.profile_root)?;
+            anyhow::ensure!(
+                canonical == browser.profile_root,
+                "browser profile enrollment must use a canonical path"
+            );
+            let metadata = std::fs::metadata(&canonical)?;
+            anyhow::ensure!(
+                metadata.is_dir() && metadata.uid() == peer_uid,
+                "browser profile enrollment must be an authenticated-peer-owned directory"
+            );
+        }
+        crate::browser_trust::MacBrowserTrustStore::load_and_revalidate(
+            self.browser_trust.clone(),
+        )?;
+        for executable in &self.common_policy.enrolled_exes {
+            let canonical = std::fs::canonicalize(executable)?;
+            anyhow::ensure!(
+                canonical == *executable,
+                "executable enrollment must use a canonical path"
+            );
+            let metadata = std::fs::metadata(&canonical)?;
+            let owner = metadata.uid();
+            anyhow::ensure!(
+                metadata.is_file() && (owner == 0 || owner == peer_uid),
+                "executable enrollment must be root-owned or authenticated-peer-owned"
+            );
+        }
         for key in &self.common_policy.ssh_keys {
             let canonical = std::fs::canonicalize(key)?;
             anyhow::ensure!(
@@ -134,6 +164,7 @@ impl MacBackendConfig {
     pub fn to_ipc_metadata(&self) -> guard_ipc::ConfigurationInfo {
         guard_ipc::ConfigurationInfo {
             enforcement_mode: None,
+            policy_enabled: Some(self.policy_enabled),
             browsers: self
                 .common_policy
                 .browsers
@@ -297,6 +328,7 @@ mod tests {
             PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome");
         MacBackendConfig {
             version: MAC_CONFIG_VERSION,
+            policy_enabled: true,
             common_policy: PolicyConfig {
                 browsers: vec![BrowserEnrollmentConfig {
                     id: "chrome".to_owned(),
@@ -387,5 +419,45 @@ mod tests {
         let metadata = config.to_ipc_metadata_for_uid(501);
         assert_eq!(metadata.browsers.len(), 1);
         assert_eq!(metadata.browsers[0].owner_uid, Some(501));
+    }
+
+    #[test]
+    fn peer_validation_accepts_only_owned_synthetic_browser_scope() {
+        // SAFETY: geteuid has no pointer arguments and reads only the test
+        // process credential.
+        let uid = unsafe { libc::geteuid() };
+        let root = tempfile::tempdir().unwrap();
+        let profile = root.path().join("profile");
+        std::fs::create_dir(&profile).unwrap();
+        let executable = root.path().join("custom-browser");
+        std::fs::write(&executable, b"synthetic executable bytes").unwrap();
+        let profile = std::fs::canonicalize(profile).unwrap();
+        let executable = std::fs::canonicalize(executable).unwrap();
+        let enrollment = crate::browser_trust::enroll_custom_executable(&executable).unwrap();
+        let config = MacBackendConfig {
+            version: MAC_CONFIG_VERSION,
+            policy_enabled: true,
+            common_policy: PolicyConfig {
+                browsers: vec![BrowserEnrollmentConfig {
+                    id: "custom".into(),
+                    family: BrowserFamily::Chromium,
+                    profile_root: profile.clone(),
+                    owner_uid: Some(uid),
+                    exe_paths: vec![executable.clone()],
+                }],
+                enrolled_exes: Vec::new(),
+                ssh_keys: Vec::new(),
+            },
+            browser_trust: vec![MacBrowserEnrollment {
+                browser_id: BrowserId("custom".into()),
+                family: BrowserFamily::Chromium,
+                profile_root: profile,
+                owner_uid: uid,
+                app_bundle: None,
+                executables: vec![enrollment],
+            }],
+        };
+        config.validate_for_peer(uid).unwrap();
+        assert!(config.validate_for_peer(uid.saturating_add(1)).is_err());
     }
 }

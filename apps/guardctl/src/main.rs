@@ -1023,6 +1023,23 @@ fn print_human(resp: &Response) {
         Some(ResponseBody::ConfigurationApplied { version }) => {
             println!("Applied macOS configuration version {version}.");
         }
+        Some(ResponseBody::PendingHelper(helper)) => {
+            println!(
+                "Pending helper: {}",
+                if helper.running {
+                    "running"
+                } else {
+                    "not running"
+                }
+            );
+        }
+        Some(ResponseBody::PendingHelperSnapshot(snapshot)) => {
+            println!(
+                "Pending helper snapshot: {} browser import(s), {} SSH read(s)",
+                snapshot.migrations.len(),
+                snapshot.ssh_reads.len()
+            );
+        }
         Some(ResponseBody::Events(es)) => print_events(es),
         Some(ResponseBody::Explain(e)) => print_explain(e),
         Some(ResponseBody::Leases(ls)) => print_leases(ls),

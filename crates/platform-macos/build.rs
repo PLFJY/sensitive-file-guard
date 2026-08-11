@@ -2,6 +2,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=GUARD_APP_BUNDLE_ID");
     println!("cargo:rerun-if-env-changed=GUARD_SYSTEM_EXTENSION_BUNDLE_ID");
     println!("cargo:rerun-if-env-changed=GUARD_XPC_SERVICE_NAME");
+    println!("cargo:rerun-if-env-changed=GUARD_USER_AGENT_PLIST_NAME");
     println!("cargo:rerun-if-changed=../../native/macos/system_extension_bridge.m");
     println!("cargo:rerun-if-changed=../../native/macos/system_extension_bridge.h");
     println!("cargo:rerun-if-changed=../../native/macos/endpoint_security_bridge.c");
@@ -12,6 +13,8 @@ fn main() {
     println!("cargo:rerun-if-changed=../../native/macos/xpc_bridge.h");
     println!("cargo:rerun-if-changed=../../native/macos/local_auth_bridge.m");
     println!("cargo:rerun-if-changed=../../native/macos/local_auth_bridge.h");
+    println!("cargo:rerun-if-changed=../../native/macos/user_agent_bridge.m");
+    println!("cargo:rerun-if-changed=../../native/macos/user_agent_bridge.h");
 
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
         return;
@@ -22,6 +25,7 @@ fn main() {
         .file("../../native/macos/code_signature_bridge.m")
         .file("../../native/macos/xpc_bridge.m")
         .file("../../native/macos/local_auth_bridge.m")
+        .file("../../native/macos/user_agent_bridge.m")
         .flag("-fobjc-arc")
         .flag("-fblocks")
         .flag("-fmodules")
@@ -38,6 +42,7 @@ fn main() {
         .compile("guard_endpoint_security_bridge");
     println!("cargo:rustc-link-lib=framework=Foundation");
     println!("cargo:rustc-link-lib=framework=LocalAuthentication");
+    println!("cargo:rustc-link-lib=framework=ServiceManagement");
     println!("cargo:rustc-link-lib=EndpointSecurity");
     println!("cargo:rustc-link-lib=framework=Security");
     println!("cargo:rustc-link-lib=framework=SystemExtensions");
