@@ -8,7 +8,6 @@ license.workspace = true
 anyhow.workspace = true
 guard-ipc.workspace = true
 guard-client.workspace = true
-platform-linux.workspace = true
 serde_json.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true

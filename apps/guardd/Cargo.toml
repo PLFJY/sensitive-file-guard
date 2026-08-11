@@ -11,6 +11,7 @@ guard-browser.workspace = true
 guard-ssh.workspace = true
 guard-ipc.workspace = true
 guard-audit.workspace = true
+guard-platform.workspace = true
 platform-linux.workspace = true
 anyhow.workspace = true
 tracing.workspace = true

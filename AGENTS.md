@@ -43,6 +43,12 @@ successfully opened. This is an access firewall, not an antivirus/EDR/DLP.
   path + exe file identity (st_dev + st_ino). Missing fields are not permission
   to allow.
 
+## Platform boundary
+- Portable domain/runtime/UI-client logic must not import `platform-linux`
+  directly. OS mechanisms belong behind `guard-platform` contracts and
+  platform adapters. Add a cross-platform seam only where implementations
+  genuinely differ.
+
 ## Quality gate for every phase
 1. inspect existing code, preserve working behavior
 2. implement

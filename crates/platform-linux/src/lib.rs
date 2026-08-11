@@ -13,6 +13,7 @@ pub mod identity;
 pub mod ipc;
 pub mod proc;
 pub mod quarantine;
+pub mod service;
 pub mod signal;
 pub mod ssh_behavior;
 pub mod topology;

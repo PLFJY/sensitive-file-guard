@@ -787,7 +787,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "guard-ipc",
- "platform-linux",
+ "guard-platform",
  "serde_json",
 ]
 
@@ -814,9 +814,18 @@ name = "guard-notify"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "guard-client",
  "guard-ipc",
- "platform-linux",
  "serde_json",
+]
+
+[[package]]
+name = "guard-platform"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "guard-core",
+ "serde",
 ]
 
 [[package]]
@@ -851,7 +860,6 @@ dependencies = [
  "crossterm",
  "guard-client",
  "guard-ipc",
- "platform-linux",
  "ratatui",
  "serde_json",
  "tempfile",
@@ -868,9 +876,9 @@ dependencies = [
  "guard-client",
  "guard-core",
  "guard-ipc",
+ "guard-platform",
  "guard-ssh",
  "libadwaita",
- "platform-linux",
  "serde_json",
 ]
 
@@ -880,8 +888,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "guard-client",
  "guard-core",
  "guard-ipc",
+ "guard-platform",
  "guard-ssh",
  "libc",
  "platform-linux",
@@ -900,6 +910,7 @@ dependencies = [
  "guard-browser",
  "guard-core",
  "guard-ipc",
+ "guard-platform",
  "guard-ssh",
  "guard-test-fixtures",
  "libc",
@@ -1263,6 +1274,7 @@ dependencies = [
  "anyhow",
  "cap-std",
  "guard-core",
+ "guard-platform",
  "libc",
  "serde",
  "serde_json",

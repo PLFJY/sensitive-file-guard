@@ -73,7 +73,7 @@ pub struct SshExposureIncident {
     pub uid: u32,
     pub accessed_keys: Vec<AccessedKey>,
     pub root_process: ProcessStableId,
-    /// Linux thread-group leader used by the BPF send map. The stable process
+    /// Backend process-group leader used by the network containment map. The stable process
     /// identity above remains the authorization/audit identity; this is not a
     /// naked-PID security decision.
     pub root_tgid: u32,
@@ -281,7 +281,7 @@ impl ExposureTracker {
     }
 
     /// Record a kernel-blocked send using the opaque incident ID carried in
-    /// the BPF map. The BPF map is the authority for the process-tree match;
+    /// the backend process map. The backend map is the authority for the process-tree match;
     /// this method only advances the auditable userspace state.
     pub fn blocked_send(
         &mut self,

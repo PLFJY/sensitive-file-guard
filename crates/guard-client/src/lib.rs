@@ -4,7 +4,98 @@ use std::path::Path;
 
 use anyhow::Context;
 use guard_ipc::{Request, RequestOp, Response, ResponseBody, MAX_REQUEST_BYTES, PROTOCOL_VERSION};
-use platform_linux::ipc::IpcClient;
+
+/// Client-side local transport.  It only connects and exchanges framed
+/// payloads; server-side peer authentication remains in the selected
+/// platform adapter.
+pub mod transport {
+    use std::io::{self, Read, Write};
+    use std::os::unix::net::UnixStream;
+    use std::path::Path;
+    use std::time::Duration;
+
+    pub struct IpcClient;
+
+    impl IpcClient {
+        pub fn request(path: &Path, payload: &[u8]) -> io::Result<Vec<u8>> {
+            let mut stream = UnixStream::connect(path)?;
+            stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+            stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+            write_frame(&mut stream, payload)?;
+            read_frame(&mut stream, 16 * 1024 * 1024)
+        }
+    }
+
+    pub fn read_frame(stream: &mut UnixStream, max_bytes: usize) -> io::Result<Vec<u8>> {
+        let mut prefix = [0u8; 4];
+        stream.read_exact(&mut prefix)?;
+        let length = u32::from_be_bytes(prefix) as usize;
+        if length > max_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("IPC frame too large: {length} > {max_bytes}"),
+            ));
+        }
+        let mut payload = vec![0u8; length];
+        stream.read_exact(&mut payload)?;
+        Ok(payload)
+    }
+
+    pub fn write_frame(stream: &mut UnixStream, payload: &[u8]) -> io::Result<()> {
+        let length = u32::try_from(payload.len()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "IPC payload exceeds u32 length",
+            )
+        })?;
+        stream.write_all(&length.to_be_bytes())?;
+        stream.write_all(payload)?;
+        stream.flush()
+    }
+}
+
+use transport::IpcClient;
+
+/// Application-facing service facade. The selected platform CLI owns the
+/// privileged service mechanism; GTK and other clients use these semantic
+/// operations rather than naming a service manager.
+pub mod service {
+    use std::process::Command;
+
+    use guard_platform::{ServiceOperation, ServiceStatus};
+
+    pub fn status() -> anyhow::Result<ServiceStatus> {
+        let output = Command::new("guardctl").arg("service-status").output()?;
+        anyhow::ensure!(output.status.success(), "guardctl service status failed");
+        Ok(serde_json::from_slice(&output.stdout)?)
+    }
+
+    pub fn apply(operation: ServiceOperation) -> anyhow::Result<()> {
+        let verb = match operation {
+            ServiceOperation::Start => "start",
+            ServiceOperation::Stop => "stop",
+            ServiceOperation::Restart => "restart",
+        };
+        let status = Command::new("pkexec")
+            .args(["guardctl", "privileged", "service", verb])
+            .status()?;
+        anyhow::ensure!(status.success(), "protection service operation failed");
+        Ok(())
+    }
+
+    pub fn apply_notifications(operation: ServiceOperation) -> anyhow::Result<()> {
+        let verb = match operation {
+            ServiceOperation::Start => "start",
+            ServiceOperation::Stop => "stop",
+            ServiceOperation::Restart => "restart",
+        };
+        let status = Command::new("guardctl")
+            .args(["notification-service", verb])
+            .status()?;
+        anyhow::ensure!(status.success(), "notification service operation failed");
+        Ok(())
+    }
+}
 
 fn exchange<T>(
     socket: &Path,

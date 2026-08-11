@@ -15,6 +15,7 @@
 use std::io;
 use std::os::unix::io::RawFd;
 use std::path::Path;
+use std::sync::Arc;
 
 use libc::{
     fanotify_event_metadata, fanotify_init, fanotify_mark, fanotify_response, AT_FDCWD,
@@ -211,6 +212,56 @@ impl Drop for FanotifyGroup {
         // SAFETY: fd is owned by this group and closed exactly once on drop.
         unsafe {
             libc::close(self.fd);
+        }
+    }
+}
+
+/// Opaque ownership of one pending Linux permission operation. Portable code
+/// can only choose the terminal response; it cannot access the event fd.
+pub struct LinuxPendingPermission {
+    group: Arc<FanotifyGroup>,
+    event_fd: RawFd,
+    finished: bool,
+}
+
+impl LinuxPendingPermission {
+    pub fn new(group: Arc<FanotifyGroup>, event_fd: RawFd) -> Self {
+        Self {
+            group,
+            event_fd,
+            finished: false,
+        }
+    }
+
+    fn finish(&mut self, allow: bool) -> anyhow::Result<()> {
+        if self.finished {
+            anyhow::bail!("permission request already resolved");
+        }
+        let response = self.group.respond(self.event_fd, allow);
+        close_event_fd(self.event_fd);
+        self.finished = true;
+        response.map_err(Into::into)
+    }
+
+    pub fn resolve(mut self, allow: bool) -> anyhow::Result<()> {
+        self.finish(allow)
+    }
+}
+
+impl guard_platform::PendingPermission for LinuxPendingPermission {
+    fn allow(mut self: Box<Self>) -> anyhow::Result<()> {
+        self.finish(true)
+    }
+
+    fn deny(mut self: Box<Self>) -> anyhow::Result<()> {
+        self.finish(false)
+    }
+}
+
+impl Drop for LinuxPendingPermission {
+    fn drop(&mut self) {
+        if !self.finished {
+            let _ = self.finish(false);
         }
     }
 }

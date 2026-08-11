@@ -42,7 +42,7 @@ use guard_core::resource::BrowserFamily;
 use guard_core::resource::{
     BrowserId, ProfileId, ProtectedResource, ProtectedResourceId, ProtectedResourceKind,
 };
-pub use platform_linux::config::{BrowserEnrollmentConfig, EnforcementConfig, EnforcementMode};
+pub use guard_platform::config::{BrowserEnrollmentConfig, EnforcementConfig, EnforcementMode};
 use platform_linux::enrollment::EnrollmentStore;
 use platform_linux::fanotify;
 use platform_linux::identity as linux_identity;

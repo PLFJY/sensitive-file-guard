@@ -26,7 +26,7 @@ use crate::resource::{BrowserId, ProfileId, ProtectedResource, ProtectedResource
 
 /// A policy-only description of a trusted browser attempting to import one
 /// enrolled browser profile into another.  It deliberately has no fd or UI
-/// state: the Linux enforcement layer owns the pending fanotify operation.
+/// state: the selected enforcement adapter owns the pending authorization operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MigrationCandidate {
     pub source_browser: BrowserId,
@@ -89,7 +89,7 @@ impl DenyReason {
     }
 }
 
-/// The intercepted operation. `Open` is the primary fanotify gate (read opens);
+/// The intercepted operation. `Open` is the primary protected-resource gate;
 /// `Write` and `Copy` are modeled for backends that can distinguish them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AccessOperation {

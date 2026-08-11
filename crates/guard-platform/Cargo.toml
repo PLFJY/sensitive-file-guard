@@ -1,11 +1,11 @@
 [package]
-name = "guard-client"
+name = "guard-platform"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-guard-ipc.workspace = true
-guard-platform.workspace = true
-serde_json.workspace = true
+guard-core.workspace = true
+serde.workspace = true
+

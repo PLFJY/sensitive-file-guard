@@ -4,12 +4,8 @@
 //! pending permission owns its event fd and resolves it exactly once; dropping
 //! an unresolved request fails closed.
 
-use std::collections::HashMap;
-use std::os::fd::RawFd;
-use std::sync::Arc;
-
 use guard_core::ProcessStableId;
-use platform_linux::fanotify::{self, FanotifyGroup};
+use std::collections::HashMap;
 
 use crate::enforce::MigrationPendingDetails;
 
@@ -18,41 +14,9 @@ const MAX_PENDING_REQUESTS: usize = 8;
 const MAX_PERMISSION_FDS_PER_REQUEST: usize = 32;
 const BLOCK_SUPPRESSION_SECS: u64 = 60;
 
-/// RAII owner for exactly one unresolved FAN_OPEN_PERM event.
-pub struct PendingPermission {
-    fd: RawFd,
-    group: Arc<FanotifyGroup>,
-    resolved: bool,
-}
-
-impl PendingPermission {
-    pub fn new(fd: RawFd, group: Arc<FanotifyGroup>) -> Self {
-        Self {
-            fd,
-            group,
-            resolved: false,
-        }
-    }
-
-    pub fn resolve(mut self, allow: bool) -> std::io::Result<()> {
-        let result = self.group.respond(self.fd, allow);
-        fanotify::close_event_fd(self.fd);
-        self.resolved = true;
-        result
-    }
-}
-
-impl Drop for PendingPermission {
-    fn drop(&mut self) {
-        if !self.resolved {
-            if let Err(error) = self.group.respond(self.fd, false) {
-                tracing::error!(%error, fd = self.fd, "failed to deny dropped pending fanotify permission");
-            }
-            fanotify::close_event_fd(self.fd);
-            self.resolved = true;
-        }
-    }
-}
+/// Linux's opaque implementation of the portable deferred authorization
+/// contract. The daemon store owns the lifecycle, not an OS descriptor.
+pub type PendingPermission = platform_linux::fanotify::LinuxPendingPermission;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct PendingKey {

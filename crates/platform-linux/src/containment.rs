@@ -18,6 +18,25 @@ pub struct ContainmentResult {
     pub terminated_processes: u32,
 }
 
+/// Linux implementation of semantic verified-tree containment. The existing
+/// ancestry, pidfd, and start-time checks remain in `terminate_incident_tree`.
+pub struct LinuxProcessContainment;
+
+impl guard_platform::ProcessContainment for LinuxProcessContainment {
+    fn terminate_verified_tree(
+        &self,
+        root: &ProcessStableId,
+        uid: u32,
+        members: &[u32],
+    ) -> anyhow::Result<u32> {
+        Ok(
+            terminate_incident_tree(root, uid, members, || Ok(Vec::new()))
+                .map_err(anyhow::Error::msg)?
+                .terminated_processes,
+        )
+    }
+}
+
 struct PidFd(RawFd);
 
 impl PidFd {

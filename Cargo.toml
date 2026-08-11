@@ -7,6 +7,7 @@ members = [
     "crates/guard-ipc",
     "crates/guard-client",
     "crates/guard-audit",
+    "crates/guard-platform",
     "crates/platform-linux",
     "crates/guard-test-fixtures",
     "apps/guardd",
@@ -29,6 +30,7 @@ guard-ssh = { path = "crates/guard-ssh" }
 guard-ipc = { path = "crates/guard-ipc" }
 guard-client = { path = "crates/guard-client" }
 guard-audit = { path = "crates/guard-audit" }
+guard-platform = { path = "crates/guard-platform" }
 platform-linux = { path = "crates/platform-linux" }
 guard-test-fixtures = { path = "crates/guard-test-fixtures" }
 

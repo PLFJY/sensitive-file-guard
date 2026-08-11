@@ -172,6 +172,123 @@ pub struct SshBehaviorBackend {
     events: Box<EventQueue>,
 }
 
+/// Semantic adapter around the Linux network-containment backend. The BPF map,
+/// hook, and ring-buffer handles remain private to this module.
+#[derive(Clone, Debug)]
+pub struct LinuxSshExposure {
+    incident_id: u64,
+    tgid: u32,
+    uid: u32,
+}
+
+pub struct LinuxSshBehavior {
+    backend: std::sync::Mutex<SshBehaviorBackend>,
+}
+
+impl LinuxSshBehavior {
+    pub fn new(backend: SshBehaviorBackend) -> Self {
+        Self {
+            backend: std::sync::Mutex::new(backend),
+        }
+    }
+}
+
+impl guard_platform::SshBehavior for LinuxSshBehavior {
+    type Exposure = LinuxSshExposure;
+
+    fn arm_exposure(
+        &self,
+        incident_id: &str,
+        process: &guard_core::ProcessIdentity,
+        until_ms: u64,
+    ) -> anyhow::Result<Self::Exposure> {
+        let incident_id = incident_id
+            .strip_prefix("ssh-")
+            .and_then(|value| u64::from_str_radix(value, 16).ok())
+            .ok_or_else(|| anyhow::anyhow!("invalid SSH incident identifier"))?;
+        let tgid = crate::identity::read_tgid(i32::try_from(process.stable.pid)?)?;
+        let exposure = LinuxSshExposure {
+            incident_id,
+            tgid,
+            uid: process.uid,
+        };
+        self.backend
+            .lock()
+            .map_err(|_| anyhow::anyhow!("SSH backend mutex poisoned"))?
+            .arm(
+                tgid,
+                incident_id,
+                process.uid,
+                until_ms.saturating_mul(1_000_000),
+                guard_core::SshIncidentState::Observing,
+            )
+            .map_err(anyhow::Error::msg)?;
+        Ok(exposure)
+    }
+
+    fn renew_exposure(&self, exposure: &Self::Exposure, until_ms: u64) -> anyhow::Result<()> {
+        self.backend
+            .lock()
+            .map_err(|_| anyhow::anyhow!("SSH backend mutex poisoned"))?
+            .arm(
+                exposure.tgid,
+                exposure.incident_id,
+                exposure.uid,
+                until_ms.saturating_mul(1_000_000),
+                guard_core::SshIncidentState::Observing,
+            )
+            .map_err(anyhow::Error::msg)
+    }
+
+    fn poll_blocked_attempts(&self) -> anyhow::Result<Vec<guard_platform::BlockedNetworkAttempt>> {
+        let events = self
+            .backend
+            .lock()
+            .map_err(|_| anyhow::anyhow!("SSH backend mutex poisoned"))?
+            .poll()
+            .map_err(anyhow::Error::msg)?;
+        Ok(events
+            .into_iter()
+            .map(|event| guard_platform::BlockedNetworkAttempt {
+                incident_id: format!("ssh-{:016x}", event.incident_id),
+                pid: event.tgid,
+                uid: event.uid,
+                destination: None,
+            })
+            .collect())
+    }
+
+    fn allow_incident(&self, incident_id: &str) -> anyhow::Result<()> {
+        self.resolve_incident(incident_id, true)
+    }
+
+    fn block_incident(&self, incident_id: &str) -> anyhow::Result<()> {
+        self.resolve_incident(incident_id, false)
+    }
+
+    fn remove_exposure(&self, exposure: Self::Exposure) -> anyhow::Result<()> {
+        self.backend
+            .lock()
+            .map_err(|_| anyhow::anyhow!("SSH backend mutex poisoned"))?
+            .resolve(exposure.incident_id, true)
+            .map_err(anyhow::Error::msg)
+    }
+}
+
+impl LinuxSshBehavior {
+    fn resolve_incident(&self, incident_id: &str, allow: bool) -> anyhow::Result<()> {
+        let incident_id = incident_id
+            .strip_prefix("ssh-")
+            .and_then(|value| u64::from_str_radix(value, 16).ok())
+            .ok_or_else(|| anyhow::anyhow!("invalid SSH incident identifier"))?;
+        self.backend
+            .lock()
+            .map_err(|_| anyhow::anyhow!("SSH backend mutex poisoned"))?
+            .resolve(incident_id, allow)
+            .map_err(anyhow::Error::msg)
+    }
+}
+
 // libbpf objects are used only by the daemon's synchronized backend owner.
 // Links and map fds are process-owned kernel handles, and Drop tears them down
 // exactly once after polling stops.

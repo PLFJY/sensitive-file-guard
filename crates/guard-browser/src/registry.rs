@@ -10,7 +10,7 @@
 //! - **Directory trees** (`Sessions/`, `Local Storage/`, `storage/`, ...) are
 //!   enrolled as `TreeRoot`s and matched by path prefix, so a file created
 //!   inside the tree after discovery is still classified as protected without
-//!   re-scanning on every open. The fanotify layer (Phase 06) marks these tree
+//!   re-scanning on every open. The platform mediator marks these tree
 //!   dirs recursively; the recursive-mark race is documented there.
 //!
 //! No permanent trust is granted merely because a path is called "Chrome":

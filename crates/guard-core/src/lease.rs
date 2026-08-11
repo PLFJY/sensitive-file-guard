@@ -32,7 +32,7 @@ pub enum MigrationLeaseState {
 
 /// Time-limited, process-tree-bound cross-browser migration access grant.
 ///
-/// This is intentionally not called "read-only": Linux fanotify permission
+/// This is intentionally not called "read-only": the access mediator
 /// events do not expose the triggering process's original open flags, so V1
 /// cannot enforce a read-only invariant at this boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -34,9 +34,9 @@ impl TrustTier {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProcessStableId {
     pub pid: u32,
-    /// Process start time (e.g. `/proc/<pid>/stat` `starttime` in clock ticks).
+    /// Backend-defined process start token.
     pub start_time: u64,
-    /// Canonical executable path (`/proc/<pid>/exe`).
+    /// Canonical executable path supplied by the backend.
     pub exe: PathBuf,
     /// Executable file `st_dev`.
     pub exe_dev: u64,

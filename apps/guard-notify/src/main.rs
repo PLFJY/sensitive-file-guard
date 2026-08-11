@@ -10,8 +10,10 @@ use std::process::{Command, ExitCode, Stdio};
 use std::time::Duration;
 
 use clap::Parser;
+use guard_client::transport::IpcClient;
 use guard_ipc::{EventInfo, Request, RequestOp, Response, ResponseBody, PROTOCOL_VERSION};
-use platform_linux::ipc::{IpcClient, DEFAULT_SOCKET_PATH};
+
+const DEFAULT_SOCKET_PATH: &str = "/run/guardd/guardd.sock";
 
 #[derive(Debug, Parser)]
 #[command(name = "guard-notify", version)]

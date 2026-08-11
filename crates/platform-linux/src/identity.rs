@@ -31,6 +31,41 @@ use std::path::{Path, PathBuf};
 use crate::enrollment::EnrollmentStore;
 use guard_core::identity::{AncestorSummary, ProcessIdentity, ProcessStableId, TrustTier};
 
+/// Adapter for the portable process-identity contract. `/proc` remains
+/// entirely inside this Linux crate; the daemon sees only domain identities.
+pub struct LinuxProcessIdentityResolver {
+    enrollment: std::sync::Mutex<EnrollmentStore>,
+}
+
+impl LinuxProcessIdentityResolver {
+    pub fn new(enrollment: EnrollmentStore) -> Self {
+        Self {
+            enrollment: std::sync::Mutex::new(enrollment),
+        }
+    }
+}
+
+impl guard_platform::ProcessIdentityResolver for LinuxProcessIdentityResolver {
+    fn resolve(&self, pid: u32, resource_owner_uid: u32) -> anyhow::Result<ProcessIdentity> {
+        let pid = i32::try_from(pid).map_err(|_| anyhow::anyhow!("process id is out of range"))?;
+        let mut enrollment = self
+            .enrollment
+            .lock()
+            .map_err(|_| anyhow::anyhow!("process enrollment mutex poisoned"))?;
+        Ok(resolve(pid, resource_owner_uid, &mut enrollment)?)
+    }
+
+    fn is_live_instance(&self, identity: &ProcessStableId) -> anyhow::Result<bool> {
+        let pid = i32::try_from(identity.pid)
+            .map_err(|_| anyhow::anyhow!("process id is out of range"))?;
+        Ok(read_start_time(pid).ok() == Some(identity.start_time))
+    }
+
+    fn ancestors(&self, pid: u32) -> anyhow::Result<Vec<AncestorSummary>> {
+        Ok(self.resolve(pid, 0)?.ancestors)
+    }
+}
+
 /// Maximum ancestor depth collected for audit context. Bounded so a pathological
 /// ancestry cannot stall the hot path.
 pub const MAX_ANCESTOR_DEPTH: usize = 16;

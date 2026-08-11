@@ -7,6 +7,7 @@ build = "build.rs"
 
 [dependencies]
 guard-core.workspace = true
+guard-platform.workspace = true
 libc.workspace = true
 tracing.workspace = true
 thiserror.workspace = true

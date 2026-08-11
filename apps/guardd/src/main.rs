@@ -629,7 +629,7 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                             .expect("pending migration mutex poisoned")
                             .enqueue(
                                 details,
-                                pending::PendingPermission::new(ev.fd, Arc::clone(&group)),
+                                pending::PendingPermission::new(Arc::clone(&group), ev.fd),
                                 unix_secs(),
                             );
                         match outcome {

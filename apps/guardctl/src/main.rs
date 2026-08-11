@@ -13,10 +13,11 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use guard_client::transport::IpcClient;
 use guard_ipc::{
     Request, RequestOp, Response, ResponseBody, StatusInfo, MAX_REQUEST_BYTES, PROTOCOL_VERSION,
 };
-use platform_linux::ipc::IpcClient;
+use guard_platform::{ServiceController, ServiceOperation};
 use serde::Serialize;
 
 #[derive(Parser, Debug)]
@@ -40,6 +41,16 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Query platform service health for the desktop client.
+    #[command(name = "service-status", hide = true)]
+    ServiceStatus,
+    /// Control the unprivileged notification presenter through the selected
+    /// platform service adapter.
+    #[command(name = "notification-service", hide = true)]
+    NotificationService {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
     /// Show daemon status (enforcement active, counts, peer uid).
     Status,
     /// List protected resources (files and trees).
@@ -133,7 +144,7 @@ enum PrivilegedAction {
     ApplyConfig,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 enum ServiceAction {
     Start,
     Stop,
@@ -263,6 +274,12 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
     if let Command::Privileged { action } = &cli.command {
         return run_privileged(action);
     }
+    if matches!(&cli.command, Command::ServiceStatus) {
+        return run_service_status();
+    }
+    if let Command::NotificationService { action } = &cli.command {
+        return run_notification_service(action);
+    }
     // `ssh suggest` is a pure client-side glob (no daemon connection needed).
     if let Command::Ssh {
         action: SshAction::Suggest { dir },
@@ -369,6 +386,9 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
             action: ConfigAction::Check,
         } => RequestOp::ConfigCheck,
         Command::Privileged { .. } => unreachable!("privileged helper handled before IPC dispatch"),
+        Command::ServiceStatus | Command::NotificationService { .. } => {
+            unreachable!("service commands handled before IPC dispatch")
+        }
     };
 
     let req = Request {
@@ -432,6 +452,22 @@ fn run_privileged(action: &PrivilegedAction) -> anyhow::Result<()> {
     }
 }
 
+fn run_service_status() -> anyhow::Result<()> {
+    let controller = platform_linux::service::LinuxServiceController;
+    let status = controller.status()?;
+    println!("{}", serde_json::to_string(&status)?);
+    Ok(())
+}
+
+fn run_notification_service(action: &ServiceAction) -> anyhow::Result<()> {
+    let operation = match action {
+        ServiceAction::Start => ServiceOperation::Start,
+        ServiceAction::Stop => ServiceOperation::Stop,
+        ServiceAction::Restart => ServiceOperation::Restart,
+    };
+    platform_linux::service::LinuxServiceController::apply_notifications(operation)
+}
+
 const MAX_CONFIG_STDIN: usize = 256 * 1024;
 const ACTIVE_CONFIG: &str = "/etc/guardd/config.json";
 
@@ -481,13 +517,13 @@ fn apply_config_transactionally() -> anyhow::Result<()> {
 
 fn validate_candidate_bytes(
     bytes: &[u8],
-) -> anyhow::Result<platform_linux::config::EnforcementConfig> {
+) -> anyhow::Result<guard_platform::config::EnforcementConfig> {
     anyhow::ensure!(
         bytes.len() <= MAX_CONFIG_STDIN,
         "configuration input exceeds {} bytes",
         MAX_CONFIG_STDIN
     );
-    let cfg: platform_linux::config::EnforcementConfig = serde_json::from_slice(bytes)
+    let cfg: guard_platform::config::EnforcementConfig = serde_json::from_slice(bytes)
         .map_err(|e| anyhow::anyhow!("malformed configuration: {e}"))?;
     cfg.validate()?;
     Ok(cfg)

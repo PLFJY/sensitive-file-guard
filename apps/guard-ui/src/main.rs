@@ -30,7 +30,7 @@ enum SourceOrigin {
 
 #[derive(Clone)]
 struct BrowserSource {
-    config: platform_linux::config::BrowserEnrollmentConfig,
+    config: guard_platform::config::BrowserEnrollmentConfig,
     origin: SourceOrigin,
 }
 
@@ -96,7 +96,7 @@ fn ssh_key_subtitle(active: bool, configured: bool) -> &'static str {
 
 #[derive(Clone)]
 struct UiState {
-    candidate: Rc<RefCell<Option<platform_linux::config::EnforcementConfig>>>,
+    candidate: Rc<RefCell<Option<guard_platform::config::EnforcementConfig>>>,
     status: gtk::Label,
     detail: gtk::Label,
     apply: gtk::Button,
@@ -292,9 +292,9 @@ fn protection_page(state: &UiState) -> gtk::Box {
     mode.connect_changed(move |m| {
         if let Some(cfg) = candidate.borrow_mut().as_mut() {
             cfg.enforcement_mode = if m.active_id().as_deref() == Some("strict-filesystem") {
-                platform_linux::config::EnforcementMode::StrictFilesystem
+                guard_platform::config::EnforcementMode::StrictFilesystem
             } else {
-                platform_linux::config::EnforcementMode::Conservative
+                guard_platform::config::EnforcementMode::Conservative
             };
             apply.set_sensitive(true);
         }
@@ -454,10 +454,10 @@ fn load_configuration(state: &UiState) {
 /// browser data.
 fn configuration_from_daemon(
     info: guard_ipc::ConfigurationInfo,
-) -> Option<platform_linux::config::EnforcementConfig> {
+) -> Option<guard_platform::config::EnforcementConfig> {
     let enforcement_mode = match info.enforcement_mode.as_str() {
-        "strict-filesystem" => platform_linux::config::EnforcementMode::StrictFilesystem,
-        "conservative" => platform_linux::config::EnforcementMode::Conservative,
+        "strict-filesystem" => guard_platform::config::EnforcementMode::StrictFilesystem,
+        "conservative" => guard_platform::config::EnforcementMode::Conservative,
         _ => return None,
     };
     let mut browsers = Vec::with_capacity(info.browsers.len());
@@ -468,7 +468,7 @@ fn configuration_from_daemon(
             "Zen" | "zen" => guard_core::BrowserFamily::Zen,
             _ => return None,
         };
-        browsers.push(platform_linux::config::BrowserEnrollmentConfig {
+        browsers.push(guard_platform::config::BrowserEnrollmentConfig {
             id: browser.id,
             family,
             profile_root: PathBuf::from(browser.profile_root),
@@ -476,7 +476,7 @@ fn configuration_from_daemon(
             exe_paths: browser.exe_paths.into_iter().map(PathBuf::from).collect(),
         });
     }
-    Some(platform_linux::config::EnforcementConfig {
+    Some(guard_platform::config::EnforcementConfig {
         enforcement_mode,
         browsers,
         enrolled_exes: info.enrolled_exes.into_iter().map(PathBuf::from).collect(),
@@ -522,7 +522,7 @@ fn refresh_browser_sources(state: &UiState) {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/nonexistent"));
-    let discovered = platform_linux::config::discover_native_browsers(&home);
+    let discovered = discover_native_browsers(&home);
     let discovered = discovered
         .browsers
         .into_iter()
@@ -622,7 +622,33 @@ fn refresh_ssh_sources(state: &UiState) {
     *state.ssh_sources.borrow_mut() = sources;
 }
 
-fn browser_source_is_present(browser: &platform_linux::config::BrowserEnrollmentConfig) -> bool {
+/// Browser layouts belong to the selected platform helper.  The GTK client
+/// consumes the portable discovery DTO and therefore does not link the Linux
+/// implementation crate merely to render policy sources.
+fn discover_native_browsers(home: &std::path::Path) -> guard_platform::config::BrowserDiscovery {
+    let output = Command::new("guardctl")
+        .args(["browser", "discover", "--home"])
+        .arg(home)
+        .output();
+    output
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| serde_json::from_slice(&output.stdout).ok())
+        .unwrap_or_else(|| guard_platform::config::BrowserDiscovery {
+            browsers: Vec::new(),
+            unsupported_sandboxed: Vec::new(),
+        })
+}
+
+fn browser_family_name(family: guard_core::BrowserFamily) -> &'static str {
+    match family {
+        guard_core::BrowserFamily::Firefox => "Firefox",
+        guard_core::BrowserFamily::Zen => "Zen",
+        guard_core::BrowserFamily::Chromium => "Chromium",
+    }
+}
+
+fn browser_source_is_present(browser: &guard_platform::config::BrowserEnrollmentConfig) -> bool {
     if !browser.profile_root.is_dir() {
         return false;
     }
@@ -638,9 +664,9 @@ fn browser_source_is_present(browser: &platform_linux::config::BrowserEnrollment
 }
 
 fn browser_suggestion_to_enrollment(
-    suggestion: platform_linux::config::BrowserSuggestion,
-) -> platform_linux::config::BrowserEnrollmentConfig {
-    platform_linux::config::BrowserEnrollmentConfig {
+    suggestion: guard_platform::config::BrowserSuggestion,
+) -> guard_platform::config::BrowserEnrollmentConfig {
+    guard_platform::config::BrowserEnrollmentConfig {
         id: suggestion.id,
         family: suggestion.family,
         profile_root: suggestion.profile_root,
@@ -650,22 +676,22 @@ fn browser_suggestion_to_enrollment(
 }
 
 fn same_browser_source(
-    left: &platform_linux::config::BrowserEnrollmentConfig,
-    right: &platform_linux::config::BrowserEnrollmentConfig,
+    left: &guard_platform::config::BrowserEnrollmentConfig,
+    right: &guard_platform::config::BrowserEnrollmentConfig,
 ) -> bool {
     left.id == right.id && left.profile_root == right.profile_root
 }
 
 fn same_native_browser(
-    left: &platform_linux::config::BrowserEnrollmentConfig,
-    right: &platform_linux::config::BrowserEnrollmentConfig,
+    left: &guard_platform::config::BrowserEnrollmentConfig,
+    right: &guard_platform::config::BrowserEnrollmentConfig,
 ) -> bool {
     same_browser_source(left, right)
         && left.family == right.family
         && left.exe_paths == right.exe_paths
 }
 
-fn render_objects(state: &UiState, cfg: &platform_linux::config::EnforcementConfig) {
+fn render_objects(state: &UiState, cfg: &guard_platform::config::EnforcementConfig) {
     while let Some(child) = state.browsers.first_child() {
         state.browsers.remove(&child);
     }
@@ -679,7 +705,7 @@ fn render_objects(state: &UiState, cfg: &platform_linux::config::EnforcementConf
         row.set_title(&browser_display_name(&browser.id));
         row.set_subtitle(&format!(
             "{} · {} · {}",
-            platform_linux::config::family_name(browser.family),
+            browser_family_name(browser.family),
             browser.profile_root.display(),
             if enrolled {
                 "Configured"
@@ -932,7 +958,7 @@ fn custom_browser_from_entries(
     family: &gtk::ComboBoxText,
     profile: &gtk::Entry,
     executable: &gtk::Entry,
-) -> Result<platform_linux::config::BrowserEnrollmentConfig, String> {
+) -> Result<guard_platform::config::BrowserEnrollmentConfig, String> {
     use std::os::unix::fs::PermissionsExt;
 
     let id = id.text().trim().to_owned();
@@ -956,7 +982,7 @@ fn custom_browser_from_entries(
         Some("zen") => guard_core::resource::BrowserFamily::Zen,
         _ => guard_core::resource::BrowserFamily::Chromium,
     };
-    Ok(platform_linux::config::BrowserEnrollmentConfig {
+    Ok(guard_platform::config::BrowserEnrollmentConfig {
         id,
         family: browser_family,
         profile_root,
@@ -1018,11 +1044,14 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow) {
                 })
                 .collect::<Vec<_>>();
             let pending_migrations = guard_client::migration_pending(&socket).unwrap_or_default();
-            let service_active = Command::new("systemctl").args(["is-active", "--quiet", "guardd.service"]).status().map(|s| s.success()).unwrap_or(false);
-            let notification_active = Command::new("systemctl")
-                .args(["--user", "is-active", "--quiet", "guard-notify.service"])
-                .status()
-                .map(|s| s.success())
+            let service_status = guard_client::service::status().ok();
+            let service_active = service_status
+                .as_ref()
+                .map(|status| status.protection_active)
+                .unwrap_or(false);
+            let notification_active = service_status
+                .as_ref()
+                .and_then(|status| status.notification_active)
                 .unwrap_or(false);
             (service_active, notification_active, daemon, configuration, active_ssh_keys, recent_events, pending_incidents, pending_migrations)
         }).await;
@@ -1040,7 +1069,7 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow) {
                 daemon.as_ref(),
             );
             status.set_text(health_label(health));
-            // The switch represents the actual systemd service bundle.  Keep it
+            // The switch represents the actual protection service bundle. Keep it
             // synchronized with out-of-band `systemctl`/`guardctl` changes,
             // while suppressing its callback so a refresh never starts a new
             // privileged operation.
@@ -1351,19 +1380,23 @@ fn spawn_protection_bundle(verb: String, switch: adw::SwitchRow, syncing: Rc<Cel
 }
 
 fn run_main_service(verb: &str) -> bool {
-    Command::new("pkexec")
-        .args(["guardctl", "privileged", "service", verb])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    let operation = match verb {
+        "start" => guard_platform::ServiceOperation::Start,
+        "stop" => guard_platform::ServiceOperation::Stop,
+        "restart" => guard_platform::ServiceOperation::Restart,
+        _ => return false,
+    };
+    guard_client::service::apply(operation).is_ok()
 }
 
 fn run_notification_service(verb: &str) -> bool {
-    Command::new("systemctl")
-        .args(["--user", verb, "guard-notify.service"])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    let operation = match verb {
+        "start" => guard_platform::ServiceOperation::Start,
+        "stop" => guard_platform::ServiceOperation::Stop,
+        "restart" => guard_platform::ServiceOperation::Restart,
+        _ => return false,
+    };
+    guard_client::service::apply_notifications(operation).is_ok()
 }
 
 fn run_protection_bundle(verb: &str) -> bool {
@@ -1449,7 +1482,7 @@ mod tests {
         .expect("supported daemon snapshot");
         assert_eq!(
             config.enforcement_mode,
-            platform_linux::config::EnforcementMode::StrictFilesystem
+            guard_platform::config::EnforcementMode::StrictFilesystem
         );
         assert_eq!(
             config.ssh_keys,

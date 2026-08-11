@@ -4,17 +4,23 @@
 //! This exercises the full framed Unix-socket round-trip on the client side
 //! (serialize `MigrationAuthorize` -> send -> read -> parse `MigrationAuthorized`,
 //! then `LeasesRevoke` -> `LeaseRevoked`) without needing the real privileged
-//! daemon or a terminal. The mock server uses `platform_linux::ipc` transport
-//! and returns canned responses, proving the TUI client sends the right ops and
-//! parses the right bodies.
+//! daemon or a terminal. The mock server uses the client crate's framing test
+//! helpers and returns canned responses, proving the TUI client sends the right
+//! ops and parses the right bodies.
 
+use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use guard_client::transport::{read_frame, write_frame};
 use guard_ipc::{MigrationAuthorizedInfo, Request, RequestOp, Response, ResponseBody};
-use platform_linux::ipc::{read_request, write_response, IpcServer};
+
+fn bind(path: &std::path::Path) -> UnixListener {
+    let _ = std::fs::remove_file(path);
+    UnixListener::bind(path).unwrap()
+}
 
 /// Run a mock IPC server that handles exactly `expected` requests, returning a
 /// canned `MigrationAuthorized` for `MigrationAuthorize` and `LeaseRevoked` for
@@ -25,16 +31,13 @@ fn run_mock_server(
     seen: Arc<std::sync::Mutex<Vec<RequestOp>>>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        let server = match IpcServer::bind(&path) {
-            Ok(s) => s,
-            Err(e) => panic!("mock server bind: {e}"),
-        };
+        let server = bind(&path);
         for _ in 0..expected {
-            let (mut stream, _creds) = match server.accept() {
+            let (mut stream, _addr) = match server.accept() {
                 Ok(c) => c,
                 Err(_) => continue,
             };
-            let req_bytes = match read_request(&mut stream, 64 * 1024) {
+            let req_bytes = match read_frame(&mut stream, 64 * 1024) {
                 Ok(b) => b,
                 Err(_) => continue,
             };
@@ -45,7 +48,7 @@ fn run_mock_server(
             seen.lock().unwrap().push(req.op.clone());
             let resp = mock_response(&req.op);
             let resp_bytes = serde_json::to_vec(&resp).unwrap();
-            let _ = write_response(&mut stream, &resp_bytes);
+            let _ = write_frame(&mut stream, &resp_bytes);
         }
     })
 }
@@ -143,9 +146,9 @@ fn tui_client_status_round_trip() {
     let (sock, _t) = tmp_socket();
     let seen: Arc<std::sync::Mutex<Vec<RequestOp>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
     let handle = thread::spawn(move || {
-        let server = IpcServer::bind(&sock).unwrap();
+        let server = bind(&sock);
         let (mut stream, _) = server.accept().unwrap();
-        let req_bytes = read_request(&mut stream, 64 * 1024).unwrap();
+        let req_bytes = read_frame(&mut stream, 64 * 1024).unwrap();
         let req: Request = serde_json::from_slice(&req_bytes).unwrap();
         seen.lock().unwrap().push(req.op.clone());
         let resp = Response::ok(ResponseBody::Status(guard_ipc::StatusInfo {
@@ -185,7 +188,7 @@ fn tui_client_status_round_trip() {
             ssh_behavior_backend_failures: 0,
         }));
         let resp_bytes = serde_json::to_vec(&resp).unwrap();
-        write_response(&mut stream, &resp_bytes).unwrap();
+        write_frame(&mut stream, &resp_bytes).unwrap();
     });
     wait_for_socket(&_t.path().join("guardd.sock"));
     let s = guard_tui::client::status(&_t.path().join("guardd.sock")).expect("status round-trip");

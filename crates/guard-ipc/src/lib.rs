@@ -1,7 +1,7 @@
 //! Versioned JSON IPC protocol between `guardd` and `guardctl`/`guard-tui`.
 //!
 //! The protocol is a single `Request` -> single `Response` exchange over a
-//! length-prefixed frame (see `platform_linux::ipc`). It is deliberately tiny:
+//! length-prefixed local frame supplied by the selected transport. It is deliberately tiny:
 //! a versioned envelope, a tagged operation enum, and plain serializable "info"
 //! view structs. No trust is inferred from the JSON — peer identity comes from
 //! kernel `SO_PEERCRED` on the server side; a `uid` field in JSON is never
@@ -94,8 +94,8 @@ pub enum RequestOp {
     },
     /// Enroll a single SSH private key at runtime (Phase 10). The daemon
     /// canonicalizes + stats `path`, refuses `.pub` / reserved names, enrolls
-    /// it as a `SshPrivateKey` resource, and adds a narrow fanotify
-    /// `FAN_ACCESS_PERM` mark so actual read attempts are intercepted. `path` is the only argument;
+    /// it as a `SshPrivateKey` resource, and asks the selected access mediator
+    /// to intercept read attempts. `path` is the only argument;
     /// no key contents are ever sent.
     SshProtect {
         path: String,
@@ -106,8 +106,8 @@ pub enum RequestOp {
     /// `ssh-add` process invocation.
     ///
     /// **Security (hardening pass 1):** the client sends ONLY the PID of the
-    /// stopped `ssh-add` child. The daemon reads `/proc/<pid>/exe`, stats the
-    /// binary (dev + ino), and reads `/proc/<pid>/stat` (start_time) itself —
+    /// stopped `ssh-add` child. The daemon resolves the process identity from
+    /// the platform backend itself —
     /// it does NOT trust client-declared identity fields. This closes the
     /// authorization bypass where a malicious client could declare any identity.
     ///
@@ -115,7 +115,7 @@ pub enum RequestOp {
     SshLoadAuthorize {
         path: String,
         /// PID of the stopped `ssh-add` child. The daemon verifies this PID's
-        /// identity from `/proc` before creating the lease.
+        /// identity before creating the lease.
         ssh_add_pid: u32,
     },
 }
@@ -314,7 +314,7 @@ pub struct MigrationAuthorizedInfo {
     pub target_exe: String,
     pub uid: u32,
     pub expires_at: u64,
-    /// Always false on the fanotify backend: its event fd flags do not expose
+    /// False when the selected access backend cannot expose
     /// the triggering process's original open mode.
     pub read_only_guaranteed: bool,
 }
@@ -342,10 +342,10 @@ pub struct StatusInfo {
     pub enforcement_active: bool,
     /// Human-readable enforcement state (Phase 14): `"ACTIVE"`,
     /// `"DEGRADED"`, or `"NOT_ENFORCING"`.
-    /// - `ACTIVE`: fanotify enforcement is running normally.
+    /// - `ACTIVE`: access enforcement is running normally.
     /// - `DEGRADED`: enforcement is running but audit events were dropped,
-    ///   topology/classification failed, or the fanotify queue overflowed.
-    /// - `NOT_ENFORCING`: the daemon is running without a fanotify group
+    ///   topology/classification failed, or the authorization queue overflowed.
+    /// - `NOT_ENFORCING`: the daemon is running without an access mediator
     ///   (e.g. config-check mode, or the group failed to initialize).
     #[serde(default)]
     pub status: String,
