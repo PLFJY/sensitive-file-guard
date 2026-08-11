@@ -100,13 +100,6 @@ enum Command {
         #[command(subcommand)]
         action: LeasesAction,
     },
-    /// Inspect or human-authorize an SSH behavioral incident. Resolution is
-    /// always mediated by polkit; this command has no bypass flag.
-    #[command(name = "incidents")]
-    Incidents {
-        #[command(subcommand)]
-        action: IncidentsAction,
-    },
     /// Authorize a cross-browser migration lease (Phase 08).
     #[command(name = "migration")]
     Migration {
@@ -181,15 +174,6 @@ enum LeasesAction {
     List,
     /// Revoke a lease by ID.
     Revoke { lease_id: String },
-}
-
-#[derive(Subcommand, Debug)]
-enum IncidentsAction {
-    List,
-    Show { id: String },
-    Allow { id: String },
-    Block { id: String },
-    BlockAndQuarantine { id: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -332,30 +316,6 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
             action: LeasesAction::Revoke { lease_id },
         } => RequestOp::LeasesRevoke {
             lease_id: lease_id.clone(),
-        },
-        Command::Incidents {
-            action: IncidentsAction::List,
-        } => RequestOp::IncidentsList,
-        Command::Incidents {
-            action: IncidentsAction::Show { id },
-        } => RequestOp::IncidentGet { id: id.clone() },
-        Command::Incidents {
-            action: IncidentsAction::Allow { id },
-        } => RequestOp::IncidentResolve {
-            id: id.clone(),
-            action: guard_ipc::IncidentResolutionAction::Allow,
-        },
-        Command::Incidents {
-            action: IncidentsAction::Block { id },
-        } => RequestOp::IncidentResolve {
-            id: id.clone(),
-            action: guard_ipc::IncidentResolutionAction::Block,
-        },
-        Command::Incidents {
-            action: IncidentsAction::BlockAndQuarantine { id },
-        } => RequestOp::IncidentResolve {
-            id: id.clone(),
-            action: guard_ipc::IncidentResolutionAction::BlockAndQuarantine,
         },
         Command::Migration {
             action:
@@ -657,7 +617,6 @@ struct SetupConfig {
     browsers: Vec<SetupBrowserConfig>,
     enrolled_exes: Vec<String>,
     ssh_keys: Vec<String>,
-    ssh_behavior_window_secs: u64,
 }
 
 fn run_browser_discover(home: Option<&Path>) -> anyhow::Result<()> {
@@ -772,7 +731,6 @@ fn setup_config(discovery: &BrowserDiscovery) -> anyhow::Result<SetupConfig> {
         browsers,
         enrolled_exes: Vec::new(),
         ssh_keys: Vec::new(),
-        ssh_behavior_window_secs: guard_core::DEFAULT_SSH_BEHAVIOR_WINDOW_SECS,
     })
 }
 
@@ -983,9 +941,6 @@ fn print_human(resp: &Response) {
         Some(ResponseBody::Events(es)) => print_events(es),
         Some(ResponseBody::Explain(e)) => print_explain(e),
         Some(ResponseBody::Leases(ls)) => print_leases(ls),
-        Some(ResponseBody::Incidents(incidents)) => print_incidents(incidents),
-        Some(ResponseBody::Incident(incident)) => print_incident(incident),
-        Some(ResponseBody::IncidentResolved(incident)) => print_incident(incident),
         Some(ResponseBody::LeaseRevoked { lease_id, found }) => {
             if *found {
                 println!("Lease {lease_id} revoked.");
@@ -1020,6 +975,21 @@ fn print_human(resp: &Response) {
         Some(ResponseBody::MigrationResolved(result)) => {
             println!("Migration resolution: {result:?}")
         }
+        Some(ResponseBody::SshPending(items)) => {
+            for item in items {
+                println!(
+                    "{}: {} reads {} (pid {})",
+                    item.id, item.process_exe, item.key_path, item.pid
+                );
+            }
+        }
+        Some(ResponseBody::SshPendingItem(item)) => {
+            println!(
+                "{}: {} reads {} (pid {})",
+                item.id, item.process_exe, item.key_path, item.pid
+            );
+        }
+        Some(ResponseBody::SshReadResolved(result)) => println!("SSH read resolution: {result:?}"),
         Some(ResponseBody::SshProtected(s)) => print_ssh_protected(s),
         Some(ResponseBody::SshLoadAuthorized(s)) => print_ssh_load_authorized(s),
         None => println!("(no response body)"),
@@ -1049,32 +1019,10 @@ fn print_status(s: &StatusInfo) {
     println!("  strict_alias_matches: {}", s.strict_alias_matches);
     println!("  topology_degraded: {}", s.topology_degraded);
     println!("  audit_dropped   : {}", s.audit_dropped);
-    println!("  ssh_behavior_backend: {}", s.ssh_behavior_status);
-    if let Some(detail) = &s.ssh_behavior_detail {
-        println!("  ssh_behavior_detail: {detail}");
-    }
-    println!(
-        "  ssh_behavior_active_incidents: {}",
-        s.ssh_behavior_active_incidents
-    );
-    println!(
-        "  ssh_behavior_pending_decisions: {}",
-        s.ssh_behavior_pending_decisions
-    );
-    println!("  ssh_behavior_key_reads: {}", s.ssh_behavior_key_reads);
-    println!(
-        "  ssh_behavior_network_blocks: {}",
-        s.ssh_behavior_network_blocks
-    );
-    println!("  ssh_behavior_user_allows: {}", s.ssh_behavior_user_allows);
-    println!("  ssh_behavior_quarantines: {}", s.ssh_behavior_quarantines);
-    println!(
-        "  ssh_behavior_backend_failures: {}",
-        s.ssh_behavior_backend_failures
-    );
     println!("  peer_uid        : {}", s.peer_uid);
 }
 
+#[cfg(any())]
 fn print_incidents(incidents: &[guard_ipc::SshIncidentInfo]) {
     if incidents.is_empty() {
         println!("(no SSH behavioral incidents)");
@@ -1096,6 +1044,7 @@ fn print_incidents(incidents: &[guard_ipc::SshIncidentInfo]) {
     }
 }
 
+#[cfg(any())]
 fn print_incident(incident: &guard_ipc::SshIncidentInfo) {
     println!("incident: {}", incident.id);
     println!("  state: {}", incident.state);
@@ -1879,7 +1828,7 @@ mod tests {
         assert_eq!(value["browsers"][0]["family"], "firefox");
         assert!(value["browsers"][0].get("owner_uid").is_none());
         assert_eq!(value["ssh_keys"], serde_json::json!([]));
-        assert_eq!(value["ssh_behavior_window_secs"], 10);
+        assert!(value.get("ssh_behavior_window_secs").is_none());
     }
 
     #[test]

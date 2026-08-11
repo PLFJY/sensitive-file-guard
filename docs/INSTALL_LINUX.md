@@ -20,37 +20,20 @@ Never use a real Cookies database, browser secret, or SSH private key for a test
 
 | Distribution | Build dependencies | Runtime dependencies |
 | --- | --- | --- |
-| Arch | `sudo pacman -S --needed base-devel cargo rust git clang gtk4 libadwaita` | `sudo pacman -S --needed libbpf systemd polkit`; optional `libnotify openssh` |
-| Debian | `sudo apt install build-essential cargo rustc git clang pkg-config libbpf-dev libgtk-4-dev libadwaita-1-dev` | `sudo apt install libbpf1 systemd polkitd`; optional `libnotify-bin openssh-client` |
-| Ubuntu | `sudo apt install build-essential cargo rustc git clang pkg-config libbpf-dev libgtk-4-dev libadwaita-1-dev` | `sudo apt install libbpf1 systemd polkitd`; optional `libnotify-bin openssh-client` |
-| Fedora | `sudo dnf install gcc make cargo rust git clang libbpf-devel gtk4-devel libadwaita-devel` | `sudo dnf install libbpf systemd polkit`; optional `libnotify openssh-clients` |
+| Arch | `sudo pacman -S --needed base-devel cargo rust git gtk4 libadwaita` | `sudo pacman -S --needed systemd polkit`; optional `libnotify openssh` |
+| Debian | `sudo apt install build-essential cargo rustc git pkg-config libgtk-4-dev libadwaita-1-dev` | `sudo apt install systemd polkitd`; optional `libnotify-bin openssh-client` |
+| Ubuntu | `sudo apt install build-essential cargo rustc git pkg-config libgtk-4-dev libadwaita-1-dev` | `sudo apt install systemd polkitd`; optional `libnotify-bin openssh-client` |
+| Fedora | `sudo dnf install gcc make cargo rust git gtk4-devel libadwaita-devel` | `sudo dnf install systemd polkit`; optional `libnotify openssh-clients` |
 
 Current official metadata confirms Debian `polkitd` provides `pkcheck`; Arch
 and Fedora use `polkit`; Arch `libnotify` provides `notify-send`.
 
-### SSH behavioral backend compatibility
+### SSH private-key confirmation
 
-The [canonical SSH behavior model](SSH_BEHAVIOR_MODEL.md) uses an attached BPF
-LSM `socket_sendmsg` hook to block
-an actual outbound send from the reader's process tree, including a socket
-opened before the key was read. It needs an active `bpf` entry in
-`/sys/kernel/security/lsm`, kernel BTF at `/sys/kernel/btf/vmlinux`, and the
-privilege/runtime loader required to attach the program. The package needs
-libbpf at runtime and clang while building the embedded object. Protected-key
-reads are always allowed and reported. If loading or attachment fails, status
-reports `UNAVAILABLE`/`DEGRADED` and immediate external sends cannot reliably
-be blocked; key access is never denied as compensation.
-
-The GTK overview intentionally shows a short actionable message when this
-backend is unavailable; full libbpf/verifier diagnostics remain in
-`journalctl -u guardd` rather than being rendered into the user interface.
-
-The `guardd` system unit bounds `CAP_BPF` and `CAP_PERFMON` in addition to the
-existing fanotify/process capabilities. These are the minimum capabilities
-used by libbpf for the BPF-LSM and scheduler tracepoint links; the unit does
-not use a broad privileged capability set. `guardctl status` includes a build
-identifier (`version` such as `0.1.0+<commit>`) so an acceptance run can verify
-that the running daemon is the installed build.
+An ordinary SSH private-key read is held until the desktop user chooses Allow
+or Block. Allow requires the non-cached Polkit password check and creates a
+ten-minute in-memory lease for only that verified process tree and key.
+`guardctl ssh load` keeps its one-shot `ssh-add` / `ssh-agent` exception.
 
 `guard-ui` is an unprivileged GTK 4/libadwaita presentation and control client;
 it is not auto-started and never replaces `guardctl` for automation.
@@ -127,7 +110,7 @@ after deliberately selecting an existing suggestion; strict requires each
 configured key to exist.
 
 ```json
-{"enforcement_mode":"strict-filesystem","browsers":[{"id":"firefox","family":"Firefox","profile_root":"/home/alice/.mozilla/firefox","exe_paths":["/usr/lib/firefox/firefox"]}],"enrolled_exes":[],"ssh_keys":[],"ssh_behavior_window_secs":10}
+{"enforcement_mode":"strict-filesystem","browsers":[{"id":"firefox","family":"Firefox","profile_root":"/home/alice/.mozilla/firefox","exe_paths":["/usr/lib/firefox/firefox"]}],"enrolled_exes":[],"ssh_keys":[]}
 ```
 
 | Native form | Profile root | Final executable candidates |

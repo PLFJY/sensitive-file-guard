@@ -27,40 +27,34 @@
 use std::collections::HashMap;
 use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use guard_audit::AuditRecord;
 use guard_browser::{CustomProfile, ProtectedResourceRegistry};
 use guard_core::identity::{ExeIdentity, ProcessIdentity};
-use guard_core::lease::{LeaseId, LeaseSet, MigrationAccessLease, MigrationLeaseState};
+use guard_core::lease::{
+    LeaseId, LeaseSet, MigrationAccessLease, MigrationLeaseState, SshReadAccessLease,
+};
 use guard_core::policy::{
     evaluate, AccessEvent, AccessOperation, Decision, DenyReason, MigrationCandidate,
 };
 #[cfg(test)]
 use guard_core::resource::BrowserFamily;
-use guard_core::resource::{
-    BrowserId, ProfileId, ProtectedResource, ProtectedResourceId, ProtectedResourceKind,
-};
+use guard_core::resource::{BrowserId, ProfileId, ProtectedResource, ProtectedResourceKind};
 pub use guard_platform::config::{BrowserEnrollmentConfig, EnforcementConfig, EnforcementMode};
 use platform_linux::enrollment::EnrollmentStore;
 use platform_linux::fanotify;
 use platform_linux::identity as linux_identity;
-
-/// Live dependencies required for an ordinary raw SSH key read to become a
-/// short-lived, kernel-enforced behavioral exposure.
-pub struct SshBehaviorGuard<'a> {
-    pub backend: Option<&'a Mutex<platform_linux::ssh_behavior::SshBehaviorBackend>>,
-    pub backend_status: &'a Mutex<platform_linux::ssh_behavior::SshBehaviorBackendStatus>,
-    pub incidents: &'a Mutex<guard_core::ExposureTracker>,
-    pub window_secs: u64,
-}
 
 /// Default migration lease duration (10 minutes), per `08_MIGRATION_LEASE.md`.
 pub const DEFAULT_MIGRATION_DURATION_SECS: u64 = 600;
 /// Maximum migration lease duration (1 hour). Longer requests are capped so a
 /// migration grant can never become de-facto permanent trust.
 pub const MAX_MIGRATION_DURATION_SECS: u64 = 3600;
+/// Ordinary SSH key-read authorization follows browser import leases: the
+/// verified reader tree receives a short, memory-only lease for one key.
+pub const DEFAULT_SSH_READ_DURATION_SECS: u64 = 600;
 /// Default SSH load lease duration (30 seconds), per `11_SSH_AGENT_LOAD_FLOW.md`.
 /// The lease is one-shot and also revoked on process exit; the timeout is a
 /// safety net in case `guardctl` crashes before sending the complete signal.
@@ -84,6 +78,16 @@ pub struct MigrationPendingDetails {
     /// runs in short-lived utility processes; binding/deduplicating at this
     /// root gives one prompt for the browser instance without trusting an
     /// arbitrary descendant with a different executable identity.
+    pub target_root: guard_core::ProcessStableId,
+}
+
+/// Daemon-owned facts for one ordinary SSH private-key read waiting on user
+/// confirmation. The root is the reader itself so a shell's unrelated sibling
+/// commands never inherit the authorization.
+#[derive(Debug, Clone)]
+pub struct SshPendingDetails {
+    pub resource: ProtectedResource,
+    pub target: ProcessIdentity,
     pub target_root: guard_core::ProcessStableId,
 }
 
@@ -238,7 +242,7 @@ impl EnforcementEngine {
     }
 
     /// Revoke a lease by its id string. Returns `false` if no lease with that
-    /// id exists. Migration and SSH leases are both searched.
+    /// id exists. Migration and both SSH lease kinds are searched.
     pub fn revoke_lease(&mut self, id_str: &str) -> bool {
         let id = match id_str.parse::<u64>() {
             Ok(n) => LeaseId(n),
@@ -252,6 +256,12 @@ impl EnforcementEngine {
             }
         }
         for l in &mut self.leases.ssh {
+            if l.id == id {
+                l.revoked = true;
+                found = true;
+            }
+        }
+        for l in &mut self.leases.ssh_read {
             if l.id == id {
                 l.revoked = true;
                 found = true;
@@ -396,6 +406,64 @@ impl EnforcementEngine {
     pub fn migration_audit_record(
         &self,
         pending: &MigrationPendingDetails,
+        event_code: &str,
+        decision: Decision,
+        detail: &str,
+    ) -> AuditRecord {
+        let mut record =
+            build_audit_record(&pending.resource, Some(&pending.target), decision, detail);
+        record.event_code = event_code.to_owned();
+        record
+    }
+
+    /// Capture the actual protected key and reader identity before handing the
+    /// fanotify permission to the bounded SSH confirmation queue.
+    pub fn pending_ssh_details(&mut self, pid: i32, fd: RawFd) -> Option<SshPendingDetails> {
+        let resource = self.classify_fd(fd)?;
+        if resource.kind != ProtectedResourceKind::SshPrivateKey {
+            return None;
+        }
+        let (target, _) = self.resolve_process(pid)?;
+        (target.uid == resource.owner_uid).then(|| SshPendingDetails {
+            resource,
+            target_root: target.stable.clone(),
+            target,
+        })
+    }
+
+    /// Revalidate the original reader and create a memory-only lease scoped to
+    /// exactly that process tree and protected key.
+    pub fn approve_pending_ssh_read(
+        &mut self,
+        pending: &SshPendingDetails,
+    ) -> Result<(LeaseId, u64), String> {
+        self.identity_cache.remove(&pending.target.stable.pid);
+        let (current, _) = self
+            .resolve_process(pending.target.stable.pid as i32)
+            .ok_or_else(|| "SSH reader exited before confirmation".to_string())?;
+        if current.stable != pending.target.stable
+            || current.uid != pending.target.uid
+            || current.uid != pending.resource.owner_uid
+        {
+            return Err("SSH reader identity changed before confirmation".to_string());
+        }
+        self.next_lease_id = self.next_lease_id.saturating_add(1);
+        let id = LeaseId(self.next_lease_id);
+        let expires_at = now_secs().saturating_add(DEFAULT_SSH_READ_DURATION_SECS);
+        self.leases.ssh_read.push(SshReadAccessLease {
+            id,
+            resource: pending.resource.id.clone(),
+            uid: pending.target.uid,
+            root: pending.target_root.clone(),
+            expires_at,
+            revoked: false,
+        });
+        Ok((id, expires_at))
+    }
+
+    pub fn ssh_read_audit_record(
+        &self,
+        pending: &SshPendingDetails,
         event_code: &str,
         decision: Decision,
         detail: &str,
@@ -601,7 +669,7 @@ impl EnforcementEngine {
     /// so it can also record the audit event.
     #[cfg(test)]
     pub fn decide(&mut self, pid: i32, fd: RawFd) -> Decision {
-        self.decide_event_with_behavior(pid, fd, false, None).0
+        self.decide_event(pid, fd, false).0
     }
 
     /// Like `decide` but also returns an `AuditRecord` for persistence when the
@@ -614,46 +682,23 @@ impl EnforcementEngine {
     pub fn decide_with_context(&mut self, pid: i32, fd: RawFd) -> (Decision, Option<AuditRecord>) {
         // SSH-focused tests model the narrow FAN_ACCESS_PERM event. Browser
         // tests use `decide`, which models FAN_OPEN_PERM.
-        self.decide_event_with_behavior(pid, fd, true, None)
+        self.decide_event(pid, fd, true)
     }
 
-    /// Production entry carrying the fanotify event kind. A classification
-    /// race on the narrow SSH-only FAN_ACCESS_PERM path must still be allowed;
-    /// browser FAN_OPEN_PERM failures retain their fail-closed behavior.
-    pub fn decide_event_with_behavior(
+    /// Production entry carrying the fanotify event kind. Every protected SSH
+    /// read is now a fail-closed authorization boundary, just like browser
+    /// migration; classification failure cannot silently expose a key.
+    pub fn decide_event(
         &mut self,
         pid: i32,
         fd: RawFd,
         ssh_read_event: bool,
-        behavior: Option<&SshBehaviorGuard<'_>>,
     ) -> (Decision, Option<AuditRecord>) {
         let resource = match self.classify_fd(fd) {
             Some(r) => r,
-            None if ssh_read_event => {
-                self.unclassified += 1;
-                self.allowed += 1;
-                tracing::error!(pid, "SSH read classification failed; read remains allowed");
-                let unresolved = ProtectedResource {
-                    id: ProtectedResourceId("ssh:unclassified-access-event".into()),
-                    kind: ProtectedResourceKind::SshPrivateKey,
-                    owner_uid: 0,
-                    browser: None,
-                    profile: None,
-                    path: fanotify::fd_path(fd)
-                        .unwrap_or_else(|_| PathBuf::from("<unclassified-ssh-access>")),
-                };
-                let mut record = build_audit_record(
-                    &unresolved,
-                    None,
-                    Decision::Allow,
-                    "ssh_behavior_key_accessed;incident=untracked;monitoring=unavailable;classification=unresolved",
-                );
-                record.event_code = "ssh_behavior_key_accessed".into();
-                record.pid = pid.max(0) as u32;
-                return (Decision::Allow, Some(record));
-            }
             None => {
                 self.unclassified += 1;
+                self.denied += 1;
                 return (Decision::Deny(DenyReason::UnknownProcess), None);
             }
         };
@@ -664,35 +709,18 @@ impl EnforcementEngine {
             self.allowed += 1;
             return (Decision::Allow, None);
         }
-        self.decide_protected_with_behavior(pid, resource, classify_diag(fd), behavior)
+        self.decide_protected(pid, resource, classify_diag(fd))
     }
 
-    /// SSH access-permission events are always allowed. When possible the BPF
-    /// backend is armed before the caller sends FAN_ALLOW, but identity or
-    /// backend failure only degrades network observation; it never denies the
-    /// protected-key read. Browser authorization remains unchanged.
-    pub fn decide_protected_with_behavior(
+    pub fn decide_protected(
         &mut self,
         pid: i32,
         resource: ProtectedResource,
         classification: &'static str,
-        behavior: Option<&SshBehaviorGuard<'_>>,
     ) -> (Decision, Option<AuditRecord>) {
         let (process, resolve_diag) = match self.resolve_process(pid) {
             Some((id, diag)) => (id, diag),
             None => {
-                if resource.kind == ProtectedResourceKind::SshPrivateKey {
-                    self.allowed += 1;
-                    let mut record = build_audit_record(
-                        &resource,
-                        None,
-                        Decision::Allow,
-                        "ssh_behavior_key_accessed;incident=untracked;monitoring=unavailable;identity=unresolved",
-                    );
-                    record.event_code = "ssh_behavior_key_accessed".into();
-                    record.pid = pid.max(0) as u32;
-                    return (Decision::Allow, Some(record));
-                }
                 self.denied += 1;
                 let record = build_audit_record(
                     &resource,
@@ -705,6 +733,7 @@ impl EnforcementEngine {
         };
         let now = now_secs();
         self.refresh_migration_states(&resource, &process);
+        self.refresh_ssh_read_leases();
         let mut decision = evaluate(
             &AccessEvent {
                 resource: resource.clone(),
@@ -727,48 +756,15 @@ impl EnforcementEngine {
                         .flatten()
                         .map(PathBuf::from);
                     if observed.as_deref() != Some(expected.as_path()) {
-                        // The optional broker lease is not authority to deny a
-                        // raw read under the Phase 22.2 product contract.
-                        decision = Decision::Allow;
+                        decision = Decision::RequireSshKeyConfirmation;
                     }
                 }
             }
         }
-        let mut key_read_event = None;
-        if resource.kind == ProtectedResourceKind::SshPrivateKey {
-            // No policy/lease/backend condition can deny the read. A valid
-            // SshLoadLease remains visible as AllowByLease and is consumed
-            // below, but every other result becomes an ordinary allow.
-            if matches!(decision, Decision::Deny(_)) {
-                decision = Decision::Allow;
-            }
-            let diagnostic = if let Some(behavior) = behavior {
-                let incident = self.arm_ssh_behavior(&resource, &process, pid, behavior);
-                let monitoring = behavior
-                    .backend_status
-                    .lock()
-                    .expect("SSH behavior status mutex poisoned")
-                    .label();
-                format!(
-                    "ssh_behavior_key_accessed;incident={};tgid={};uid={};window_secs={};monitoring={}",
-                    incident.id,
-                    incident.root_tgid,
-                    incident.uid,
-                    behavior.window_secs,
-                    monitoring.to_ascii_lowercase()
-                )
-            } else {
-                "ssh_behavior_key_accessed;incident=untracked;monitoring=unavailable".into()
-            };
-            let mut event =
-                build_audit_record(&resource, Some(&process), decision.clone(), &diagnostic);
-            event.event_code = "ssh_behavior_key_accessed".into();
-            key_read_event = Some(event);
-        }
         match &decision {
             Decision::Allow | Decision::AllowByLease(_) => self.allowed += 1,
             Decision::Deny(_) => self.denied += 1,
-            Decision::RequireMigrationConfirmation(_) => {}
+            Decision::RequireMigrationConfirmation(_) | Decision::RequireSshKeyConfirmation => {}
         }
         // Phase 11: mark one-shot SSH load lease as used after a successful
         // allow. The lease binds to the exact ssh-add invocation; once it
@@ -787,9 +783,7 @@ impl EnforcementEngine {
                 self.ssh_agent_bindings.remove(id);
             }
         }
-        let record = if let Some(event) = key_read_event {
-            Some(event)
-        } else if should_record_decision(&decision) {
+        let record = if should_record_decision(&decision) {
             let backend_diag = format!(
                 "{};classify={};trust={:?}",
                 resolve_diag, classification, process.trust_tier
@@ -806,73 +800,18 @@ impl EnforcementEngine {
         (decision, record)
     }
 
-    fn arm_ssh_behavior(
-        &mut self,
-        resource: &ProtectedResource,
-        process: &ProcessIdentity,
-        pid: i32,
-        behavior: &SshBehaviorGuard<'_>,
-    ) -> guard_core::SshExposureIncident {
-        let tgid = linux_identity::read_tgid(pid).unwrap_or_else(|error| {
-            tracing::error!(pid, %error, "cannot resolve reader thread group; SSH read remains allowed");
-            if behavior.backend.is_some() {
-                *behavior
-                    .backend_status
-                    .lock()
-                    .expect("SSH behavior status mutex poisoned") =
-                    platform_linux::ssh_behavior::SshBehaviorBackendStatus::Degraded {
-                        reason: "A protected-key read could not be bound to a thread group. Key access remains allowed, but this exposure is not network-contained.".into(),
-                    };
+    /// A read lease must not survive its verified root. Keeping the revoked
+    /// entry until its natural expiry makes lease inspection/audit meaningful,
+    /// while the policy can no longer authorize a PID-reused process.
+    fn refresh_ssh_read_leases(&mut self) {
+        for lease in &mut self.leases.ssh_read {
+            if !lease.revoked
+                && linux_identity::read_start_time(lease.root.pid as i32).ok()
+                    != Some(lease.root.start_time)
+            {
+                lease.revoked = true;
             }
-            process.stable.pid
-        });
-        let now_ns = monotonic_ns();
-        let now_ms = now_ns / 1_000_000;
-        let quarantine_candidate = platform_linux::quarantine::candidate_for_process(process);
-        let (incident, _) = behavior
-            .incidents
-            .lock()
-            .expect("incident mutex poisoned")
-            .arm(
-                resource,
-                process,
-                quarantine_candidate,
-                tgid,
-                now_ms,
-                behavior.window_secs,
-            );
-        let Some(incident_id) = incident
-            .id
-            .strip_prefix("ssh-")
-            .and_then(|value| u64::from_str_radix(value, 16).ok())
-        else {
-            tracing::error!(incident_id = %incident.id, "invalid internal SSH incident identifier");
-            return incident;
-        };
-        let Some(backend) = behavior.backend else {
-            return incident;
-        };
-        if let Err(error) = backend
-            .lock()
-            .expect("SSH behavior backend mutex poisoned")
-            .arm(
-                tgid,
-                incident_id,
-                process.uid,
-                incident.observe_until_ms.saturating_mul(1_000_000),
-                incident.state,
-            )
-        {
-            tracing::error!(pid, tgid, incident_id, %error, "cannot arm SSH send containment; SSH read remains allowed");
-            *behavior
-                .backend_status
-                .lock()
-                .expect("SSH behavior status mutex poisoned") =
-                platform_linux::ssh_behavior::SshBehaviorBackendStatus::Degraded {
-                    reason: "Protected-key access is still reported, but immediate outbound network activity could not be armed for at least one exposure.".into(),
-                };
         }
-        incident
     }
 
     /// Bind an armed migration lease to the first matching target process and
@@ -1083,24 +1022,6 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Matches BPF's `bpf_ktime_get_ns()` clock. Failure is represented as zero,
-/// which fails closed because an observing deadline then expires immediately
-/// in the BPF program instead of accidentally extending a grant.
-pub(crate) fn monotonic_ns() -> u64 {
-    let mut ts = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    // SAFETY: ts points to initialized writable storage and CLOCK_MONOTONIC
-    // has no caller-controlled pointers.
-    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } != 0 {
-        return 0;
-    }
-    (ts.tv_sec as u64)
-        .saturating_mul(1_000_000_000)
-        .saturating_add(ts.tv_nsec as u64)
-}
-
 /// Build an `AuditRecord` from the decision context. `process` is `None` when
 /// identity resolution failed (the record still captures the resource + pid).
 /// No secret contents are stored — only paths and metadata.
@@ -1240,7 +1161,6 @@ mod tests {
             browsers: vec![b],
             enrolled_exes: vec![],
             ssh_keys: vec![],
-            ssh_behavior_window_secs: guard_core::DEFAULT_SSH_BEHAVIOR_WINDOW_SECS,
         }
     }
 
@@ -1271,7 +1191,6 @@ mod tests {
             ],
             enrolled_exes: vec![],
             ssh_keys: vec![],
-            ssh_behavior_window_secs: guard_core::DEFAULT_SSH_BEHAVIOR_WINDOW_SECS,
         }
     }
 
@@ -1532,21 +1451,17 @@ mod tests {
     }
 
     #[test]
-    fn unclassified_ssh_access_event_is_allowed_and_explicitly_audited() {
+    fn unclassified_ssh_access_event_fails_closed() {
         let cfg = EnforcementConfig {
             enforcement_mode: EnforcementMode::Conservative,
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![],
-            ssh_behavior_window_secs: guard_core::DEFAULT_SSH_BEHAVIOR_WINDOW_SECS,
         };
         let mut engine = EnforcementEngine::from_config(&cfg).unwrap();
-        let (decision, event) = engine.decide_event_with_behavior(4242, -1, true, None);
-        assert_eq!(decision, Decision::Allow);
-        let event = event.expect("SSH access event remains explicit");
-        assert_eq!(event.event_code, "ssh_behavior_key_accessed");
-        assert_eq!(event.resource_kind, ProtectedResourceKind::SshPrivateKey);
-        assert_eq!(event.pid, 4242);
+        let (decision, event) = engine.decide_event(4242, -1, true);
+        assert_eq!(decision, Decision::Deny(DenyReason::UnknownProcess));
+        assert!(event.is_none());
     }
 
     // --- config / enrollment ---
@@ -1602,7 +1517,6 @@ mod tests {
             ],
             enrolled_exes: vec![ff_exe.to_path_buf()],
             ssh_keys: vec![],
-            ssh_behavior_window_secs: guard_core::DEFAULT_SSH_BEHAVIOR_WINDOW_SECS,
         }
     }
 
@@ -1864,7 +1778,6 @@ mod tests {
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![ssh_key.to_path_buf()],
-            ssh_behavior_window_secs: guard_core::DEFAULT_SSH_BEHAVIOR_WINDOW_SECS,
         }
     }
 
@@ -1888,7 +1801,6 @@ mod tests {
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![],
-            ssh_behavior_window_secs: guard_core::DEFAULT_SSH_BEHAVIOR_WINDOW_SECS,
         };
         let mut engine = EnforcementEngine::from_config(&cfg).expect("engine");
         let res = engine.protect_ssh_key(&s.private_key).expect("protect");
@@ -1907,7 +1819,6 @@ mod tests {
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![],
-            ssh_behavior_window_secs: guard_core::DEFAULT_SSH_BEHAVIOR_WINDOW_SECS,
         };
         let mut engine = EnforcementEngine::from_config(&cfg).expect("engine");
         let err = engine.protect_ssh_key(&s.public_key).unwrap_err();
@@ -1922,7 +1833,6 @@ mod tests {
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![],
-            ssh_behavior_window_secs: guard_core::DEFAULT_SSH_BEHAVIOR_WINDOW_SECS,
         };
         let mut engine = EnforcementEngine::from_config(&cfg).expect("engine");
         let err = engine.protect_ssh_key(&s.known_hosts).unwrap_err();
@@ -1969,7 +1879,7 @@ mod tests {
     }
 
     #[test]
-    fn ssh_key_allowed_and_explicitly_audited_for_ordinary_process() {
+    fn ssh_key_requires_confirmation_for_ordinary_process() {
         let s = guard_test_fixtures::SshFixture::create().unwrap();
         let mut engine =
             EnforcementEngine::from_config(&ssh_config(&s.private_key)).expect("engine");
@@ -1978,14 +1888,13 @@ mod tests {
         let (decision, record) = engine.decide_with_context(my_pid, f.as_raw_fd());
         assert_eq!(
             decision,
-            Decision::Allow,
-            "ordinary protected-key reads must be allowed"
+            Decision::RequireSshKeyConfirmation,
+            "ordinary protected-key reads must require confirmation"
         );
-        let rec = record.expect("audit record");
-        assert_eq!(rec.resource_kind, ProtectedResourceKind::SshPrivateKey);
-        assert_eq!(rec.deny_reason, None);
-        assert_eq!(rec.event_code, "ssh_behavior_key_accessed");
-        assert!(rec.backend_diag.contains("monitoring=unavailable"));
+        assert!(
+            record.is_some(),
+            "pending confirmation is auditable metadata"
+        );
     }
 
     #[test]
@@ -2080,7 +1989,7 @@ mod tests {
     }
 
     #[test]
-    fn ssh_load_lease_used_falls_back_to_ordinary_allow() {
+    fn ssh_load_lease_used_requires_confirmation_again() {
         // After the one-shot allow marks the lease used, a second open cannot
         // reuse it and falls back to ordinary behavioral read allowance.
         let s = guard_test_fixtures::SshFixture::create().unwrap();
@@ -2111,13 +2020,13 @@ mod tests {
         let d = engine.decide_with_context(my_pid, f2.as_raw_fd()).0;
         assert_eq!(
             d,
-            Decision::Allow,
-            "second open must fall back to ordinary read allow, got {d:?}"
+            Decision::RequireSshKeyConfirmation,
+            "second open must require confirmation, got {d:?}"
         );
     }
 
     #[test]
-    fn ssh_load_lease_revoked_falls_back_to_read_allow() {
+    fn ssh_load_lease_revoked_requires_confirmation() {
         let s = guard_test_fixtures::SshFixture::create().unwrap();
         let mut engine =
             EnforcementEngine::from_config(&ssh_config(&s.private_key)).expect("engine");
@@ -2139,8 +2048,8 @@ mod tests {
         let d = engine.decide_with_context(my_pid, f.as_raw_fd()).0;
         assert_eq!(
             d,
-            Decision::Allow,
-            "revoked lease must not deny the raw read, got {d:?}"
+            Decision::RequireSshKeyConfirmation,
+            "revoked lease must require confirmation, got {d:?}"
         );
         // A revoked lease must NOT be marked used (no successful allow).
         let lease = engine
@@ -2153,7 +2062,7 @@ mod tests {
     }
 
     #[test]
-    fn ssh_load_lease_wrong_identity_falls_back_to_read_allow() {
+    fn ssh_load_lease_wrong_identity_requires_confirmation() {
         // Lease bound to a different start_time than the opener => the scope
         // matches (same resource + uid) but the StableIdentity does not, so the
         // opener does not receive the lease. The raw read remains allowed and
@@ -2180,8 +2089,8 @@ mod tests {
         let d = engine.decide_with_context(my_pid, f.as_raw_fd()).0;
         assert_eq!(
             d,
-            Decision::Allow,
-            "wrong-identity opener must fall back to read allow, got {d:?}"
+            Decision::RequireSshKeyConfirmation,
+            "wrong-identity opener must require confirmation, got {d:?}"
         );
         let lease = engine
             .leases()
@@ -2234,7 +2143,6 @@ mod tests {
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![],
-            ssh_behavior_window_secs: guard_core::DEFAULT_SSH_BEHAVIOR_WINDOW_SECS,
         };
         let mut engine = EnforcementEngine::from_config(&cfg).expect("engine");
         let my_uid = unsafe { libc::getuid() };
@@ -2259,14 +2167,14 @@ mod tests {
     }
 
     #[test]
-    fn ssh_load_lease_no_lease_allows_raw_read() {
+    fn ssh_load_lease_no_lease_requires_confirmation() {
         let s = guard_test_fixtures::SshFixture::create().unwrap();
         let mut engine =
             EnforcementEngine::from_config(&ssh_config(&s.private_key)).expect("engine");
         let my_pid = std::process::id() as i32;
         let f = std::fs::File::open(&s.private_key).unwrap();
         let d = engine.decide_with_context(my_pid, f.as_raw_fd()).0;
-        assert_eq!(d, Decision::Allow);
+        assert_eq!(d, Decision::RequireSshKeyConfirmation);
     }
 
     // --- Phase 13: hardening and bypass-oriented tests ---
@@ -2378,7 +2286,6 @@ mod tests {
             }],
             enrolled_exes: vec![],
             ssh_keys: vec![],
-            ssh_behavior_window_secs: guard_core::DEFAULT_SSH_BEHAVIOR_WINDOW_SECS,
         };
         let engine = EnforcementEngine::from_config(&cfg).expect("engine");
 

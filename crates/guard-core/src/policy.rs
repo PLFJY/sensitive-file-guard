@@ -12,11 +12,10 @@
 //! - unknown / non-browser + browser protected resource => Deny (a migration
 //!   lease may still cover a target-tree helper process even if the opener's own
 //!   browser field is unset)
-//! - SSH private-key reads => Allow; an exact valid `SshLoadLease` is reported
-//!   as `AllowByLease` for the hardened optional ssh-agent load path
-//! - expired / revoked / used SSH lease => ordinary `Allow`, never read denial
-//! - cross-user browser access => Deny; SSH reads remain allowed
-//! - PID reuse / SSH stable-identity mismatch => lease does not apply, then Allow
+//! - SSH private-key reads => require a human confirmation unless an exact
+//!   `SshLoadLease` or root-bound `SshReadAccessLease` is valid
+//! - cross-user SSH access => Deny immediately
+//! - PID reuse / SSH identity mismatch => lease does not apply, then confirmation
 
 use serde::{Deserialize, Serialize};
 
@@ -40,6 +39,7 @@ pub enum Decision {
     Deny(DenyReason),
     AllowByLease(LeaseId),
     RequireMigrationConfirmation(MigrationCandidate),
+    RequireSshKeyConfirmation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,9 +53,6 @@ pub enum DenyReason {
     WrongUid,
     IdentityMismatch,
     OneShotLeaseUsed,
-    /// An actual outbound send was blocked after a protected SSH-key read.
-    /// This does not assert anything about the payload's provenance.
-    SshBehaviorNetworkBlocked,
 }
 
 impl DenyReason {
@@ -84,7 +81,6 @@ impl DenyReason {
             Self::IdentityMismatch => "identity_mismatch",
             // The one-shot SshLoadLease was already consumed.
             Self::OneShotLeaseUsed => "one_shot_lease_used",
-            Self::SshBehaviorNetworkBlocked => "ssh_behavior_network_blocked",
         }
     }
 }
@@ -201,6 +197,9 @@ fn ancestor_matches_root(ancestor: &AncestorSummary, root: &ProcessStableId) -> 
 
 fn decide_ssh(event: &AccessEvent, leases: &LeaseSet, now: u64) -> Decision {
     let proc = &event.process;
+    if proc.uid != event.resource.owner_uid {
+        return Decision::Deny(DenyReason::WrongUid);
+    }
     let proc_identity = proc.stable.stable_identity();
 
     for lease in &leases.ssh {
@@ -215,10 +214,17 @@ fn decide_ssh(event: &AccessEvent, leases: &LeaseSet, now: u64) -> Decision {
             return Decision::AllowByLease(lease.id);
         }
     }
-    // Phase 22.2 product contract: the filesystem read is never the blocked
-    // operation. Linux may arm short-lived process-tree network observation,
-    // but backend failure cannot turn this decision into a denial.
-    Decision::Allow
+    for lease in &leases.ssh_read {
+        if lease.resource == event.resource.id
+            && lease.uid == proc.uid
+            && !lease.revoked
+            && now < lease.expires_at
+            && process_is_in_tree(proc, &lease.root)
+        {
+            return Decision::AllowByLease(lease.id);
+        }
+    }
+    Decision::RequireSshKeyConfirmation
 }
 
 #[cfg(test)]
@@ -230,7 +236,9 @@ mod tests {
     use crate::identity::{
         AncestorSummary, ExeIdentity, ProcessIdentity, ProcessStableId, StableIdentity, TrustTier,
     };
-    use crate::lease::{LeaseSet, MigrationAccessLease, MigrationLeaseState, SshLoadLease};
+    use crate::lease::{
+        LeaseSet, MigrationAccessLease, MigrationLeaseState, SshLoadLease, SshReadAccessLease,
+    };
     use crate::resource::{
         BrowserId, ProfileId, ProtectedResource, ProtectedResourceId, ProtectedResourceKind,
     };
@@ -473,6 +481,7 @@ mod tests {
         let ls = LeaseSet {
             migration: vec![lease],
             ssh: vec![],
+            ssh_read: vec![],
         };
         assert_eq!(
             evaluate(&event(res, proc), &ls, NOW),
@@ -522,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn ssh_private_key_ordinary_process_allowed() {
+    fn ssh_private_key_ordinary_process_requires_confirmation() {
         let res = ssh_resource(1000);
         let proc = browser_proc(
             None,
@@ -532,7 +541,7 @@ mod tests {
         );
         assert_eq!(
             evaluate(&event(res, proc), &LeaseSet::default(), NOW),
-            Decision::Allow
+            Decision::RequireSshKeyConfirmation
         );
     }
 
@@ -549,10 +558,56 @@ mod tests {
         let ls = LeaseSet {
             migration: vec![],
             ssh: vec![lease],
+            ssh_read: vec![],
         };
         assert_eq!(
             evaluate(&event(res, proc), &ls, NOW),
             Decision::AllowByLease(LeaseId(20))
+        );
+    }
+
+    #[test]
+    fn ssh_read_lease_is_bound_to_one_key_uid_and_process_tree() {
+        let res = ssh_resource(1000);
+        let root = stable(71, 710, "/usr/bin/git");
+        let lease = SshReadAccessLease {
+            id: LeaseId(71),
+            resource: res.id.clone(),
+            uid: 1000,
+            root: root.clone(),
+            expires_at: FUTURE,
+            revoked: false,
+        };
+        let allowed = browser_proc(None, TrustTier::Unknown, 1000, root.clone());
+        let wrong_uid = browser_proc(None, TrustTier::Unknown, 1001, root.clone());
+        let wrong_process = browser_proc(
+            None,
+            TrustTier::Unknown,
+            1000,
+            stable(72, 720, "/usr/bin/git"),
+        );
+        let mut wrong_key = res.clone();
+        wrong_key.id = ProtectedResourceId("ssh/other-key".into());
+        let leases = LeaseSet {
+            migration: vec![],
+            ssh: vec![],
+            ssh_read: vec![lease],
+        };
+        assert_eq!(
+            evaluate(&event(res.clone(), allowed.clone()), &leases, NOW),
+            Decision::AllowByLease(LeaseId(71))
+        );
+        assert_eq!(
+            evaluate(&event(res.clone(), wrong_uid), &leases, NOW),
+            Decision::Deny(DenyReason::WrongUid)
+        );
+        assert_eq!(
+            evaluate(&event(res, wrong_process), &leases, NOW),
+            Decision::RequireSshKeyConfirmation
+        );
+        assert_eq!(
+            evaluate(&event(wrong_key, allowed), &leases, NOW),
+            Decision::RequireSshKeyConfirmation
         );
     }
 
@@ -584,6 +639,7 @@ mod tests {
         let ls = LeaseSet {
             migration: vec![lease],
             ssh: vec![],
+            ssh_read: vec![],
         };
         assert_eq!(
             evaluate(&event(res, proc), &ls, NOW),
@@ -618,6 +674,7 @@ mod tests {
         let ls = LeaseSet {
             migration: vec![lease],
             ssh: vec![],
+            ssh_read: vec![],
         };
         assert_eq!(
             evaluate(&event(res, proc), &ls, NOW),
@@ -626,7 +683,7 @@ mod tests {
     }
 
     #[test]
-    fn used_ssh_lease_falls_back_to_raw_read_allow() {
+    fn used_ssh_load_lease_requires_confirmation_again() {
         let res = ssh_resource(1000);
         let proc = browser_proc(
             None,
@@ -639,8 +696,12 @@ mod tests {
         let ls = LeaseSet {
             migration: vec![],
             ssh: vec![lease],
+            ssh_read: vec![],
         };
-        assert_eq!(evaluate(&event(res, proc), &ls, NOW), Decision::Allow);
+        assert_eq!(
+            evaluate(&event(res, proc), &ls, NOW),
+            Decision::RequireSshKeyConfirmation
+        );
     }
 
     // --- wrong UID / wrong profile ---
@@ -693,6 +754,7 @@ mod tests {
         let ls = LeaseSet {
             migration: vec![lease],
             ssh: vec![],
+            ssh_read: vec![],
         };
         assert_eq!(
             evaluate(&event(res, proc), &ls, NOW),
@@ -733,6 +795,7 @@ mod tests {
         let ls = LeaseSet {
             migration: vec![lease],
             ssh: vec![],
+            ssh_read: vec![],
         };
         assert_eq!(
             evaluate(&event(res, proc), &ls, NOW),
@@ -741,7 +804,7 @@ mod tests {
     }
 
     #[test]
-    fn pid_reuse_does_not_receive_lease_but_read_is_allowed() {
+    fn pid_reuse_does_not_receive_lease_and_requires_confirmation() {
         let res = ssh_resource(1000);
         // lease bound to start_time 600; process has same PID 6 but start_time 9999 (reused)
         let proc = browser_proc(
@@ -754,12 +817,16 @@ mod tests {
         let ls = LeaseSet {
             migration: vec![],
             ssh: vec![lease],
+            ssh_read: vec![],
         };
-        assert_eq!(evaluate(&event(res, proc), &ls, NOW), Decision::Allow);
+        assert_eq!(
+            evaluate(&event(res, proc), &ls, NOW),
+            Decision::RequireSshKeyConfirmation
+        );
     }
 
     #[test]
-    fn ssh_lease_wrong_uid_does_not_apply() {
+    fn ssh_lease_wrong_uid_is_denied() {
         let res = ssh_resource(1000);
         let proc = browser_proc(
             None,
@@ -771,8 +838,12 @@ mod tests {
         let ls = LeaseSet {
             migration: vec![],
             ssh: vec![lease],
+            ssh_read: vec![],
         };
-        assert_eq!(evaluate(&event(res, proc), &ls, NOW), Decision::Allow);
+        assert_eq!(
+            evaluate(&event(res, proc), &ls, NOW),
+            Decision::Deny(DenyReason::WrongUid)
+        );
     }
 
     // --- process-tree scoping ---
@@ -825,6 +896,7 @@ mod tests {
         let ls = LeaseSet {
             migration: vec![lease],
             ssh: vec![],
+            ssh_read: vec![],
         };
         assert_eq!(
             evaluate(&event(res, proc), &ls, NOW),
@@ -863,6 +935,7 @@ mod tests {
         let ls = LeaseSet {
             migration: vec![lease],
             ssh: vec![],
+            ssh_read: vec![],
         };
         assert_eq!(
             evaluate(&event(res, proc), &ls, NOW),
@@ -901,6 +974,7 @@ mod tests {
         let ls = LeaseSet {
             migration: vec![lease],
             ssh: vec![],
+            ssh_read: vec![],
         };
         assert_eq!(
             evaluate(&event(res, proc), &ls, NOW),
@@ -937,6 +1011,7 @@ mod tests {
         let ls = LeaseSet {
             migration: vec![lease],
             ssh: vec![],
+            ssh_read: vec![],
         };
         assert_eq!(
             evaluate(&event(res, proc), &ls, NOW),
@@ -1009,7 +1084,6 @@ mod tests {
             DenyReason::WrongUid,
             DenyReason::IdentityMismatch,
             DenyReason::OneShotLeaseUsed,
-            DenyReason::SshBehaviorNetworkBlocked,
         ]
         .iter()
         .map(|r| r.reason_code())

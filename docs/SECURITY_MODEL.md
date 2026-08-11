@@ -214,8 +214,9 @@ mode is `0660 root:guardd-users`; every connection gets kernel credentials from
 | `MigrationResolve` | pending ID belongs to peer UID (or root); daemon revalidates target process identity | fixed `allow_import` or `block`; Allow requires non-cached `org.guardd.migration-resolve` polkit authorization |
 | `SshProtect` | root or `stat`-verified file owner; canonical regular-file candidate, name, owner, and successful fanotify mark checked | adds protection but no read capability; polkit for non-root |
 | `SshLoadAuthorize` | protected key owner; direct stopped child and trusted `ssh-add`; verified/pinned trusted `ssh-agent`; all kernel facts rechecked after authorization | grants one matching open for 30 seconds; polkit for non-root |
+| `SshPendingList/Get` | peer UID from `SO_PEERCRED`; non-root sees only its own daemon-recorded requests | metadata-only view; no client-supplied key or process facts |
+| `SshReadResolve` | pending request belongs to peer UID (or root); daemon rechecks reader identity and key ownership | `allow` crosses non-cached `org.guardd.ssh-read-resolve` Polkit and creates one ten-minute memory lease; `block` denies immediately |
 | `LeasesRevoke` | lease owner or root; ownership comes from daemon state | removes privilege; no polkit, and cross-user revocation is denied |
-| `IncidentResolve` | incident owner or root may locate the exact ID; daemon then rechecks the peer's live PID/start token | typed `block_and_quarantine`, `block`, or `allow`; each crosses non-cached `org.guardd.incident-resolve` polkit authorization |
 
 Polkit process subjects include PID, start time, and UID. While `pkcheck` is
 pending, guardd monitors the IPC process's start token and the accepted socket;
@@ -258,24 +259,10 @@ depending on agent and key constraints. V1 mediates raw private-key file
 access behavior; it does not deny reads or mediate agent signing authority. Users can mitigate with
 `ssh-add -c` (confirmation) or `ssh-add -t` (lifetime).
 
-### 5. SSH behavioral model limits
-Even on a compatible BPF-LSM deployment, the model is only: protected SSH-key
-read + short (default 10-second) window + same process/future-child actual
-external IPv4/IPv6 TCP/UDP send. It does not prove that an attempted payload is
-a key, inspect TLS/plaintext, or provide full taint tracking. AF_UNIX,
-AF_NETLINK, and loopback are deliberately local-only exclusions. Deliberate
-bypasses outside this V1 scope include sleeping past the window, arbitrary IPC
-or shared-memory transfer to an already-running process, local temporary-file
-handoff, root/kernel compromise, daemon/backend failure, and untested exotic
-send paths. Loopback/local IPC is not the target. Backend unavailability is an
-explicit degraded state: reads remain allowed and reported, but outbound
-blocking is unavailable.
-
 ### 6. Not an antivirus / EDR
 The firewall does not scan file contents for malware or maintain reputation
-databases. Its SSH incident response may quarantine only a narrowly verified,
-attributable direct executable or explicit script argument; it is not a
-general-purpose malware quarantine engine.
+databases. SSH read approval is a narrow, short-lived access capability; this
+is not a general-purpose malware quarantine engine.
 
 ### 7. Migration access is not read-only on fanotify
 The fanotify event fd uses the flags selected by `fanotify_init`; `F_GETFL` on

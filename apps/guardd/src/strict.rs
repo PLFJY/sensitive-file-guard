@@ -501,7 +501,6 @@ mod tests {
             }],
             enrolled_exes: Vec::new(),
             ssh_keys: Vec::new(),
-            ssh_behavior_window_secs: guard_core::DEFAULT_SSH_BEHAVIOR_WINDOW_SECS,
         }
     }
 

@@ -73,9 +73,8 @@ RestrictRealtime=true
 RestrictSUIDSGID=true
 LockPersonality=true
 
-# Capabilities: CAP_SYS_ADMIN gates fanotify permission events; CAP_BPF and
-# CAP_PERFMON are required by libbpf for the BPF-LSM and tracepoint programs.
-# CAP_SYS_PTRACE is required by ptrace_may_access to resolve /proc/<pid>/exe
+# Capabilities: CAP_SYS_ADMIN gates fanotify permission events. CAP_SYS_PTRACE
+# is required by ptrace_may_access to resolve /proc/<pid>/exe
 # for another UID on hardened kernels; CAP_DAC_READ_SEARCH reads protected
 # metadata, CAP_DAC_OVERRIDE connects to an owner-only ssh-agent socket,
 # CAP_FOWNER pins that verified user-owned socket inode behind a root-controlled
@@ -83,15 +82,10 @@ LockPersonality=true
 # validation/cleanup.
 # No ambient capabilities are needed while the service runs as uid 0.
 AmbientCapabilities=
-CapabilityBoundingSet=CAP_SYS_ADMIN CAP_BPF CAP_PERFMON CAP_SYS_PTRACE CAP_KILL CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE CAP_FOWNER
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_KILL CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE CAP_FOWNER
 
 # Resource limits: the daemon is lightweight but handle burst load.
 LimitNOFILE=4096
-# libbpf loads the bounded exposure/ring-buffer maps before the first raw SSH
-# read can be allowed. Set this in systemd (rather than relying on libbpf to
-# raise it at runtime) so a privileged daemon cannot silently fall back to an
-# unguarded read path on a low-memlock host.
-LimitMEMLOCK=infinity
 MemoryMax=256M
 
 # Standard I/O: log to journald.

@@ -3,9 +3,6 @@
 use std::path::PathBuf;
 
 use guard_core::resource::BrowserFamily;
-use guard_core::{
-    DEFAULT_SSH_BEHAVIOR_WINDOW_SECS, MAX_SSH_BEHAVIOR_WINDOW_SECS, MIN_SSH_BEHAVIOR_WINDOW_SECS,
-};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -45,12 +42,6 @@ pub struct EnforcementConfig {
     pub enrolled_exes: Vec<PathBuf>,
     #[serde(default)]
     pub ssh_keys: Vec<PathBuf>,
-    #[serde(default = "default_ssh_behavior_window_secs")]
-    pub ssh_behavior_window_secs: u64,
-}
-
-const fn default_ssh_behavior_window_secs() -> u64 {
-    DEFAULT_SSH_BEHAVIOR_WINDOW_SECS
 }
 
 impl EnforcementConfig {
@@ -84,15 +75,6 @@ impl EnforcementConfig {
             if !path.is_absolute() {
                 anyhow::bail!("configured path must be absolute: {}", path.display());
             }
-        }
-        if !(MIN_SSH_BEHAVIOR_WINDOW_SECS..=MAX_SSH_BEHAVIOR_WINDOW_SECS)
-            .contains(&self.ssh_behavior_window_secs)
-        {
-            anyhow::bail!(
-                "ssh_behavior_window_secs must be between {} and {}",
-                MIN_SSH_BEHAVIOR_WINDOW_SECS,
-                MAX_SSH_BEHAVIOR_WINDOW_SECS
-            );
         }
         Ok(())
     }

@@ -6,10 +6,7 @@ use guard_core::resource::{
     BrowserId, ProfileId, ProtectedResource, ProtectedResourceId, ProtectedResourceKind,
 };
 use guard_core::{evaluate, AccessEvent, AccessOperation, Decision, LeaseSet};
-use guard_platform::{
-    AccessDisposition, BlockedNetworkAttempt, PendingPermission, ProtectedAccessRequest,
-    SshBehavior,
-};
+use guard_platform::{AccessDisposition, PendingPermission, ProtectedAccessRequest};
 
 struct FakePending {
     responses: Arc<Mutex<Vec<&'static str>>>,
@@ -121,85 +118,4 @@ fn request_contains_product_data_only() {
         operation: guard_platform::ProtectedOperation::Open,
     };
     assert_eq!(request.process.uid, request.resource.owner_uid);
-}
-
-#[derive(Default)]
-struct FakeSsh {
-    actions: Mutex<Vec<String>>,
-    blocked: Mutex<Vec<BlockedNetworkAttempt>>,
-}
-
-impl SshBehavior for FakeSsh {
-    type Exposure = String;
-
-    fn arm_exposure(
-        &self,
-        incident_id: &str,
-        _process: &ProcessIdentity,
-        _until_ms: u64,
-    ) -> anyhow::Result<Self::Exposure> {
-        self.actions
-            .lock()
-            .unwrap()
-            .push(format!("arm:{incident_id}"));
-        Ok(incident_id.to_owned())
-    }
-
-    fn renew_exposure(&self, exposure: &Self::Exposure, _until_ms: u64) -> anyhow::Result<()> {
-        self.actions
-            .lock()
-            .unwrap()
-            .push(format!("renew:{exposure}"));
-        Ok(())
-    }
-
-    fn poll_blocked_attempts(&self) -> anyhow::Result<Vec<BlockedNetworkAttempt>> {
-        Ok(std::mem::take(&mut *self.blocked.lock().unwrap()))
-    }
-
-    fn allow_incident(&self, incident_id: &str) -> anyhow::Result<()> {
-        self.actions
-            .lock()
-            .unwrap()
-            .push(format!("allow:{incident_id}"));
-        Ok(())
-    }
-
-    fn block_incident(&self, incident_id: &str) -> anyhow::Result<()> {
-        self.actions
-            .lock()
-            .unwrap()
-            .push(format!("block:{incident_id}"));
-        Ok(())
-    }
-
-    fn remove_exposure(&self, exposure: Self::Exposure) -> anyhow::Result<()> {
-        self.actions
-            .lock()
-            .unwrap()
-            .push(format!("remove:{exposure}"));
-        Ok(())
-    }
-}
-
-#[test]
-fn fake_ssh_backend_models_blocked_send_and_resolution() {
-    let backend = FakeSsh::default();
-    let exposure = backend
-        .arm_exposure("ssh-1", &process(None, 1000), 10)
-        .unwrap();
-    backend.renew_exposure(&exposure, 20).unwrap();
-    backend.block_incident("ssh-1").unwrap();
-    backend.allow_incident("ssh-1").unwrap();
-    backend.remove_exposure(exposure).unwrap();
-    assert_eq!(
-        *backend.actions.lock().unwrap(),
-        vec![
-            "arm:ssh-1",
-            "renew:ssh-1",
-            "block:ssh-1",
-            "allow:ssh-1",
-            "remove:ssh-1"
-        ]
-    );
 }

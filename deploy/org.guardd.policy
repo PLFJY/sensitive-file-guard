@@ -47,15 +47,15 @@
     </defaults>
   </action>
 
-  <action id="org.guardd.incident-resolve">
-    <description>Resolve blocked sensitive-key network activity</description>
-    <message>Authentication is required to $(resolution) incident $(incident_id)</message>
+  <action id="org.guardd.ssh-read-resolve">
+    <description>Confirm protected SSH private-key access</description>
+    <message>Authentication is required to let a verified process read $(key_path)</message>
     <defaults>
       <allow_any>no</allow_any>
       <allow_inactive>no</allow_inactive>
-      <!-- Never cache this decision: a same-UID malicious process must not
-           reuse a prior authorization to unblock itself. -->
-      <allow_active>auth_admin</allow_active>
+      <!-- Never cache this decision: authorization is bound by guardd to one
+           verified process tree and one key, not to this desktop session. -->
+      <allow_active>auth_self</allow_active>
     </defaults>
   </action>
 

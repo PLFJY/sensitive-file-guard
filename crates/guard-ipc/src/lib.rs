@@ -16,7 +16,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Wire protocol version. Bumped on incompatible changes.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Hard upper bound on a single request frame. The server rejects anything
 /// larger (and any malformed length prefix) so a peer cannot exhaust memory.
@@ -62,17 +62,6 @@ pub enum RequestOp {
     LeasesRevoke {
         lease_id: String,
     },
-    IncidentsList,
-    IncidentGet {
-        id: String,
-    },
-    /// Resolution is deliberately a fixed incident ID + fixed action. The
-    /// daemon applies a non-cached polkit boundary; same-UID IPC access alone
-    /// is never authority to unblock a process.
-    IncidentResolve {
-        id: String,
-        action: IncidentResolutionAction,
-    },
     ConfigCheck,
     /// Authorize a cross-browser migration access lease. The
     /// daemon binds the lease to the target browser's armed `ExeIdentity` and
@@ -91,6 +80,16 @@ pub enum RequestOp {
     MigrationResolve {
         id: String,
         action: MigrationResolutionAction,
+    },
+    SshPendingList,
+    SshPendingGet {
+        id: String,
+    },
+    /// The daemon owns all reader and key facts. The client supplies only an
+    /// opaque pending ID and a fixed action; allowing crosses non-cached polkit.
+    SshReadResolve {
+        id: String,
+        action: SshReadResolutionAction,
     },
     /// Enroll a single SSH private key at runtime (Phase 10). The daemon
     /// canonicalizes + stats `path`, refuses `.pub` / reserved names, enrolls
@@ -160,9 +159,6 @@ pub enum ResponseBody {
     Browsers(Vec<BrowserInfo>),
     Configuration(ConfigurationInfo),
     Events(Vec<EventInfo>),
-    Incidents(Vec<SshIncidentInfo>),
-    Incident(Box<SshIncidentInfo>),
-    IncidentResolved(SshIncidentInfo),
     // Boxed: `EventInfo` is ~328 bytes; boxing keeps the enum small on the
     // hot path (status/events queries) where this variant is never used.
     Explain(Box<EventInfo>),
@@ -179,18 +175,13 @@ pub enum ResponseBody {
     MigrationPending(Vec<MigrationPendingInfo>),
     MigrationPendingItem(Box<MigrationPendingInfo>),
     MigrationResolved(MigrationResolutionInfo),
+    SshPending(Vec<SshPendingInfo>),
+    SshPendingItem(Box<SshPendingInfo>),
+    SshReadResolved(SshReadResolutionInfo),
     /// Result of `SshProtect`: the now-protected canonical path + owner uid.
     SshProtected(SshProtectedInfo),
     /// Result of `SshLoadAuthorize`: the one-shot lease id and its expiry.
     SshLoadAuthorized(SshLoadAuthorizedInfo),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum IncidentResolutionAction {
-    BlockAndQuarantine,
-    Block,
-    Allow,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -209,73 +200,30 @@ pub enum MigrationResolutionInfo {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SshIncidentStateInfo {
-    Observing,
-    PendingDecision,
-    BlockedUntilExit,
-    Allowed,
-    Expired,
-    Quarantined,
-    Exited,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum IncidentResolutionInfo {
-    BlockAndQuarantine,
+pub enum SshReadResolutionAction {
     Block,
     Allow,
 }
 
-impl std::fmt::Display for SshIncidentStateInfo {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let value = match self {
-            Self::Observing => "observing",
-            Self::PendingDecision => "pending_decision",
-            Self::BlockedUntilExit => "blocked_until_exit",
-            Self::Allowed => "allowed",
-            Self::Expired => "expired",
-            Self::Quarantined => "quarantined",
-            Self::Exited => "exited",
-        };
-        formatter.write_str(value)
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SshReadResolutionInfo {
+    Allowed,
+    Blocked,
 }
 
-impl std::fmt::Display for IncidentResolutionInfo {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let value = match self {
-            Self::BlockAndQuarantine => "block_and_quarantine",
-            Self::Block => "block",
-            Self::Allow => "allow",
-        };
-        formatter.write_str(value)
-    }
-}
-
+/// Daemon-recorded facts for one protected SSH private-key read waiting on a
+/// human decision. This carries metadata only; no key material is exposed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SshIncidentInfo {
+pub struct SshPendingInfo {
     pub id: String,
     pub uid: u32,
-    /// Compatibility summary of the first key in `accessed_key_paths`.
     pub key_path: String,
-    pub accessed_key_paths: Vec<String>,
     pub process_exe: String,
     pub pid: u32,
     pub start_time: u64,
-    pub parent_pid: Option<u32>,
-    pub parent_exe: Option<String>,
-    pub first_sensitive_read_ms: u64,
-    pub last_sensitive_read_ms: u64,
-    pub observe_until_ms: u64,
-    pub state: SshIncidentStateInfo,
-    pub blocked_network_attempts: u64,
-    pub first_network_ms: Option<u64>,
-    pub destination_ip: Option<String>,
-    pub destination_port: Option<u16>,
-    pub protocol: Option<String>,
-    pub resolution: Option<IncidentResolutionInfo>,
-    pub resolution_detail: Option<String>,
+    pub created_at: u64,
+    pub expires_at: u64,
 }
 
 /// Information about a successfully protected SSH private key. Contains NO key
@@ -384,29 +332,6 @@ pub struct StatusInfo {
     pub unclassified: u64,
     pub audit_dropped: u64,
     pub peer_uid: u32,
-    /// `ACTIVE` only after the selected kernel send hook has loaded and
-    /// attached. `UNAVAILABLE` means reads remain allowed/reported while
-    /// immediate outbound network blocking is unavailable.
-    #[serde(default)]
-    pub ssh_behavior_status: String,
-    #[serde(default)]
-    pub ssh_behavior_detail: Option<String>,
-    #[serde(default)]
-    pub ssh_behavior_active_incidents: u64,
-    #[serde(default)]
-    pub ssh_behavior_pending_decisions: u64,
-    #[serde(default)]
-    pub ssh_behavior_key_reads: u64,
-    #[serde(default)]
-    pub ssh_behavior_network_blocks: u64,
-    #[serde(default)]
-    pub ssh_behavior_user_allows: u64,
-    #[serde(default)]
-    pub ssh_behavior_quarantines: u64,
-    /// Number of configured SSH behavioral backend initialization failures.
-    /// A nonzero value means behavioral network blocking is unavailable.
-    #[serde(default)]
-    pub ssh_behavior_backend_failures: u64,
 }
 
 fn default_enforcement_mode() -> String {
@@ -445,7 +370,6 @@ pub struct ConfigurationInfo {
     pub browsers: Vec<ConfiguredBrowserInfo>,
     pub enrolled_exes: Vec<String>,
     pub ssh_keys: Vec<String>,
-    pub ssh_behavior_window_secs: u64,
 }
 
 /// Browser enrollment exactly as configured, including whether ownership was
@@ -554,14 +478,6 @@ mod tests {
             RequestOp::LeasesRevoke {
                 lease_id: "7".into(),
             },
-            RequestOp::IncidentsList,
-            RequestOp::IncidentGet {
-                id: "ssh-0001".into(),
-            },
-            RequestOp::IncidentResolve {
-                id: "ssh-0001".into(),
-                action: IncidentResolutionAction::Allow,
-            },
             RequestOp::ConfigCheck,
             RequestOp::MigrationAuthorize {
                 source_browser: "chrome".into(),
@@ -582,6 +498,12 @@ mod tests {
             RequestOp::MigrationResolve {
                 id: "pending-1".into(),
                 action: MigrationResolutionAction::AllowImport,
+            },
+            RequestOp::SshPendingList,
+            RequestOp::SshPendingGet { id: "ssh-1".into() },
+            RequestOp::SshReadResolve {
+                id: "ssh-1".into(),
+                action: SshReadResolutionAction::Allow,
             },
             RequestOp::SshProtect {
                 path: "/home/u/.ssh/id_ed25519".into(),
@@ -622,19 +544,19 @@ mod tests {
     }
 
     #[test]
-    fn incident_resolution_has_only_fixed_metadata() {
+    fn ssh_read_resolution_has_only_fixed_metadata() {
         let request = Request {
             version: PROTOCOL_VERSION,
-            op: RequestOp::IncidentResolve {
+            op: RequestOp::SshReadResolve {
                 id: "ssh-0001".into(),
-                action: IncidentResolutionAction::BlockAndQuarantine,
+                action: SshReadResolutionAction::Block,
             },
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(!json.contains("\"uid\""));
         assert!(!json.contains("\"pid\""));
         assert!(!json.contains("\"path\""));
-        assert!(json.contains("block_and_quarantine"));
+        assert!(json.contains("ssh_read_resolve"));
     }
 
     #[test]
@@ -765,15 +687,6 @@ mod tests {
             audit_dropped: 0,
             peer_uid: 1000,
             ssh_protected_keys: 0,
-            ssh_behavior_status: "ACTIVE".into(),
-            ssh_behavior_detail: None,
-            ssh_behavior_active_incidents: 0,
-            ssh_behavior_pending_decisions: 0,
-            ssh_behavior_key_reads: 0,
-            ssh_behavior_network_blocks: 0,
-            ssh_behavior_user_allows: 0,
-            ssh_behavior_quarantines: 0,
-            ssh_behavior_backend_failures: 0,
         }));
         let j = serde_json::to_string(&ok).unwrap();
         let back: Response = serde_json::from_str(&j).unwrap();

@@ -5,6 +5,8 @@
 //!   allowing one browser to read another browser's protected profile.
 //! - `SshLoadLease`: one-shot grant allowing the exact `ssh-add` invocation to
 //!   read a single protected SSH private key.
+//! - `SshReadAccessLease`: short, process-tree-bound grant created only after
+//!   the user confirms an ordinary SSH private-key read.
 //!
 //! Leases bind to a `StableIdentity` (exe + start time + file identity), never
 //! to a PID alone. Expired/revoked/used leases do not grant access.
@@ -63,9 +65,23 @@ pub struct SshLoadLease {
     pub used: bool,
 }
 
+/// Time-limited ordinary SSH private-key read grant. Unlike `SshLoadLease`,
+/// this covers the verified reader process and its future descendants for one
+/// protected key. It is never persisted or executable-wide.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SshReadAccessLease {
+    pub id: LeaseId,
+    pub resource: ProtectedResourceId,
+    pub uid: u32,
+    pub root: ProcessStableId,
+    pub expires_at: u64,
+    pub revoked: bool,
+}
+
 /// The set of active leases consulted by the policy engine.
 #[derive(Debug, Clone, Default)]
 pub struct LeaseSet {
     pub migration: Vec<MigrationAccessLease>,
     pub ssh: Vec<SshLoadLease>,
+    pub ssh_read: Vec<SshReadAccessLease>,
 }

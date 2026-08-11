@@ -37,7 +37,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditRecord {
     /// Stable machine-readable event classification (for example
-    /// `ssh_behavior_key_accessed`). This is metadata, never secret content.
+    /// `ssh_key_access_confirmation_required`). This is metadata, never secret
+    /// content.
     pub event_code: String,
     pub ts_ms: u64,
     pub uid: u32,
@@ -415,6 +416,7 @@ fn reconstruct_decision(
         "migration_confirmation_required" => {
             Decision::Deny(deny_reason.unwrap_or(DenyReason::CrossBrowserWithoutLease))
         }
+        "ssh_key_confirmation_required" => Decision::RequireSshKeyConfirmation,
         _ => Decision::Deny(deny_reason.unwrap_or(DenyReason::UnknownProcess)),
     }
 }
@@ -425,6 +427,7 @@ fn decision_str(d: &Decision) -> &'static str {
         Decision::Deny(_) => "deny",
         Decision::AllowByLease(_) => "allow_by_lease",
         Decision::RequireMigrationConfirmation(_) => "migration_confirmation_required",
+        Decision::RequireSshKeyConfirmation => "ssh_key_confirmation_required",
     }
 }
 
@@ -439,7 +442,6 @@ fn deny_reason_str(r: DenyReason) -> &'static str {
         DenyReason::WrongUid => "wrong_uid",
         DenyReason::IdentityMismatch => "identity_mismatch",
         DenyReason::OneShotLeaseUsed => "one_shot_lease_used",
-        DenyReason::SshBehaviorNetworkBlocked => "ssh_behavior_network_blocked",
     }
 }
 fn parse_deny_reason(s: String) -> DenyReason {
@@ -453,7 +455,6 @@ fn parse_deny_reason(s: String) -> DenyReason {
         "wrong_uid" => DenyReason::WrongUid,
         "identity_mismatch" => DenyReason::IdentityMismatch,
         "one_shot_lease_used" => DenyReason::OneShotLeaseUsed,
-        "ssh_behavior_network_blocked" => DenyReason::SshBehaviorNetworkBlocked,
         _ => DenyReason::UnknownProcess,
     }
 }

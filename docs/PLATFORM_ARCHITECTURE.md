@@ -8,7 +8,7 @@ implemented or implied by this document.
 
 ## Portable layers
 
-`guard-core` owns identities, resources, leases, incidents, and deterministic
+`guard-core` owns identities, resources, leases, and deterministic
 policy. `guard-browser` and `guard-ssh` own portable resource/domain helpers.
 `guard-ipc` owns only versioned request/response DTOs. `guard-audit` owns the
 metadata-only audit store. `guard-client` owns typed client semantics and
@@ -40,9 +40,6 @@ existing daemon state machine remains closely coupled to the enforcement loop.
   terminal `allow` or `deny` is consumed exactly once.
 - `ProcessIdentityResolver`: resolve a verified process, test a stable live
   instance, and obtain verified ancestry.
-- `ProcessContainment`: terminate verified members of an incident tree.
-- `SshBehavior`: arm/renew an exposure, poll blocked-send incidents, resolve
-  incidents, and remove an exposure.
 - `BrowserDiscovery`: return portable browser metadata; layout constants are
   adapter-owned.
 - `ServiceController`: query semantic protection/notification health and
@@ -63,8 +60,6 @@ mechanisms:
 |---|---|---|
 | deferred permission | `fanotify::LinuxPendingPermission` | permission event response and owned event descriptor |
 | process identity | `identity::LinuxProcessIdentityResolver` | kernel process identity files and enrollment checks |
-| containment | `containment::LinuxProcessContainment` | verified ancestry, pidfd pinning, stop/terminate |
-| SSH behavior | `ssh_behavior::LinuxSshBehavior` | existing kernel network containment backend |
 | browser discovery | `config::LinuxBrowserDiscovery` | Linux profile/executable layouts |
 | service control | `service::LinuxServiceController` | Linux service manager and user-session service |
 
@@ -93,13 +88,11 @@ The Linux implementation retains PID plus start token, canonical executable,
 device/inode, ownership, and bounded ancestry checks. No naked numeric PID is
 an authorization grant.
 
-## Network behavior boundary
+## SSH confirmation boundary
 
-SSH key reads remain allowed and informational. When network behavior is
-available, an exact process-tree exposure is observed, an external send is
-blocked, and the existing Allow, Block, and Block-and-Quarantine decisions are
-preserved. The product contract does not mention a particular hook, map, or
-ring buffer.
+SSH key reads are held at the fanotify access boundary. The Linux daemon owns
+the pending permission descriptor, Polkit recheck, and short process-tree lease;
+portable policy only evaluates the resulting resource and stable identity facts.
 
 ## IPC boundary
 
@@ -125,9 +118,9 @@ the GTK application reusable without linking the Linux backend implementation.
 
 ## Configuration boundary
 
-`EnforcementConfig`, browser enrollment metadata, enforcement mode, and the SSH
-observation window are portable models. Linux discovery layouts remain in
-`platform-linux`. Existing JSON field names and defaults are unchanged, so
+`EnforcementConfig`, browser enrollment metadata, and enforcement mode are
+portable models. Linux discovery layouts remain in `platform-linux`. Legacy
+unknown JSON fields are tolerated, so removed SSH observation settings do not
 existing Linux installations require no migration.
 
 ## Testing strategy
@@ -147,4 +140,3 @@ service health, artifact containment, and browser discovery behind the same
 semantic seams. macOS APIs, entitlements, system extensions, and packaging are
 intentionally not selected or tested in this phase. No macOS compilation claim
 is made.
-

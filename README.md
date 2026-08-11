@@ -203,31 +203,20 @@ drops, classifier failures, topology health, and hardlink-alias scans. Strict
 startup fails instead of reporting ACTIVE if any required profile/key
 filesystem cannot be marked.
 
-### SSH behavioral protection
+### SSH private-key access
 
-Browser secrets remain a pre-access firewall: unauthorized access is denied.
-SSH has a separate, deliberately modest path: an actual private-key
-read arms one exact process tree for `ssh_behavior_window_secs` (default 10,
-range 1–60 seconds); an actual external send during that interval is to be
-blocked before egress and presented as an incident. AF_UNIX, AF_NETLINK, IPv4
-loopback, and IPv6 loopback are local-only and are not blocked. It is a
-temporal correlation, not a claim that the payload is the key.
+SSH private-key reads are mediated before the read completes. An ordinary
+reader is held by `FAN_ACCESS_PERM` and the GTK app shows one **Allow** or
+**Block** prompt with the program, PID, executable, and key path. Allow crosses
+the non-cached `org.guardd.ssh-read-resolve` Polkit action, then creates a
+memory-only ten-minute lease for that exact verified process tree and key.
+Closing the prompt, selecting Block, expiry after 60 seconds, or reader exit
+denies the held read. The lease is not saved to disk and cannot cover another
+key, user, executable identity, or PID reuse.
 
-The selected Linux hook is BPF LSM `socket_sendmsg`, because connect-only and
-cgroup-egress designs do not provide the required current-task coverage for a
-socket opened before the read. The daemon builds and loads this hook through
-libbpf, then exposes `ssh_behavior_backend` in `guardctl status`. It
-reports `UNAVAILABLE` without denying key access when the hook cannot attach;
-do not interpret an otherwise ACTIVE browser firewall as behavioral SSH
-containment. `guardctl incidents list|show ID|block-and-quarantine ID|block ID|
-allow ID` is the typed CLI surface; resolution has a non-cached polkit boundary
-and no bypass flag. Block keeps only this live tree's external networking
-denied. Block & Quarantine performs pidfd-based verified process containment
-and uses `cap-std` capability-scoped filesystem operations for an attributable
-artifact. See [SSH_BEHAVIOR_MODEL.md](docs/SSH_BEHAVIOR_MODEL.md).
-
-The GTK overview keeps backend failures concise and actionable; detailed
-libbpf/verifier diagnostics are available in `journalctl -u guardd`.
+`guardctl ssh load` remains the narrow `ssh-add` / trusted `ssh-agent` special
+case: it receives its existing one-shot verified load lease and therefore does
+not create an ordinary read prompt. See [SSH_ACCESS_MODEL.md](docs/SSH_ACCESS_MODEL.md).
 
 ## Logs
 

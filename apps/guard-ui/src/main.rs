@@ -50,13 +50,7 @@ fn health_from_evidence(
             return Health::Degraded;
         }
         return match daemon {
-            Some(status)
-                if status.status == "ACTIVE"
-                    && (status.ssh_protected_keys == 0
-                        || status.ssh_behavior_status == "ACTIVE") =>
-            {
-                Health::Active
-            }
+            Some(status) if status.status == "ACTIVE" => Health::Active,
             Some(status) if status.status == "ACTIVE" => Health::Degraded,
             Some(status) if matches!(status.status.as_str(), "DEGRADED" | "NOT_ENFORCING") => {
                 Health::Degraded
@@ -73,15 +67,6 @@ fn health_label(h: Health) -> &'static str {
         Health::Degraded => "DEGRADED",
         Health::Stopped => "STOPPED / OFF",
         Health::Unreachable => "UNREACHABLE",
-    }
-}
-
-fn ssh_behavior_summary(status: &guard_ipc::StatusInfo) -> String {
-    match status.ssh_behavior_status.as_str() {
-        "ACTIVE" => "Active — key access is allowed and monitored for immediate external network activity".into(),
-        "UNAVAILABLE" => "Unavailable — key access is still allowed and reported, but immediate external network activity cannot currently be blocked".into(),
-        "DEGRADED" => "Degraded — key access is still allowed and reported; some immediate external network activity may not be blocked".into(),
-        _ => "Unknown — key access is still allowed and reported; network blocking status is unknown".into(),
     }
 }
 
@@ -113,7 +98,7 @@ struct UiState {
     poll_in_flight: Rc<Cell<bool>>,
     protection: Rc<RefCell<Option<adw::SwitchRow>>>,
     protection_syncing: Rc<Cell<bool>>,
-    shown_incidents: Rc<RefCell<HashSet<String>>>,
+    shown_ssh_reads: Rc<RefCell<HashSet<String>>>,
     shown_migrations: Rc<RefCell<HashSet<String>>>,
 }
 
@@ -180,7 +165,7 @@ fn build_ui(app: &adw::Application) {
         poll_in_flight: Rc::new(Cell::new(false)),
         protection: Rc::new(RefCell::new(None)),
         protection_syncing: Rc::new(Cell::new(false)),
-        shown_incidents: Rc::new(RefCell::new(HashSet::new())),
+        shown_ssh_reads: Rc::new(RefCell::new(HashSet::new())),
         shown_migrations: Rc::new(RefCell::new(HashSet::new())),
     };
     let overview = scroll_page(overview_page(&state));
@@ -438,7 +423,7 @@ fn is_blocked_event(event: &guard_ipc::EventInfo) -> bool {
 fn is_visible_event(event: &guard_ipc::EventInfo) -> bool {
     cfg!(debug_assertions)
         || is_blocked_event(event)
-        || event.event_code.starts_with("ssh_behavior_")
+        || event.event_code.starts_with("ssh_key_access_")
         || event.event_code.starts_with("browser_migration_")
 }
 
@@ -481,7 +466,6 @@ fn configuration_from_daemon(
         browsers,
         enrolled_exes: info.enrolled_exes.into_iter().map(PathBuf::from).collect(),
         ssh_keys: info.ssh_keys.into_iter().map(PathBuf::from).collect(),
-        ssh_behavior_window_secs: info.ssh_behavior_window_secs,
     })
 }
 
@@ -1016,7 +1000,7 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow) {
     let poll_in_flight = state.poll_in_flight.clone();
     let protection = state.protection.clone();
     let protection_syncing = state.protection_syncing.clone();
-    let shown_incidents = state.shown_incidents.clone();
+    let shown_ssh_reads = state.shown_ssh_reads.clone();
     let shown_migrations = state.shown_migrations.clone();
     let config_state = state.clone();
     let window = window.clone();
@@ -1036,13 +1020,7 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow) {
                 .into_iter()
                 .filter(is_visible_event)
                 .collect::<Vec<_>>();
-            let pending_incidents = guard_client::incidents(&socket)
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|incident| {
-                    incident.state == guard_ipc::SshIncidentStateInfo::PendingDecision
-                })
-                .collect::<Vec<_>>();
+            let pending_ssh_reads = guard_client::ssh_pending(&socket).unwrap_or_default();
             let pending_migrations = guard_client::migration_pending(&socket).unwrap_or_default();
             let service_status = guard_client::service::status().ok();
             let service_active = service_status
@@ -1053,9 +1031,9 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow) {
                 .as_ref()
                 .and_then(|status| status.notification_active)
                 .unwrap_or(false);
-            (service_active, notification_active, daemon, configuration, active_ssh_keys, recent_events, pending_incidents, pending_migrations)
+            (service_active, notification_active, daemon, configuration, active_ssh_keys, recent_events, pending_ssh_reads, pending_migrations)
         }).await;
-        if let Ok((service_active, notification_active, daemon, configuration, active_ssh_keys, recent_events, pending_incidents, pending_migrations)) = result {
+        if let Ok((service_active, notification_active, daemon, configuration, active_ssh_keys, recent_events, pending_ssh_reads, pending_migrations)) = result {
             let active_ssh_changed = update_active_ssh_keys(&config_state, active_ssh_keys);
             let configuration_hydrated = configuration
                 .map(|configuration| hydrate_configuration_from_daemon(&config_state, configuration))
@@ -1084,7 +1062,7 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow) {
             }
             let service_state = if service_active { "active" } else { "inactive" };
             let notification_state = if notification_active { "active" } else { "inactive" };
-            detail.set_text(&daemon.map(|s| format!("Mode: {} · browsers: {} · SSH keys: {} · SSH behavior: {} · allowed: {} · denied: {} · marks: {}/{} · service: {} · notifications: {}", s.mode, s.browsers, s.ssh_protected_keys, ssh_behavior_summary(&s), s.allowed, s.denied, s.marked_filesystems, s.required_filesystems, service_state, notification_state)).unwrap_or_else(|| format!("guardd IPC is unavailable · service: {} · notifications: {}", service_state, notification_state)));
+            detail.set_text(&daemon.map(|s| format!("Mode: {} · browsers: {} · SSH keys: {} · allowed: {} · denied: {} · marks: {}/{} · service: {} · notifications: {}", s.mode, s.browsers, s.ssh_protected_keys, s.allowed, s.denied, s.marked_filesystems, s.required_filesystems, service_state, notification_state)).unwrap_or_else(|| format!("guardd IPC is unavailable · service: {} · notifications: {}", service_state, notification_state)));
             if after_id.is_none() {
                 while let Some(child) = events.first_child() { events.remove(&child); }
                 *event_data.borrow_mut() = recent_events.clone();
@@ -1100,11 +1078,9 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow) {
                     "browser_migration_allowed" => "IMPORT ALLOWED",
                     "browser_migration_blocked" => "IMPORT BLOCKED",
                     "browser_migration_timed_out" => "IMPORT TIMED OUT",
-                    "ssh_behavior_key_accessed" => "KEY ACCESSED",
-                    "ssh_behavior_network_blocked" => "NETWORK BLOCKED",
-                    "ssh_behavior_blocked_by_user" => "BLOCKED BY USER",
-                    "ssh_behavior_allowed_by_user" => "ALLOWED BY USER",
-                    "ssh_behavior_blocked_and_quarantined" => "BLOCKED & QUARANTINED",
+                    "ssh_key_access_confirmation_required" => "SSH CONFIRMATION REQUIRED",
+                    "ssh_key_access_allowed" => "SSH ACCESS ALLOWED",
+                    "ssh_key_access_blocked" => "SSH ACCESS BLOCKED",
                     _ if is_blocked_event(&event) => "BLOCKED",
                     _ if event.decision.starts_with("AllowByLease") => "ALLOWED BY LEASE",
                     _ => "ALLOWED",
@@ -1116,9 +1092,12 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow) {
                 box_.append(&title); box_.append(&subtitle); row.set_child(Some(&box_));
                 if after_id.is_some() { events.insert(&row, 0); } else { events.append(&row); }
             }
-            for incident in pending_incidents {
-                if shown_incidents.borrow_mut().insert(incident.id.clone()) {
-                    present_incident_dialog(&window, incident);
+            shown_ssh_reads.borrow_mut().retain(|id| {
+                pending_ssh_reads.iter().any(|pending| pending.id == *id)
+            });
+            for pending in pending_ssh_reads {
+                if shown_ssh_reads.borrow_mut().insert(pending.id.clone()) {
+                    present_ssh_read_dialog(&window, pending);
                 }
             }
             let pending_migration_sessions = pending_migrations
@@ -1303,6 +1282,121 @@ fn resolve_migration_in_background(id: String, action: guard_ipc::MigrationResol
     });
 }
 
+fn present_ssh_read_dialog(window: &adw::ApplicationWindow, pending: guard_ipc::SshPendingInfo) {
+    let process = PathBuf::from(&pending.process_exe)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| pending.process_exe.clone());
+    let details = format!(
+        "Program: {process}\nExecutable: {}\nPID: {}\nSSH private key: {}\n\nAllow this verified process tree to read this key for 10 minutes?",
+        pending.process_exe, pending.pid, pending.key_path
+    );
+    let dialog = gtk::MessageDialog::builder()
+        .transient_for(window)
+        .modal(true)
+        .message_type(gtk::MessageType::Warning)
+        .text("SSH private-key access detected")
+        .secondary_text(&details)
+        .build();
+    let block = dialog.add_button("Block", gtk::ResponseType::Reject);
+    block.add_css_class("destructive-action");
+    let allow = dialog.add_button("Allow", gtk::ResponseType::Accept);
+    allow.add_css_class("suggested-action");
+    let state = Rc::new(Cell::new(MigrationDialogState::AwaitingChoice));
+    let id = pending.id.clone();
+    let response_state = state.clone();
+    let response_id = id.clone();
+    let response_allow = allow.clone();
+    let response_block = block.clone();
+    let response_details = details.clone();
+    dialog.connect_response(move |dialog, response| {
+        if response == gtk::ResponseType::Accept {
+            if response_state.get() != MigrationDialogState::AwaitingChoice {
+                return;
+            }
+            response_state.set(MigrationDialogState::Authorizing);
+            response_allow.set_sensitive(false);
+            response_block.set_sensitive(false);
+            dialog.set_secondary_text(Some(&format!(
+                "{response_details}\n\nWaiting for system authentication…"
+            )));
+            let socket = PathBuf::from(SOCKET);
+            let id = response_id.clone();
+            let state = response_state.clone();
+            let dialog = dialog.clone();
+            let allow = response_allow.clone();
+            let block = response_block.clone();
+            let details = response_details.clone();
+            glib::MainContext::default().spawn_local(async move {
+                let result = gio::spawn_blocking(move || {
+                    guard_client::resolve_ssh_read(
+                        &socket,
+                        &id,
+                        guard_ipc::SshReadResolutionAction::Allow,
+                    )
+                })
+                .await;
+                match result {
+                    Ok(Ok(_)) if state.get() == MigrationDialogState::Authorizing => {
+                        state.set(MigrationDialogState::Terminal);
+                        dialog.close();
+                    }
+                    Ok(Err(error)) => {
+                        eprintln!("guard-ui: SSH read authorization failed: {error}");
+                        if state.get() == MigrationDialogState::Authorizing {
+                            state.set(MigrationDialogState::AwaitingChoice);
+                            allow.set_sensitive(true);
+                            block.set_sensitive(true);
+                            dialog.set_secondary_text(Some(&format!(
+                                "{details}\n\nAuthentication was not completed. You can try again or block this key read."
+                            )));
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("guard-ui: SSH read authorization task failed: {error:?}");
+                        if state.get() == MigrationDialogState::Authorizing {
+                            state.set(MigrationDialogState::AwaitingChoice);
+                            allow.set_sensitive(true);
+                            block.set_sensitive(true);
+                            dialog.set_secondary_text(Some(&format!(
+                                "{details}\n\nAuthorization could not be completed. You can try again or block this key read."
+                            )));
+                        }
+                    }
+                    _ => {}
+                }
+            });
+            return;
+        }
+        if response_state.replace(MigrationDialogState::Terminal) != MigrationDialogState::Terminal {
+            resolve_ssh_read_in_background(response_id.clone(), guard_ipc::SshReadResolutionAction::Block);
+        }
+        dialog.close();
+    });
+    let close_state = state.clone();
+    dialog.connect_close_request(move |_| {
+        if close_state.replace(MigrationDialogState::Terminal) != MigrationDialogState::Terminal {
+            resolve_ssh_read_in_background(id.clone(), guard_ipc::SshReadResolutionAction::Block);
+        }
+        glib::Propagation::Proceed
+    });
+    dialog.present();
+}
+
+fn resolve_ssh_read_in_background(id: String, action: guard_ipc::SshReadResolutionAction) {
+    let socket = PathBuf::from(SOCKET);
+    glib::MainContext::default().spawn_local(async move {
+        match gio::spawn_blocking(move || guard_client::resolve_ssh_read(&socket, &id, action))
+            .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => eprintln!("guard-ui: SSH read resolution failed: {error}"),
+            Err(error) => eprintln!("guard-ui: SSH read resolution task failed: {error:?}"),
+        }
+    });
+}
+
+#[cfg(any())]
 fn present_incident_dialog(window: &adw::ApplicationWindow, incident: guard_ipc::SshIncidentInfo) {
     let window = window.clone();
     let process = PathBuf::from(&incident.process_exe)
@@ -1500,7 +1594,6 @@ mod tests {
             }],
             enrolled_exes: vec!["/usr/bin/known-good-helper".into()],
             ssh_keys: vec!["/home/test/.ssh/id_ed25519".into()],
-            ssh_behavior_window_secs: 30,
         })
         .expect("supported daemon snapshot");
         assert_eq!(
@@ -1553,7 +1646,7 @@ mod tests {
 
     #[test]
     fn health_requires_live_evidence() {
-        let mut status = guard_ipc::StatusInfo {
+        let status = guard_ipc::StatusInfo {
             version: "x".into(),
             enforcement_active: true,
             status: "ACTIVE".into(),
@@ -1579,22 +1672,7 @@ mod tests {
             unclassified: 0,
             audit_dropped: 0,
             peer_uid: 1000,
-            ssh_behavior_status: "UNAVAILABLE".into(),
-            ssh_behavior_detail: None,
-            ssh_behavior_active_incidents: 0,
-            ssh_behavior_pending_decisions: 0,
-            ssh_behavior_key_reads: 0,
-            ssh_behavior_network_blocks: 0,
-            ssh_behavior_user_allows: 0,
-            ssh_behavior_quarantines: 0,
-            ssh_behavior_backend_failures: 0,
         };
-        status.ssh_behavior_detail =
-            Some("loading BPF object: Invalid argument; verifier_log=R1=ctx() ...".into());
-        assert_eq!(
-            ssh_behavior_summary(&status),
-            "Unavailable — key access is still allowed and reported, but immediate external network activity cannot currently be blocked"
-        );
         assert_eq!(
             health_from_evidence(true, true, Some(&status)),
             Health::Active

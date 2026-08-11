@@ -49,41 +49,6 @@ pub trait ProcessIdentityResolver: Send + Sync {
     fn ancestors(&self, pid: u32) -> anyhow::Result<Vec<guard_core::identity::AncestorSummary>>;
 }
 
-/// Semantic process-tree containment for an already verified incident.
-pub trait ProcessContainment: Send + Sync {
-    fn terminate_verified_tree(
-        &self,
-        root: &ProcessStableId,
-        uid: u32,
-        members: &[u32],
-    ) -> anyhow::Result<u32>;
-}
-
-/// Product-facing SSH behavior signal.  The implementation may use any
-/// kernel/network facility; callers only see incident semantics.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BlockedNetworkAttempt {
-    pub incident_id: String,
-    pub pid: u32,
-    pub uid: u32,
-    pub destination: Option<guard_core::NetworkDestination>,
-}
-
-pub trait SshBehavior: Send + Sync {
-    type Exposure: Clone + Send + Sync + 'static;
-    fn arm_exposure(
-        &self,
-        incident_id: &str,
-        process: &ProcessIdentity,
-        until_ms: u64,
-    ) -> anyhow::Result<Self::Exposure>;
-    fn renew_exposure(&self, exposure: &Self::Exposure, until_ms: u64) -> anyhow::Result<()>;
-    fn poll_blocked_attempts(&self) -> anyhow::Result<Vec<BlockedNetworkAttempt>>;
-    fn allow_incident(&self, incident_id: &str) -> anyhow::Result<()>;
-    fn block_incident(&self, incident_id: &str) -> anyhow::Result<()>;
-    fn remove_exposure(&self, exposure: Self::Exposure) -> anyhow::Result<()>;
-}
-
 /// Product-level service operations.  Concrete service managers stay in the
 /// platform adapter or privileged CLI boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

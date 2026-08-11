@@ -2,6 +2,5 @@
   "enforcement_mode": "strict-filesystem",
   "browsers": [],
   "enrolled_exes": [],
-  "ssh_keys": [],
-  "ssh_behavior_window_secs": 10
+  "ssh_keys": []
 }

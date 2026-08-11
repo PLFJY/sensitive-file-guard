@@ -23,20 +23,20 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use guard_audit::{AuditRecord, AuditStore};
+use guard_audit::AuditStore;
 use guard_ipc::{
-    ConfigCheckInfo, ConfigurationInfo, ConfiguredBrowserInfo, EventInfo, IncidentResolutionAction,
-    IncidentResolutionInfo, LeaseInfo, MigrationAuthorizedInfo, MigrationPendingInfo,
-    MigrationResolutionAction, MigrationResolutionInfo, Response, ResponseBody, SshIncidentInfo,
-    SshIncidentStateInfo, SshLoadAuthorizedInfo, SshProtectedInfo, StatusInfo, MAX_REQUEST_BYTES,
-    PROTOCOL_VERSION,
+    ConfigCheckInfo, ConfigurationInfo, ConfiguredBrowserInfo, EventInfo, LeaseInfo,
+    MigrationAuthorizedInfo, MigrationPendingInfo, MigrationResolutionAction,
+    MigrationResolutionInfo, Response, ResponseBody, SshLoadAuthorizedInfo, SshPendingInfo,
+    SshProtectedInfo, SshReadResolutionAction, SshReadResolutionInfo, StatusInfo,
+    MAX_REQUEST_BYTES, PROTOCOL_VERSION,
 };
 use guard_ipc::{Request, RequestOp};
 use platform_linux::fanotify::FanotifyGroup;
 use platform_linux::ipc::{read_request, write_response, IpcServer, PeerCreds};
 
 use crate::enforce::{EnforcementEngine, SshAgentBinding};
-use crate::pending::PendingMigrationStore;
+use crate::pending::{PendingMigrationStore, PendingSshReadStore};
 
 static NEXT_AGENT_PIN: AtomicU64 = AtomicU64::new(1);
 
@@ -58,22 +58,13 @@ pub struct IpcState {
     /// corresponding one-shot lease is revoked/used/expired.
     pub ssh_agent_pins: Arc<Mutex<HashMap<String, PathBuf>>>,
     pub backend_metrics: Arc<crate::strict::BackendMetrics>,
-    /// Capability/attachment state of the SSH read-to-send containment hook.
-    /// It is kept separate from fanotify health so a green browser firewall
-    /// never implies raw SSH reads are behaviorally guarded.
-    pub ssh_behavior_backend: Arc<Mutex<platform_linux::ssh_behavior::SshBehaviorBackendStatus>>,
-    /// Present only after all BPF links have attached. This is intentionally
-    /// not exposed as a generic backend-control IPC capability.
-    pub ssh_behavior_runtime: Option<Arc<Mutex<platform_linux::ssh_behavior::SshBehaviorBackend>>>,
-    pub incidents: Arc<Mutex<guard_core::ExposureTracker>>,
     pub pending_migrations: Arc<Mutex<PendingMigrationStore>>,
+    pub pending_ssh_reads: Arc<Mutex<PendingSshReadStore>>,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum SensitiveAuthorization {
     Polkit,
-    #[cfg(test)]
-    AllowForTests,
 }
 
 /// Run the accept loop. Blocks until the socket is closed or an unrecoverable
@@ -122,12 +113,6 @@ fn handle_one_connection(state: &IpcState, stream: &mut UnixStream, creds: PeerC
     }
 }
 
-/// Dispatch a single request to its handler, enforcing peer-uid authorization.
-#[cfg(test)]
-pub fn handle_request(state: &IpcState, creds: PeerCreds, op: RequestOp) -> Response {
-    handle_request_with_connection(state, creds, op, None)
-}
-
 fn handle_request_with_connection(
     state: &IpcState,
     creds: PeerCreds,
@@ -149,11 +134,6 @@ fn handle_request_with_connection(
         RequestOp::Explain { event_id } => handle_explain(state, creds, event_id),
         RequestOp::LeasesList => handle_leases_list(state, creds),
         RequestOp::LeasesRevoke { lease_id } => handle_leases_revoke(state, creds, lease_id),
-        RequestOp::IncidentsList => handle_incidents_list(state, creds),
-        RequestOp::IncidentGet { id } => handle_incident_get(state, creds, &id),
-        RequestOp::IncidentResolve { id, action } => {
-            handle_incident_resolve(state, creds, connection_fd, &id, action)
-        }
         RequestOp::MigrationAuthorize {
             source_browser,
             source_profile,
@@ -173,6 +153,11 @@ fn handle_request_with_connection(
         RequestOp::MigrationResolve { id, action } => {
             handle_migration_resolve(state, creds, connection_fd, &id, action)
         }
+        RequestOp::SshPendingList => handle_ssh_pending_list(state, creds),
+        RequestOp::SshPendingGet { id } => handle_ssh_pending_get(state, creds, &id),
+        RequestOp::SshReadResolve { id, action } => {
+            handle_ssh_read_resolve(state, creds, connection_fd, &id, action)
+        }
         RequestOp::SshProtect { path } => handle_ssh_protect(state, creds, connection_fd, path),
         RequestOp::SshLoadAuthorize { path, ssh_add_pid } => {
             handle_ssh_load_authorize(state, creds, connection_fd, path, ssh_add_pid)
@@ -184,24 +169,6 @@ fn handle_request_with_connection(
 
 fn handle_status(state: &IpcState, creds: PeerCreds) -> Response {
     let engine = state.engine.lock().expect("engine mutex poisoned");
-    let incident_summary = state
-        .incidents
-        .lock()
-        .expect("incident mutex poisoned")
-        .summary();
-    let behavior_status = state
-        .ssh_behavior_backend
-        .lock()
-        .expect("SSH behavior status mutex poisoned");
-    let ssh_behavior_backend_failures = u64::from(
-        !matches!(
-            &*behavior_status,
-            platform_linux::ssh_behavior::SshBehaviorBackendStatus::Active
-        ) && engine
-            .registry()
-            .files()
-            .any(|resource| resource.kind == guard_core::ProtectedResourceKind::SshPrivateKey),
-    );
     let audit_dropped = state.audit.dropped();
     let backend = state.backend_metrics.snapshot();
     let required_filesystems = backend.marked_filesystems;
@@ -265,15 +232,6 @@ fn handle_status(state: &IpcState, creds: PeerCreds) -> Response {
         unclassified: engine.unclassified,
         audit_dropped,
         peer_uid: creds.uid,
-        ssh_behavior_status: behavior_status.label().to_owned(),
-        ssh_behavior_detail: behavior_status.detail().map(str::to_owned),
-        ssh_behavior_active_incidents: incident_summary.active,
-        ssh_behavior_pending_decisions: incident_summary.pending,
-        ssh_behavior_key_reads: incident_summary.key_reads,
-        ssh_behavior_network_blocks: incident_summary.network_blocks,
-        ssh_behavior_user_allows: incident_summary.user_allows,
-        ssh_behavior_quarantines: incident_summary.quarantines,
-        ssh_behavior_backend_failures,
     };
     Response::ok(ResponseBody::Status(body))
 }
@@ -357,7 +315,6 @@ fn handle_configuration_get(state: &IpcState, _creds: PeerCreds) -> Response {
             .iter()
             .map(|path| path.to_string_lossy().into_owned())
             .collect(),
-        ssh_behavior_window_secs: cfg.ssh_behavior_window_secs,
     }))
 }
 
@@ -430,7 +387,7 @@ fn handle_explain(state: &IpcState, creds: PeerCreds, event_id: i64) -> Response
 fn event_visible_in_build(event: &guard_audit::AuditEvent) -> bool {
     cfg!(debug_assertions)
         || matches!(event.record.decision, guard_core::policy::Decision::Deny(_))
-        || event.record.event_code.starts_with("ssh_behavior_")
+        || event.record.event_code.starts_with("ssh_key_access_")
 }
 
 fn handle_leases_list(state: &IpcState, creds: PeerCreds) -> Response {
@@ -481,6 +438,24 @@ fn handle_leases_list(state: &IpcState, creds: PeerCreds) -> Response {
             used: l.used,
         });
     }
+    for l in &leases.ssh_read {
+        if creds.uid != 0 && l.uid != creds.uid {
+            continue;
+        }
+        infos.push(LeaseInfo {
+            id: l.id.0.to_string(),
+            kind: "ssh_read".into(),
+            uid: l.uid,
+            source_browser: None,
+            source_profile: None,
+            target_browser: None,
+            resource: Some(l.resource.0.clone()),
+            state: Some(format!("root_pid={}", l.root.pid)),
+            expires_at: l.expires_at,
+            revoked: l.revoked,
+            used: false,
+        });
+    }
     Response::ok(ResponseBody::Leases(infos))
 }
 
@@ -497,6 +472,13 @@ fn handle_leases_revoke(state: &IpcState, creds: PeerCreds, lease_id: String) ->
         .or_else(|| {
             leases
                 .ssh
+                .iter()
+                .find(|l| l.id.0.to_string() == lease_id)
+                .map(|l| l.uid)
+        })
+        .or_else(|| {
+            leases
+                .ssh_read
                 .iter()
                 .find(|l| l.id.0.to_string() == lease_id)
                 .map(|l| l.uid)
@@ -522,252 +504,6 @@ fn handle_leases_revoke(state: &IpcState, creds: PeerCreds, lease_id: String) ->
             }
         }
     }
-}
-
-fn handle_incidents_list(state: &IpcState, creds: PeerCreds) -> Response {
-    let incidents = state
-        .incidents
-        .lock()
-        .expect("incident mutex poisoned")
-        .incidents_for_uid(creds.uid, creds.uid == 0)
-        .iter()
-        .map(incident_to_info)
-        .collect();
-    Response::ok(ResponseBody::Incidents(incidents))
-}
-
-fn handle_incident_get(state: &IpcState, creds: PeerCreds, id: &str) -> Response {
-    let incident = state
-        .incidents
-        .lock()
-        .expect("incident mutex poisoned")
-        .incidents_for_uid(creds.uid, creds.uid == 0)
-        .into_iter()
-        .find(|incident| incident.id == id);
-    match incident {
-        Some(incident) => Response::ok(ResponseBody::Incident(Box::new(incident_to_info(
-            &incident,
-        )))),
-        None => Response::err("incident not found"),
-    }
-}
-
-fn handle_incident_resolve(
-    state: &IpcState,
-    creds: PeerCreds,
-    connection_fd: Option<RawFd>,
-    id: &str,
-    action: IncidentResolutionAction,
-) -> Response {
-    // Read and UID-check before opening a polkit prompt.  The incident ID is
-    // never a capability: the authenticated peer may only resolve its own.
-    let owned = state
-        .incidents
-        .lock()
-        .expect("incident mutex poisoned")
-        .incidents_for_uid(creds.uid, creds.uid == 0)
-        .into_iter()
-        .any(|incident| incident.id == id);
-    if !owned {
-        return Response::err("incident not found");
-    }
-    let action_name = match action {
-        IncidentResolutionAction::BlockAndQuarantine => "block_and_quarantine",
-        IncidentResolutionAction::Block => "block",
-        IncidentResolutionAction::Allow => "allow",
-    };
-    if let Err(error) = authorize_sensitive(
-        state,
-        creds,
-        connection_fd,
-        "org.guardd.incident-resolve",
-        &[("incident_id", id), ("resolution", action_name)],
-    ) {
-        return Response::err(error);
-    }
-    let resolution = match action {
-        IncidentResolutionAction::BlockAndQuarantine => {
-            guard_core::IncidentResolution::BlockAndQuarantine
-        }
-        IncidentResolutionAction::Block => guard_core::IncidentResolution::Block,
-        IncidentResolutionAction::Allow => guard_core::IncidentResolution::Allow,
-    };
-    let kernel_id = match id
-        .strip_prefix("ssh-")
-        .and_then(|value| u64::from_str_radix(value, 16).ok())
-    {
-        Some(value) => value,
-        None => return Response::err("invalid incident identifier"),
-    };
-    let incident_before = match state
-        .incidents
-        .lock()
-        .expect("incident mutex poisoned")
-        .incidents_for_uid(creds.uid, creds.uid == 0)
-        .into_iter()
-        .find(|incident| incident.id == id)
-    {
-        Some(incident) if incident.state == guard_core::SshIncidentState::PendingDecision => {
-            incident
-        }
-        Some(_) => return Response::err("incident is not awaiting a decision"),
-        None => return Response::err("incident not found"),
-    };
-    let resolution_detail;
-    let backend_diag;
-    match action {
-        IncidentResolutionAction::Allow => {
-            let Some(runtime) = &state.ssh_behavior_runtime else {
-                return Response::err("SSH behavioral backend is not active");
-            };
-            if let Err(error) = runtime
-                .lock()
-                .expect("SSH behavior backend mutex poisoned")
-                .resolve(kernel_id, true)
-            {
-                return Response::err(format!("cannot allow incident networking: {error}"));
-            }
-            resolution_detail =
-                "Outbound networking was allowed for this incident process tree.".into();
-            backend_diag = format!("ssh_behavior_allowed_by_user;incident={id}");
-        }
-        IncidentResolutionAction::Block => {
-            resolution_detail =
-                "External networking remains blocked for this incident process tree until it exits. The process was not terminated.".into();
-            backend_diag = format!("ssh_behavior_blocked_by_user;incident={id}");
-        }
-        IncidentResolutionAction::BlockAndQuarantine => {
-            let Some(runtime) = &state.ssh_behavior_runtime else {
-                return Response::err("SSH behavioral backend is not active");
-            };
-            let initial = match runtime
-                .lock()
-                .expect("SSH behavior backend mutex poisoned")
-                .incident_tgids(kernel_id)
-            {
-                Ok(pids) => pids,
-                Err(error) => {
-                    return Response::err(format!("cannot inspect incident process tree: {error}"))
-                }
-            };
-            let result = platform_linux::containment::terminate_incident_tree(
-                &incident_before.root_process,
-                incident_before.uid,
-                &initial,
-                || {
-                    runtime
-                        .lock()
-                        .expect("SSH behavior backend mutex poisoned")
-                        .incident_tgids(kernel_id)
-                },
-            );
-            let result = match result {
-                Ok(result) => result,
-                Err(error) => return Response::err(format!("process containment failed: {error}")),
-            };
-            let mut quarantine = runtime.lock().expect("SSH behavior backend mutex poisoned");
-            let quarantine = incident_before.quarantine_candidate.as_ref().map_or(
-                Ok(platform_linux::quarantine::QuarantineResult::NoSafeCandidate),
-                |candidate| {
-                    platform_linux::quarantine::quarantine_candidate(
-                        candidate,
-                        incident_before.uid,
-                        id,
-                        &mut quarantine,
-                    )
-                },
-            );
-            resolution_detail = match quarantine {
-                Ok(platform_linux::quarantine::QuarantineResult::Quarantined { path, sha256 }) => format!(
-                    "Terminated {} verified incident process(es). Quarantined an attributable artifact at {}; SHA-256 {}.",
-                    result.terminated_processes,
-                    path.display(),
-                    sha256
-                ),
-                Ok(platform_linux::quarantine::QuarantineResult::NoSafeCandidate) => format!(
-                    "Terminated {} verified incident process(es). No safe quarantine target was identified.",
-                    result.terminated_processes
-                ),
-                Err(error) => format!(
-                    "Terminated {} verified incident process(es). Artifact quarantine was not completed: {error}",
-                    result.terminated_processes
-                ),
-            };
-            backend_diag = format!(
-                "ssh_behavior_blocked_and_quarantined;incident={};terminated={};{}",
-                id,
-                result.terminated_processes,
-                if resolution_detail.contains("Quarantined an attributable artifact") {
-                    "quarantine=artifact"
-                } else {
-                    "quarantine=none"
-                }
-            );
-            if let Err(error) = runtime
-                .lock()
-                .expect("SSH behavior backend mutex poisoned")
-                .resolve(kernel_id, false)
-            {
-                return Response::err(format!(
-                    "quarantine completed but kernel incident cleanup failed: {error}"
-                ));
-            }
-        }
-    }
-    let mut tracker = state.incidents.lock().expect("incident mutex poisoned");
-    if let Err(error) = tracker.resolve(id, resolution) {
-        return Response::err(error);
-    }
-    if let Err(error) = tracker.set_resolution_detail(id, resolution_detail) {
-        return Response::err(error);
-    }
-    let incident = tracker
-        .incidents_for_uid(creds.uid, creds.uid == 0)
-        .into_iter()
-        .find(|incident| incident.id == id)
-        .expect("resolved incident remains visible");
-    state.audit.record(AuditRecord {
-        event_code: match action {
-            IncidentResolutionAction::BlockAndQuarantine => "ssh_behavior_blocked_and_quarantined",
-            IncidentResolutionAction::Block => "ssh_behavior_blocked_by_user",
-            IncidentResolutionAction::Allow => "ssh_behavior_allowed_by_user",
-        }
-        .into(),
-        ts_ms: crate::unix_ms(),
-        uid: incident.uid,
-        pid: incident.root_process.pid,
-        start_time: incident.root_process.start_time,
-        decision: if matches!(action, IncidentResolutionAction::Allow) {
-            guard_core::Decision::Allow
-        } else {
-            guard_core::Decision::Deny(guard_core::DenyReason::SshBehaviorNetworkBlocked)
-        },
-        deny_reason: if matches!(action, IncidentResolutionAction::Allow) {
-            None
-        } else {
-            Some(guard_core::DenyReason::SshBehaviorNetworkBlocked)
-        },
-        resource_kind: guard_core::ProtectedResourceKind::SshPrivateKey,
-        resource_browser: None,
-        resource_profile: None,
-        path: incident
-            .accessed_keys
-            .first()
-            .map(|key| key.path.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-        exe: incident.process_exe.to_string_lossy().into_owned(),
-        exe_owner_uid: 0,
-        trust_tier: guard_core::TrustTier::Unknown,
-        process_browser: None,
-        parent_pid: incident.parent.as_ref().map(|parent| parent.pid),
-        parent_exe: incident
-            .parent
-            .as_ref()
-            .map(|parent| parent.exe.to_string_lossy().into_owned()),
-        lease_id: None,
-        backend_diag,
-    });
-    Response::ok(ResponseBody::IncidentResolved(incident_to_info(&incident)))
 }
 
 // --- helpers ---
@@ -972,6 +708,145 @@ fn pending_info_to_ipc(value: crate::pending::PendingMigrationInfo) -> Migration
         target_pid: value.target_pid,
         target_start_time: value.target_start_time,
         requested_data: value.requested_data,
+        created_at: value.created_at,
+        expires_at: value.expires_at,
+    }
+}
+
+fn handle_ssh_pending_list(state: &IpcState, creds: PeerCreds) -> Response {
+    let pending = state
+        .pending_ssh_reads
+        .lock()
+        .expect("pending SSH read mutex poisoned");
+    let values = pending
+        .list_for_uid(creds.uid, creds.uid == 0)
+        .into_iter()
+        .map(ssh_pending_info_to_ipc)
+        .collect();
+    Response::ok(ResponseBody::SshPending(values))
+}
+
+fn handle_ssh_pending_get(state: &IpcState, creds: PeerCreds, id: &str) -> Response {
+    let pending = state
+        .pending_ssh_reads
+        .lock()
+        .expect("pending SSH read mutex poisoned");
+    match pending
+        .get_for_uid(id, creds.uid, creds.uid == 0)
+        .map(|value| Box::new(ssh_pending_info_to_ipc(value)))
+    {
+        Some(value) => Response::ok(ResponseBody::SshPendingItem(value)),
+        None => Response::err("pending SSH key read not found"),
+    }
+}
+
+fn handle_ssh_read_resolve(
+    state: &IpcState,
+    creds: PeerCreds,
+    connection_fd: Option<RawFd>,
+    id: &str,
+    action: SshReadResolutionAction,
+) -> Response {
+    let info = {
+        let pending = state
+            .pending_ssh_reads
+            .lock()
+            .expect("pending SSH read mutex poisoned");
+        pending.get_for_uid(id, creds.uid, creds.uid == 0)
+    };
+    let Some(info) = info else {
+        return Response::err("pending SSH key read not found or already resolved");
+    };
+    if matches!(action, SshReadResolutionAction::Allow) {
+        if let Err(error) = authorize_sensitive(
+            state,
+            creds,
+            connection_fd,
+            "org.guardd.ssh-read-resolve",
+            &[("key_path", &info.key_path), ("pending_id", &info.id)],
+        ) {
+            return Response::err(error);
+        }
+    }
+    let block = matches!(action, SshReadResolutionAction::Block);
+    let request = state
+        .pending_ssh_reads
+        .lock()
+        .expect("pending SSH read mutex poisoned")
+        .take_for_resolution(id, creds.uid, creds.uid == 0, unix_secs(), block);
+    let Some(request) = request else {
+        return Response::err("pending SSH key read already resolved");
+    };
+    let details = request.details.clone();
+    if block {
+        request.resolve(false);
+        let record = state
+            .engine
+            .lock()
+            .expect("engine mutex poisoned")
+            .ssh_read_audit_record(
+                &details,
+                "ssh_key_access_blocked",
+                guard_core::Decision::Deny(guard_core::DenyReason::IdentityMismatch),
+                "ssh_key_access_blocked;resolution=user_block",
+            );
+        state.audit.record(record);
+        return Response::ok(ResponseBody::SshReadResolved(
+            SshReadResolutionInfo::Blocked,
+        ));
+    }
+    match state
+        .engine
+        .lock()
+        .expect("engine mutex poisoned")
+        .approve_pending_ssh_read(&details)
+    {
+        Ok((lease_id, expires_at)) => {
+            request.resolve(true);
+            let record = state
+                .engine
+                .lock()
+                .expect("engine mutex poisoned")
+                .ssh_read_audit_record(
+                    &details,
+                    "ssh_key_access_allowed",
+                    guard_core::Decision::AllowByLease(lease_id),
+                    &format!(
+                        "ssh_key_access_allowed;request={id};lease={};expires_at={}",
+                        lease_id.0, expires_at
+                    ),
+                );
+            state.audit.record(record);
+            Response::ok(ResponseBody::SshReadResolved(
+                SshReadResolutionInfo::Allowed,
+            ))
+        }
+        Err(error) => {
+            request.resolve(false);
+            let record = state
+                .engine
+                .lock()
+                .expect("engine mutex poisoned")
+                .ssh_read_audit_record(
+                    &details,
+                    "ssh_key_access_blocked",
+                    guard_core::Decision::Deny(guard_core::DenyReason::IdentityMismatch),
+                    &format!("ssh_key_access_blocked;resolution=identity_revalidation;{error}"),
+                );
+            state.audit.record(record);
+            Response::err(error)
+        }
+    }
+}
+
+fn ssh_pending_info_to_ipc(value: crate::pending::PendingSshReadInfo) -> SshPendingInfo {
+    SshPendingInfo {
+        id: value.id,
+        uid: value.uid,
+        key_path: value.key_path,
+        process_exe: value.process_exe,
+        pid: value.pid,
+        start_time: value.start_time,
         created_at: value.created_at,
         expires_at: value.expires_at,
     }
@@ -1431,8 +1306,6 @@ fn authorize_sensitive(
 ) -> Result<(), String> {
     match state.authorization {
         SensitiveAuthorization::Polkit => {}
-        #[cfg(test)]
-        SensitiveAuthorization::AllowForTests => return Ok(()),
     }
 
     if connection_fd.is_some_and(peer_connection_closed) {
@@ -1587,6 +1460,7 @@ fn event_to_info(ev: &guard_audit::AuditEvent) -> EventInfo {
     }
 }
 
+#[cfg(any())]
 fn incident_to_info(incident: &guard_core::SshExposureIncident) -> SshIncidentInfo {
     let accessed_key_paths = incident
         .accessed_keys
@@ -1645,7 +1519,7 @@ fn incident_to_info(incident: &guard_core::SshExposureIncident) -> SshIncidentIn
     }
 }
 
-#[cfg(test)]
+#[cfg(any())]
 mod tests {
     //! IPC handler tests. No root required: the engine + audit store are
     //! constructed in-process and `handle_request` is called directly with

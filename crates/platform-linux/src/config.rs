@@ -187,35 +187,27 @@ pub fn browser_id(id: &str) -> BrowserId {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use guard_core::DEFAULT_SSH_BEHAVIOR_WINDOW_SECS;
 
-    fn config(window: u64) -> EnforcementConfig {
+    fn config() -> EnforcementConfig {
         EnforcementConfig {
             enforcement_mode: EnforcementMode::Conservative,
             browsers: Vec::new(),
             enrolled_exes: vec![PathBuf::from("/synthetic/exe")],
             ssh_keys: Vec::new(),
-            ssh_behavior_window_secs: window,
         }
     }
 
     #[test]
-    fn ssh_behavior_window_is_bounded() {
-        assert!(config(1).validate().is_ok());
-        assert!(config(60).validate().is_ok());
-        assert!(config(0).validate().is_err());
-        assert!(config(61).validate().is_err());
+    fn ssh_key_only_configuration_is_valid() {
+        assert!(config().validate().is_ok());
     }
 
     #[test]
-    fn omitted_window_deserializes_to_ten_seconds() {
+    fn legacy_behavior_window_is_ignored() {
         let config: EnforcementConfig = serde_json::from_str(
-            r#"{"browsers":[],"enrolled_exes":["/synthetic/exe"],"ssh_keys":[]}"#,
+            r#"{"browsers":[],"enrolled_exes":["/synthetic/exe"],"ssh_keys":[],"ssh_behavior_window_secs":10}"#,
         )
         .unwrap();
-        assert_eq!(
-            config.ssh_behavior_window_secs,
-            DEFAULT_SSH_BEHAVIOR_WINDOW_SECS
-        );
+        assert_eq!(config.enrolled_exes, vec![PathBuf::from("/synthetic/exe")]);
     }
 }
