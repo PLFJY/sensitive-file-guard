@@ -127,6 +127,15 @@ fn main() {
 }
 
 fn build_ui(app: &adw::Application) {
+    // `guard-notify` can activate the application more than once while an
+    // import is pending. GApplication routes those activations to this primary
+    // process, so creating another UiState here would poll the same pending ID
+    // independently and show duplicate confirmation dialogs.
+    if let Some(window) = app.active_window() {
+        window.present();
+        return;
+    }
+
     let status = gtk::Label::new(Some("Connecting to guardd…"));
     status.add_css_class("title-3");
     let detail = gtk::Label::new(Some(

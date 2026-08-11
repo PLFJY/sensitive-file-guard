@@ -51,7 +51,9 @@ live target identity before creating an immediately bound lease.
 
 guard-ui presents a dedicated libadwaita-styled browser-import dialog with
 source/target browser, profile, target executable/PID and requested resource.
-Close means Block. guard-notify emits and activates guard-ui on the single
+Close means Block. guard-ui's repeated application activations now only present
+the existing primary window; they never construct another UI state or polling
+loop. guard-notify emits and activates guard-ui on the single
 `browser_migration_confirmation_required` audit event.
 
 ## LEASE BINDING, TIMEOUT, DEDUPLICATION, PID REVALIDATION

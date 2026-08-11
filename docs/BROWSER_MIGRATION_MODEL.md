@@ -43,6 +43,9 @@ The dialog identifies source browser/profile, target browser/executable/PID,
 and the first requested resource. Selecting **Yes, allow this import** requires
 interactive polkit authorization. Selecting **No, block**, closing the dialog,
 target process exit, or the 60-second timeout denies every queued operation.
+`guard-ui` is a single GTK application instance: repeated desktop notification
+activations bring its existing window forward instead of creating independent
+pollers and duplicate dialogs.
 
 ## Approved import
 
