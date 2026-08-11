@@ -172,15 +172,64 @@ pub enum ResponseBody {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IncidentResolutionAction {
-    AllowNetwork,
-    StopAndQuarantine,
+    BlockAndQuarantine,
+    Block,
+    Allow,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SshIncidentStateInfo {
+    Observing,
+    PendingDecision,
+    BlockedUntilExit,
+    Allowed,
+    Expired,
+    Quarantined,
+    Exited,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IncidentResolutionInfo {
+    BlockAndQuarantine,
+    Block,
+    Allow,
+}
+
+impl std::fmt::Display for SshIncidentStateInfo {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            Self::Observing => "observing",
+            Self::PendingDecision => "pending_decision",
+            Self::BlockedUntilExit => "blocked_until_exit",
+            Self::Allowed => "allowed",
+            Self::Expired => "expired",
+            Self::Quarantined => "quarantined",
+            Self::Exited => "exited",
+        };
+        formatter.write_str(value)
+    }
+}
+
+impl std::fmt::Display for IncidentResolutionInfo {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            Self::BlockAndQuarantine => "block_and_quarantine",
+            Self::Block => "block",
+            Self::Allow => "allow",
+        };
+        formatter.write_str(value)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SshIncidentInfo {
     pub id: String,
     pub uid: u32,
+    /// Compatibility summary of the first key in `accessed_key_paths`.
     pub key_path: String,
+    pub accessed_key_paths: Vec<String>,
     pub process_exe: String,
     pub pid: u32,
     pub start_time: u64,
@@ -189,13 +238,13 @@ pub struct SshIncidentInfo {
     pub first_sensitive_read_ms: u64,
     pub last_sensitive_read_ms: u64,
     pub observe_until_ms: u64,
-    pub state: String,
+    pub state: SshIncidentStateInfo,
     pub blocked_network_attempts: u64,
     pub first_network_ms: Option<u64>,
     pub destination_ip: Option<String>,
     pub destination_port: Option<u16>,
     pub protocol: Option<String>,
-    pub resolution: Option<String>,
+    pub resolution: Option<IncidentResolutionInfo>,
     pub resolution_detail: Option<String>,
 }
 
@@ -289,7 +338,8 @@ pub struct StatusInfo {
     pub audit_dropped: u64,
     pub peer_uid: u32,
     /// `ACTIVE` only after the selected kernel send hook has loaded and
-    /// attached. `UNAVAILABLE` means raw SSH reads remain fail-closed.
+    /// attached. `UNAVAILABLE` means reads remain allowed/reported while
+    /// immediate outbound network blocking is unavailable.
     #[serde(default)]
     pub ssh_behavior_status: String,
     #[serde(default)]
@@ -307,7 +357,7 @@ pub struct StatusInfo {
     #[serde(default)]
     pub ssh_behavior_quarantines: u64,
     /// Number of configured SSH behavioral backend initialization failures.
-    /// A nonzero value means raw reads remained fail-closed.
+    /// A nonzero value means behavioral network blocking is unavailable.
     #[serde(default)]
     pub ssh_behavior_backend_failures: u64,
 }
@@ -345,6 +395,10 @@ pub struct BrowserInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventInfo {
     pub id: i64,
+    /// Stable machine-readable event classification. UI code must branch on
+    /// this value rather than parsing localized or diagnostic text.
+    #[serde(default)]
+    pub event_code: String,
     pub ts_ms: u64,
     pub uid: u32,
     pub pid: u32,
@@ -436,7 +490,7 @@ mod tests {
             },
             RequestOp::IncidentResolve {
                 id: "ssh-0001".into(),
-                action: IncidentResolutionAction::AllowNetwork,
+                action: IncidentResolutionAction::Allow,
             },
             RequestOp::ConfigCheck,
             RequestOp::MigrationAuthorize {
@@ -495,14 +549,14 @@ mod tests {
             version: PROTOCOL_VERSION,
             op: RequestOp::IncidentResolve {
                 id: "ssh-0001".into(),
-                action: IncidentResolutionAction::StopAndQuarantine,
+                action: IncidentResolutionAction::BlockAndQuarantine,
             },
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(!json.contains("\"uid\""));
         assert!(!json.contains("\"pid\""));
         assert!(!json.contains("\"path\""));
-        assert!(json.contains("stop_and_quarantine"));
+        assert!(json.contains("block_and_quarantine"));
     }
 
     #[test]

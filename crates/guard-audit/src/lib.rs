@@ -36,6 +36,9 @@ use serde::{Deserialize, Serialize};
 /// protected file's path string, never its bytes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditRecord {
+    /// Stable machine-readable event classification (for example
+    /// `ssh_behavior_key_accessed`). This is metadata, never secret content.
+    pub event_code: String,
     pub ts_ms: u64,
     pub uid: u32,
     pub pid: u32,
@@ -176,6 +179,7 @@ fn init_schema(conn: &Connection) -> anyhow::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS events (
             id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_code       TEXT NOT NULL DEFAULT 'access_decision',
             ts_ms            INTEGER NOT NULL,
             uid              INTEGER NOT NULL,
             pid              INTEGER NOT NULL,
@@ -198,18 +202,31 @@ fn init_schema(conn: &Connection) -> anyhow::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_events_uid_ts ON events(uid, ts_ms DESC);
         CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts_ms DESC);",
     )?;
+    let has_event_code = conn
+        .prepare("PRAGMA table_info(events)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?
+        .iter()
+        .any(|column| column == "event_code");
+    if !has_event_code {
+        conn.execute(
+            "ALTER TABLE events ADD COLUMN event_code TEXT NOT NULL DEFAULT 'access_decision'",
+            [],
+        )?;
+    }
     Ok(())
 }
 
 fn insert_record(conn: &Connection, r: &AuditRecord) -> anyhow::Result<()> {
     conn.execute(
         "INSERT INTO events (
-            ts_ms, uid, pid, start_time, decision, deny_reason,
+            event_code, ts_ms, uid, pid, start_time, decision, deny_reason,
             resource_kind, resource_browser, resource_profile, path, exe,
             exe_owner_uid, trust_tier, process_browser, parent_pid, parent_exe,
             lease_id, backend_diag
-        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
         rusqlite::params![
+            r.event_code,
             r.ts_ms as i64,
             r.uid,
             r.pid,
@@ -303,7 +320,7 @@ fn query_events_cursor(
         anyhow::bail!("before_id and after_id cannot both be set");
     }
     let mut out = Vec::new();
-    let mut sql = String::from("SELECT id, ts_ms, uid, pid, start_time, decision, deny_reason, resource_kind, resource_browser, resource_profile, path, exe, exe_owner_uid, trust_tier, process_browser, parent_pid, parent_exe, lease_id, backend_diag FROM events WHERE 1=1");
+    let mut sql = String::from("SELECT id, event_code, ts_ms, uid, pid, start_time, decision, deny_reason, resource_kind, resource_browser, resource_profile, path, exe, exe_owner_uid, trust_tier, process_browser, parent_pid, parent_exe, lease_id, backend_diag FROM events WHERE 1=1");
     let mut params: Vec<rusqlite::types::Value> = Vec::new();
     if let Some(uid) = uid_filter {
         sql.push_str(" AND uid = ?");
@@ -333,7 +350,7 @@ fn query_events_cursor(
 
 fn query_event(conn: &Connection, id: i64) -> anyhow::Result<Option<AuditEvent>> {
     let mut stmt = conn.prepare(
-        "SELECT id, ts_ms, uid, pid, start_time, decision, deny_reason, \
+        "SELECT id, event_code, ts_ms, uid, pid, start_time, decision, deny_reason, \
          resource_kind, resource_browser, resource_profile, path, exe, \
          exe_owner_uid, trust_tier, process_browser, parent_pid, parent_exe, \
          lease_id, backend_diag FROM events WHERE id = ?1",
@@ -348,37 +365,39 @@ fn query_event(conn: &Connection, id: i64) -> anyhow::Result<Option<AuditEvent>>
 
 fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuditEvent> {
     let id: i64 = row.get(0)?;
-    let ts_ms = row.get::<_, i64>(1)? as u64;
-    let uid: u32 = row.get(2)?;
-    let pid: u32 = row.get(3)?;
-    let start_time = row.get::<_, i64>(4)? as u64;
-    let decision_str: String = row.get(5)?;
-    let deny_reason: Option<String> = row.get(6)?;
-    let lease_id: Option<i64> = row.get(17)?;
+    let event_code: String = row.get(1)?;
+    let ts_ms = row.get::<_, i64>(2)? as u64;
+    let uid: u32 = row.get(3)?;
+    let pid: u32 = row.get(4)?;
+    let start_time = row.get::<_, i64>(5)? as u64;
+    let decision_str: String = row.get(6)?;
+    let deny_reason: Option<String> = row.get(7)?;
+    let lease_id: Option<i64> = row.get(18)?;
     // Reconstruct the full Decision: the `decision` column stores only the
     // variant ("allow"/"deny"/"allow_by_lease"); the deny reason and lease id
     // are restored from their own columns so the round-trip is lossless.
     let deny_reason_parsed = deny_reason.map(parse_deny_reason);
     let decision = reconstruct_decision(&decision_str, deny_reason_parsed, lease_id);
     let record = AuditRecord {
+        event_code,
         ts_ms,
         uid,
         pid,
         start_time,
         decision,
         deny_reason: deny_reason_parsed,
-        resource_kind: parse_resource_kind(row.get::<_, String>(7)?),
-        resource_browser: row.get::<_, Option<String>>(8)?.map(BrowserId),
-        resource_profile: row.get::<_, Option<String>>(9)?.map(ProfileId),
-        path: row.get(10)?,
-        exe: row.get(11)?,
-        exe_owner_uid: row.get(12)?,
-        trust_tier: parse_trust_tier(row.get::<_, String>(13)?),
-        process_browser: row.get::<_, Option<String>>(14)?.map(BrowserId),
-        parent_pid: row.get::<_, Option<i64>>(15)?.map(|p| p as u32),
-        parent_exe: row.get(16)?,
+        resource_kind: parse_resource_kind(row.get::<_, String>(8)?),
+        resource_browser: row.get::<_, Option<String>>(9)?.map(BrowserId),
+        resource_profile: row.get::<_, Option<String>>(10)?.map(ProfileId),
+        path: row.get(11)?,
+        exe: row.get(12)?,
+        exe_owner_uid: row.get(13)?,
+        trust_tier: parse_trust_tier(row.get::<_, String>(14)?),
+        process_browser: row.get::<_, Option<String>>(15)?.map(BrowserId),
+        parent_pid: row.get::<_, Option<i64>>(16)?.map(|p| p as u32),
+        parent_exe: row.get(17)?,
         lease_id: lease_id.map(|l| l as u64),
-        backend_diag: row.get(18)?,
+        backend_diag: row.get(19)?,
     };
     Ok(AuditEvent { id, record })
 }
@@ -410,14 +429,12 @@ fn deny_reason_str(r: DenyReason) -> &'static str {
         DenyReason::UnknownProcess => "unknown_process",
         DenyReason::NotTrustedIdentity => "not_trusted_identity",
         DenyReason::CrossBrowserWithoutLease => "cross_browser_without_lease",
-        DenyReason::SshPrivateKeyRawRead => "ssh_private_key_raw_read",
         DenyReason::LeaseExpired => "lease_expired",
         DenyReason::LeaseRevoked => "lease_revoked",
         DenyReason::LeaseScopeMismatch => "lease_scope_mismatch",
         DenyReason::WrongUid => "wrong_uid",
         DenyReason::IdentityMismatch => "identity_mismatch",
         DenyReason::OneShotLeaseUsed => "one_shot_lease_used",
-        DenyReason::SshBehaviorBackendUnavailable => "ssh_behavior_backend_unavailable",
         DenyReason::SshBehaviorNetworkBlocked => "ssh_behavior_network_blocked",
     }
 }
@@ -426,14 +443,12 @@ fn parse_deny_reason(s: String) -> DenyReason {
         "unknown_process" => DenyReason::UnknownProcess,
         "not_trusted_identity" => DenyReason::NotTrustedIdentity,
         "cross_browser_without_lease" => DenyReason::CrossBrowserWithoutLease,
-        "ssh_private_key_raw_read" => DenyReason::SshPrivateKeyRawRead,
         "lease_expired" => DenyReason::LeaseExpired,
         "lease_revoked" => DenyReason::LeaseRevoked,
         "lease_scope_mismatch" => DenyReason::LeaseScopeMismatch,
         "wrong_uid" => DenyReason::WrongUid,
         "identity_mismatch" => DenyReason::IdentityMismatch,
         "one_shot_lease_used" => DenyReason::OneShotLeaseUsed,
-        "ssh_behavior_backend_unavailable" => DenyReason::SshBehaviorBackendUnavailable,
         "ssh_behavior_network_blocked" => DenyReason::SshBehaviorNetworkBlocked,
         _ => DenyReason::UnknownProcess,
     }
@@ -495,6 +510,7 @@ mod tests {
 
     fn sample_record(uid: u32, path: &str, decision: Decision) -> AuditRecord {
         AuditRecord {
+            event_code: "access_decision".into(),
             ts_ms: 1_700_000_000_000 + uid as u64,
             uid,
             pid: 4242,

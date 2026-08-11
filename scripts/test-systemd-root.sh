@@ -11,7 +11,7 @@
 # Tests:
 #   1. install service via deploy/install.sh
 #   2. start service, verify guardctl status shows ACTIVE
-#   3. protected synthetic files (cookies + SSH key) are denied
+#   3. browser fixture is denied while SSH-key read remains allowed
 #   4. stop service, verify files unprotected (fail-open)
 #   5. start service again, verify files protected (marks reconstructed)
 #   6. crash daemon (kill -9), verify systemd restarts it
@@ -140,18 +140,18 @@ else
 fi
 
 # ===========================================================================
-# Test 3: verify protected files are denied
+# Test 3: verify browser denial and SSH behavioral read allowance
 # ===========================================================================
-echo "==> Test 3: protected files denied"
+echo "==> Test 3: browser denied; SSH read allowed"
 if "$PROBE" read "$COOKIES" > /dev/null 2>&1; then
   note_fail "cookies readable (should be denied)"
 else
   note_pass "cookies denied"
 fi
 if "$PROBE" read "$PRIV_KEY" > /dev/null 2>&1; then
-  note_fail "SSH key readable (should be denied)"
+  note_pass "SSH key read allowed under the behavioral model"
 else
-  note_pass "SSH key denied"
+  note_fail "SSH key read was interrupted"
 fi
 
 # ===========================================================================

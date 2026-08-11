@@ -12,11 +12,11 @@
 //! - unknown / non-browser + browser protected resource => Deny (a migration
 //!   lease may still cover a target-tree helper process even if the opener's own
 //!   browser field is unset)
-//! - SSH private key + ordinary process => Deny
-//! - SSH private key + exact valid `SshLoadLease` => `AllowByLease`
-//! - expired / revoked / used lease => Deny
-//! - cross-user (wrong UID) => Deny
-//! - PID reuse / stable-identity mismatch => Deny
+//! - SSH private-key reads => Allow; an exact valid `SshLoadLease` is reported
+//!   as `AllowByLease` for the hardened optional ssh-agent load path
+//! - expired / revoked / used SSH lease => ordinary `Allow`, never read denial
+//! - cross-user browser access => Deny; SSH reads remain allowed
+//! - PID reuse / SSH stable-identity mismatch => lease does not apply, then Allow
 
 use serde::{Deserialize, Serialize};
 
@@ -36,16 +36,12 @@ pub enum DenyReason {
     UnknownProcess,
     NotTrustedIdentity,
     CrossBrowserWithoutLease,
-    SshPrivateKeyRawRead,
     LeaseExpired,
     LeaseRevoked,
     LeaseScopeMismatch,
     WrongUid,
     IdentityMismatch,
     OneShotLeaseUsed,
-    /// The BPF send hook was not attached, so allowing a raw SSH read would
-    /// violate the behavioral guard's arm-before-allow invariant.
-    SshBehaviorBackendUnavailable,
     /// An actual outbound send was blocked after a protected SSH-key read.
     /// This does not assert anything about the payload's provenance.
     SshBehaviorNetworkBlocked,
@@ -66,8 +62,6 @@ impl DenyReason {
             // A different browser tried to read another browser's profile
             // without a migration access lease.
             Self::CrossBrowserWithoutLease => "migration_lease_required",
-            // Raw read of a protected SSH private key without a SshLoadLease.
-            Self::SshPrivateKeyRawRead => "ssh_private_key_raw_read_denied",
             Self::LeaseExpired => "lease_expired",
             Self::LeaseRevoked => "lease_revoked",
             // Reserved for backends that can enforce a narrower lease scope.
@@ -79,7 +73,6 @@ impl DenyReason {
             Self::IdentityMismatch => "identity_mismatch",
             // The one-shot SshLoadLease was already consumed.
             Self::OneShotLeaseUsed => "one_shot_lease_used",
-            Self::SshBehaviorBackendUnavailable => "ssh_behavior_backend_unavailable",
             Self::SshBehaviorNetworkBlocked => "ssh_behavior_network_blocked",
         }
     }
@@ -193,33 +186,22 @@ fn decide_ssh(event: &AccessEvent, leases: &LeaseSet, now: u64) -> Decision {
     let proc = &event.process;
     let proc_identity = proc.stable.stable_identity();
 
-    let mut scope_match = false;
     for lease in &leases.ssh {
         let in_scope = lease.resource == event.resource.id && lease.uid == proc.uid;
         if !in_scope {
             continue;
         }
-        scope_match = true;
         if lease.target != proc_identity {
             continue;
         }
-        if lease.revoked {
-            return Decision::Deny(DenyReason::LeaseRevoked);
+        if !lease.revoked && !lease.used && now < lease.expires_at {
+            return Decision::AllowByLease(lease.id);
         }
-        if lease.used {
-            return Decision::Deny(DenyReason::OneShotLeaseUsed);
-        }
-        if now >= lease.expires_at {
-            return Decision::Deny(DenyReason::LeaseExpired);
-        }
-        return Decision::AllowByLease(lease.id);
     }
-
-    if scope_match {
-        Decision::Deny(DenyReason::IdentityMismatch)
-    } else {
-        Decision::Deny(DenyReason::SshPrivateKeyRawRead)
-    }
+    // Phase 22.2 product contract: the filesystem read is never the blocked
+    // operation. Linux may arm short-lived process-tree network observation,
+    // but backend failure cannot turn this decision into a denial.
+    Decision::Allow
 }
 
 #[cfg(test)]
@@ -493,7 +475,7 @@ mod tests {
     }
 
     #[test]
-    fn ssh_private_key_ordinary_process_denied() {
+    fn ssh_private_key_ordinary_process_allowed() {
         let res = ssh_resource(1000);
         let proc = browser_proc(
             None,
@@ -503,7 +485,7 @@ mod tests {
         );
         assert_eq!(
             evaluate(&event(res, proc), &LeaseSet::default(), NOW),
-            Decision::Deny(DenyReason::SshPrivateKeyRawRead)
+            Decision::Allow
         );
     }
 
@@ -597,7 +579,7 @@ mod tests {
     }
 
     #[test]
-    fn used_ssh_lease_denied() {
+    fn used_ssh_lease_falls_back_to_raw_read_allow() {
         let res = ssh_resource(1000);
         let proc = browser_proc(
             None,
@@ -611,10 +593,7 @@ mod tests {
             migration: vec![],
             ssh: vec![lease],
         };
-        assert_eq!(
-            evaluate(&event(res, proc), &ls, NOW),
-            Decision::Deny(DenyReason::OneShotLeaseUsed)
-        );
+        assert_eq!(evaluate(&event(res, proc), &ls, NOW), Decision::Allow);
     }
 
     // --- wrong UID / wrong profile ---
@@ -711,7 +690,7 @@ mod tests {
     }
 
     #[test]
-    fn pid_reuse_same_pid_different_start_time_denied() {
+    fn pid_reuse_does_not_receive_lease_but_read_is_allowed() {
         let res = ssh_resource(1000);
         // lease bound to start_time 600; process has same PID 6 but start_time 9999 (reused)
         let proc = browser_proc(
@@ -725,10 +704,7 @@ mod tests {
             migration: vec![],
             ssh: vec![lease],
         };
-        assert_eq!(
-            evaluate(&event(res, proc), &ls, NOW),
-            Decision::Deny(DenyReason::IdentityMismatch)
-        );
+        assert_eq!(evaluate(&event(res, proc), &ls, NOW), Decision::Allow);
     }
 
     #[test]
@@ -745,10 +721,7 @@ mod tests {
             migration: vec![],
             ssh: vec![lease],
         };
-        assert_eq!(
-            evaluate(&event(res, proc), &ls, NOW),
-            Decision::Deny(DenyReason::SshPrivateKeyRawRead)
-        );
+        assert_eq!(evaluate(&event(res, proc), &ls, NOW), Decision::Allow);
     }
 
     // --- process-tree scoping ---
@@ -938,7 +911,7 @@ mod tests {
         // These strings are a public contract for tools (`guardctl explain
         // --json`). They must be stable, snake_case, and match the spec
         // examples: browser_protected_resource, migration_lease_required,
-        // ssh_private_key_raw_read_denied, identity_untrusted.
+        // and identity_untrusted.
         assert_eq!(
             DenyReason::UnknownProcess.reason_code(),
             "browser_protected_resource"
@@ -950,10 +923,6 @@ mod tests {
         assert_eq!(
             DenyReason::CrossBrowserWithoutLease.reason_code(),
             "migration_lease_required"
-        );
-        assert_eq!(
-            DenyReason::SshPrivateKeyRawRead.reason_code(),
-            "ssh_private_key_raw_read_denied"
         );
         assert_eq!(DenyReason::LeaseExpired.reason_code(), "lease_expired");
         assert_eq!(DenyReason::LeaseRevoked.reason_code(), "lease_revoked");
@@ -979,14 +948,12 @@ mod tests {
             DenyReason::UnknownProcess,
             DenyReason::NotTrustedIdentity,
             DenyReason::CrossBrowserWithoutLease,
-            DenyReason::SshPrivateKeyRawRead,
             DenyReason::LeaseExpired,
             DenyReason::LeaseRevoked,
             DenyReason::LeaseScopeMismatch,
             DenyReason::WrongUid,
             DenyReason::IdentityMismatch,
             DenyReason::OneShotLeaseUsed,
-            DenyReason::SshBehaviorBackendUnavailable,
             DenyReason::SshBehaviorNetworkBlocked,
         ]
         .iter()

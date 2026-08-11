@@ -39,7 +39,7 @@ fn main() -> ExitCode {
                     for event in events.iter().filter(|event| {
                         event.id > previous
                             && (event.decision.contains("Deny")
-                                || event.backend_diag.starts_with("ssh_behavior_key_read;"))
+                                || event.event_code.starts_with("ssh_behavior_"))
                     }) {
                         if !should_notify(&mut last_notified, event, now_ms) {
                             continue;
@@ -52,7 +52,7 @@ fn main() -> ExitCode {
                             // harness an unambiguous delivery acknowledgement.
                             eprintln!("guard-notify: delivered event_id={}", event.id);
                         }
-                        if event.reason_code.as_deref() == Some("ssh_behavior_network_blocked") {
+                        if event.event_code == "ssh_behavior_network_blocked" {
                             activate_guard_ui();
                         }
                     }
@@ -77,7 +77,7 @@ fn main() -> ExitCode {
     }
 }
 
-type NotificationKey = (u32, String, String, String);
+type NotificationKey = (u32, String, String, String, String);
 
 fn should_notify(
     last_notified: &mut HashMap<NotificationKey, u64>,
@@ -94,7 +94,21 @@ fn should_notify(
         .find_map(|field| field.strip_prefix("incident="))
         .unwrap_or("")
         .to_owned();
-    let key = (event.pid, event.exe.clone(), event.path.clone(), incident);
+    let dedup_path = if event.event_code == "ssh_behavior_key_accessed" {
+        String::new()
+    } else {
+        event.path.clone()
+    };
+    let key = (
+        event.pid,
+        event.exe.clone(),
+        dedup_path,
+        incident,
+        event.event_code.clone(),
+    );
+    if event.event_code == "ssh_behavior_key_accessed" && last_notified.contains_key(&key) {
+        return false;
+    }
     if last_notified
         .get(&key)
         .is_some_and(|last| now_ms.saturating_sub(*last) < WINDOW_MS)
@@ -150,20 +164,21 @@ fn notification_text(event: &EventInfo) -> (String, String, &'static str) {
             "normal",
         );
     }
-    if event.reason_code.as_deref() == Some("ssh_behavior_network_blocked") {
+    if event.event_code == "ssh_behavior_network_blocked" {
         return (
             "Sensitive-key network activity blocked".into(),
             format!(
-                "A process that recently read a protected SSH private key attempted outbound network activity. Process: {exe}."
+                "{exe} recently accessed a protected SSH private key and then attempted external network activity."
             ),
             "critical",
         );
     }
-    if event.backend_diag.starts_with("ssh_behavior_key_read;") {
+    if event.event_code == "ssh_behavior_key_accessed" {
         return (
             "SSH private key accessed".into(),
             format!(
-                "{exe} read a protected SSH private key. Network activity from this process will be watched briefly."
+                "{exe} accessed:\n{}\n\nExternal network activity from this process will be watched briefly.",
+                event.path
             ),
             "normal",
         );
@@ -223,6 +238,7 @@ mod tests {
     fn event(pid: u32, path: &str) -> EventInfo {
         EventInfo {
             id: 1,
+            event_code: "access_decision".into(),
             ts_ms: 1,
             uid: 1000,
             pid,
@@ -264,10 +280,23 @@ mod tests {
     fn distinct_behavior_incidents_are_not_coalesced() {
         let mut sent = HashMap::new();
         let mut first = event(7, "/synthetic/id_ed25519");
-        first.backend_diag = "ssh_behavior_key_read;incident=ssh-0001".into();
+        first.event_code = "ssh_behavior_key_accessed".into();
+        first.backend_diag = "ssh_behavior_key_accessed;incident=ssh-0001".into();
         let mut second = first.clone();
-        second.backend_diag = "ssh_behavior_key_read;incident=ssh-0002".into();
+        second.backend_diag = "ssh_behavior_key_accessed;incident=ssh-0002".into();
         assert!(should_notify(&mut sent, &first, 1_000));
         assert!(should_notify(&mut sent, &second, 1_001));
+    }
+
+    #[test]
+    fn multiple_keys_in_one_exposure_emit_one_information_notification() {
+        let mut sent = HashMap::new();
+        let mut first = event(7, "/synthetic/id_ed25519");
+        first.event_code = "ssh_behavior_key_accessed".into();
+        first.backend_diag = "ssh_behavior_key_accessed;incident=ssh-0001".into();
+        let mut second = first.clone();
+        second.path = "/synthetic/id_rsa".into();
+        assert!(should_notify(&mut sent, &first, 1_000));
+        assert!(!should_notify(&mut sent, &second, 20_000));
     }
 }

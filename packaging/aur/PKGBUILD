@@ -1,7 +1,7 @@
 # Maintainer: PLFJY <https://github.com/PLFJY>
 
 pkgname=sensitive-file-guard-git
-pkgver=0.1.0.r19.gd5b29be
+pkgver=0.1.0.r20.g836eacf
 pkgrel=1
 pkgdesc='Pre-open local access firewall for browser authentication data and SSH private keys'
 arch=('x86_64')
@@ -70,7 +70,9 @@ package() {
   # user, UID, profile, or SSH key and must be deliberately copied and edited.
   install -Dm644 deploy/guardd-config.example.json \
     "$pkgdir/usr/share/guardd/guardd-config.example.json"
-  for document in README.md docs/INSTALL_LINUX.md docs/SECURITY_MODEL.md; do
+  for document in README.md docs/INSTALL_LINUX.md docs/SECURITY_MODEL.md \
+    docs/SSH_BEHAVIOR_MODEL.md \
+    docs/adr/0022-ssh-behavior-read-allow-network-block.md; do
     install -Dm644 "$document" "$pkgdir/usr/share/doc/sensitive-file-guard/$(basename "$document")"
   done
   install -Dm644 LICENSE-MIT "$pkgdir/usr/share/licenses/$pkgname/LICENSE-MIT"

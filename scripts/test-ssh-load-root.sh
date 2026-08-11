@@ -138,27 +138,24 @@ echo "guardd active (pid=$GUARDD_PID)"
 # still contains the system ssh-add.
 export PATH="$PATH"
 
-echo "==> Test 1: direct cat of the protected key => denied (no lease)"
+echo "==> Test 1: direct cat of the protected key => allowed and reported"
 if cat "$PRIV_KEY" > "$WORK/t1.out" 2>/dev/null; then
-  note_fail "cat unexpectedly read protected private key before any load"
+  note_pass "direct read was not interrupted"
 else
-  note_pass "direct cat denied before load"
+  note_fail "direct read was interrupted"
 fi
 
-echo "==> Test 2: direct ssh-add (no lease) => fails to read the key"
-# ssh-add without guardctl has no SshLoadLease, so its open of the key is denied
-# by fanotify and ssh-add fails. (Exit code 1 = could not add identity.)
+echo "==> Test 2: direct ssh-add (no lease) => read remains allowed"
 if ssh-add "$PRIV_KEY" > "$WORK/t2.out" 2>&1; then
-  # If ssh-add reported success it would mean the key was read without a lease.
-  # Distinguish "loaded" from "already loaded" by checking the agent.
   if ssh-add -l 2>/dev/null | grep -q "guard-ephemeral-load-test"; then
-    note_fail "direct ssh-add loaded the key without a lease"
+    note_pass "direct ssh-add was not interrupted"
   else
-    note_pass "direct ssh-add did not load the key"
+    note_fail "direct ssh-add returned success without loading the fixture"
   fi
 else
-  note_pass "direct ssh-add denied (no lease)"
+  note_fail "direct ssh-add read was interrupted"
 fi
+ssh-add -d "$PRIV_KEY" >/dev/null 2>&1 || true
 
 echo "==> Test 3: guardctl ssh load => succeeds under a one-shot lease"
 if "$GUARDCTL" --socket "$SOCK" ssh load "$PRIV_KEY" > "$WORK/t3.out" 2>&1; then
@@ -174,14 +171,13 @@ else
   note_fail "ssh-add -l did not show the loaded identity: $(ssh-add -l 2>&1)"
 fi
 
-echo "==> Test 5: after the load lease ends, direct cat is STILL denied"
-# The one-shot lease was used + revoked when ssh-add exited, so raw reads must
-# remain denied. Sleep briefly past any in-flight state.
+echo "==> Test 5: after the load lease ends, direct cat remains allowed"
+# Lease lifetime affects only the brokered attribution, never raw-read access.
 sleep 1
 if cat "$PRIV_KEY" > "$WORK/t5.out" 2>/dev/null; then
-  note_fail "cat read protected key after load (lease should be one-shot/revoked)"
+  note_pass "direct read remained uninterrupted after lease cleanup"
 else
-  note_pass "direct cat still denied after load (lease did not persist)"
+  note_fail "direct read was interrupted after lease cleanup"
 fi
 
 echo "==> Test 6: a second guardctl ssh load works (fresh one-shot lease)"

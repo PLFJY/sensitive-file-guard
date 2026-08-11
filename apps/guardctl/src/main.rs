@@ -177,7 +177,8 @@ enum IncidentsAction {
     List,
     Show { id: String },
     Allow { id: String },
-    Quarantine { id: String },
+    Block { id: String },
+    BlockAndQuarantine { id: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -325,13 +326,19 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
             action: IncidentsAction::Allow { id },
         } => RequestOp::IncidentResolve {
             id: id.clone(),
-            action: guard_ipc::IncidentResolutionAction::AllowNetwork,
+            action: guard_ipc::IncidentResolutionAction::Allow,
         },
         Command::Incidents {
-            action: IncidentsAction::Quarantine { id },
+            action: IncidentsAction::Block { id },
         } => RequestOp::IncidentResolve {
             id: id.clone(),
-            action: guard_ipc::IncidentResolutionAction::StopAndQuarantine,
+            action: guard_ipc::IncidentResolutionAction::Block,
+        },
+        Command::Incidents {
+            action: IncidentsAction::BlockAndQuarantine { id },
+        } => RequestOp::IncidentResolve {
+            id: id.clone(),
+            action: guard_ipc::IncidentResolutionAction::BlockAndQuarantine,
         },
         Command::Migration {
             action:
@@ -1209,8 +1216,8 @@ fn print_ssh_protected(s: &guard_ipc::SshProtectedInfo) {
     println!("  path             : {}", s.path);
     println!("  owner_uid        : {}", s.owner_uid);
     println!("  resource_id      : {}", s.resource_id);
-    println!("  raw reads by ordinary processes are now denied.");
-    println!("  load via ssh-agent requires a SshLoadLease (Phase 11).");
+    println!("  reads are allowed, reported, and watched for immediate external sends.");
+    println!("  the brokered ssh-agent path still uses a one-shot SshLoadLease.");
 }
 
 fn print_ssh_load_authorized(s: &guard_ipc::SshLoadAuthorizedInfo) {

@@ -7,12 +7,14 @@
 //! mutator. This makes the subsequent identity recheck and move/delete a
 //! compare-and-act transaction rather than a `stat(); rename()` race.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, Read, Seek};
 use std::os::fd::FromRawFd;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+use cap_std::ambient_authority;
+use cap_std::fs::{Dir, OpenOptions as CapOpenOptions, OpenOptionsExt as CapOpenOptionsExt};
 use guard_core::{ProcessIdentity, ProcessStableId, QuarantineCandidate, QuarantineCandidateKind};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -63,11 +65,12 @@ pub fn candidate_for_process(process: &ProcessIdentity) -> Option<QuarantineCand
 #[derive(Serialize)]
 struct Metadata {
     incident_id: String,
+    timestamp_ms: u64,
     original_path: String,
     original_dev: u64,
     original_ino: u64,
     owner_uid: u32,
-    classification: &'static str,
+    attribution_type: &'static str,
     sha256: String,
     reason: &'static str,
 }
@@ -118,6 +121,7 @@ pub fn quarantine_candidate(
         candidate.ino,
         uid,
         incident_id,
+        candidate.kind.clone(),
     );
     let clear = backend.disarm_quarantine_inode(candidate.dev, candidate.ino);
     match (result, clear) {
@@ -183,6 +187,7 @@ fn quarantine_guarded(
     ino: u64,
     uid: u32,
     incident_id: &str,
+    candidate_kind: QuarantineCandidateKind,
 ) -> Result<QuarantineResult, String> {
     let current = fs::symlink_metadata(original)
         .map_err(|error| format!("rechecking guarded candidate: {error}"))?;
@@ -190,24 +195,42 @@ fn quarantine_guarded(
         return Err("quarantine candidate path changed before guarded move".into());
     }
 
-    let incident_dir = prepare_incident_dir(Path::new(QUARANTINE_ROOT), incident_id)?;
-    let artifact = incident_dir.join("artifact");
+    let (incident_dir, incident_path) =
+        prepare_incident_dir(Path::new(QUARANTINE_ROOT), incident_id)?;
+    let artifact = incident_path.join("artifact");
     let sha256 = sha256_file(source)?;
     if dev
-        == fs::metadata(&incident_dir)
+        == fs::metadata(&incident_path)
             .map_err(|error| error.to_string())?
             .dev()
     {
-        fs::rename(original, &artifact)
-            .map_err(|error| format!("moving guarded artifact: {error}"))?;
+        let parent = original
+            .parent()
+            .ok_or("quarantine candidate has no parent directory")?;
+        let file_name = original
+            .file_name()
+            .ok_or("quarantine candidate has no file name")?;
+        let source_dir = Dir::open_ambient_dir(parent, ambient_authority())
+            .map_err(|error| format!("opening guarded source directory: {error}"))?;
+        source_dir
+            .rename(file_name, &incident_dir, "artifact")
+            .map_err(|error| format!("moving guarded artifact with cap-std: {error}"))?;
     } else {
-        copy_pinned_source(source, &artifact)?;
+        copy_pinned_source(source, &incident_dir)?;
         let current = fs::symlink_metadata(original)
             .map_err(|error| format!("rechecking guarded source before unlink: {error}"))?;
         if !current.file_type().is_file() || current.dev() != dev || current.ino() != ino {
             return Err("quarantine candidate path changed before guarded unlink".into());
         }
-        fs::remove_file(original).map_err(|error| format!("removing guarded source: {error}"))?;
+        let parent = original
+            .parent()
+            .ok_or("quarantine candidate has no parent directory")?;
+        let file_name = original
+            .file_name()
+            .ok_or("quarantine candidate has no file name")?;
+        Dir::open_ambient_dir(parent, ambient_authority())
+            .and_then(|dir| dir.remove_file(file_name))
+            .map_err(|error| format!("removing guarded source with cap-std: {error}"))?;
     }
     fs::set_permissions(&artifact, fs::Permissions::from_mode(0o600))
         .map_err(|error| format!("restricting quarantined artifact: {error}"))?;
@@ -215,11 +238,18 @@ fn quarantine_guarded(
         &incident_dir,
         Metadata {
             incident_id: incident_id.into(),
+            timestamp_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_millis() as u64)
+                .unwrap_or(0),
             original_path: original.to_string_lossy().into_owned(),
             original_dev: dev,
             original_ino: ino,
             owner_uid: uid,
-            classification: "direct_executable",
+            attribution_type: match candidate_kind {
+                QuarantineCandidateKind::DirectExecutable => "direct_executable",
+                QuarantineCandidateKind::ExplicitScript => "explicit_script",
+            },
             sha256: sha256.clone(),
             reason: "sensitive_key_network_activity",
         },
@@ -230,7 +260,7 @@ fn quarantine_guarded(
     })
 }
 
-fn prepare_incident_dir(root: &Path, incident_id: &str) -> Result<PathBuf, String> {
+fn prepare_incident_dir(root: &Path, incident_id: &str) -> Result<(Dir, PathBuf), String> {
     if incident_id.len() != 20
         || !incident_id.starts_with("ssh-")
         || !incident_id[4..]
@@ -239,15 +269,22 @@ fn prepare_incident_dir(root: &Path, incident_id: &str) -> Result<PathBuf, Strin
     {
         return Err("invalid incident id for quarantine path".into());
     }
-    fs::create_dir_all(root).map_err(|error| format!("creating quarantine root: {error}"))?;
+    Dir::create_ambient_dir_all(root, ambient_authority())
+        .map_err(|error| format!("creating quarantine root with cap-std: {error}"))?;
     fs::set_permissions(root, fs::Permissions::from_mode(0o700))
         .map_err(|error| format!("securing quarantine root: {error}"))?;
+    let root_dir = Dir::open_ambient_dir(root, ambient_authority())
+        .map_err(|error| format!("opening quarantine root with cap-std: {error}"))?;
     let incident_dir = root.join(incident_id);
-    fs::create_dir(&incident_dir)
-        .map_err(|error| format!("creating quarantine incident directory: {error}"))?;
+    root_dir
+        .create_dir(incident_id)
+        .map_err(|error| format!("creating quarantine incident directory with cap-std: {error}"))?;
     fs::set_permissions(&incident_dir, fs::Permissions::from_mode(0o700))
         .map_err(|error| format!("securing quarantine incident directory: {error}"))?;
-    Ok(incident_dir)
+    let directory = root_dir
+        .open_dir(incident_id)
+        .map_err(|error| format!("opening quarantine incident directory: {error}"))?;
+    Ok((directory, incident_dir))
 }
 
 fn sha256_file(source: &mut File) -> Result<String, String> {
@@ -268,16 +305,15 @@ fn sha256_file(source: &mut File) -> Result<String, String> {
     Ok(format!("{:x}", hash.finalize()))
 }
 
-fn copy_pinned_source(source: &mut File, artifact: &Path) -> Result<(), String> {
+fn copy_pinned_source(source: &mut File, incident_dir: &Dir) -> Result<(), String> {
     source
         .seek(std::io::SeekFrom::Start(0))
         .map_err(|error| format!("rewinding quarantine source: {error}"))?;
-    let mut destination = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(artifact)
-        .map_err(|error| format!("creating quarantined copy: {error}"))?;
+    let mut options = CapOpenOptions::new();
+    options.write(true).create_new(true).mode(0o600);
+    let mut destination = incident_dir
+        .open_with("artifact", &options)
+        .map_err(|error| format!("creating quarantined copy with cap-std: {error}"))?;
     io::copy(source, &mut destination)
         .map_err(|error| format!("copying quarantined artifact: {error}"))?;
     destination
@@ -285,15 +321,13 @@ fn copy_pinned_source(source: &mut File, artifact: &Path) -> Result<(), String> 
         .map_err(|error| format!("fsync quarantined artifact: {error}"))
 }
 
-fn write_metadata(incident_dir: &Path, metadata: Metadata) -> Result<(), String> {
-    let path = incident_dir.join("metadata.json");
+fn write_metadata(incident_dir: &Dir, metadata: Metadata) -> Result<(), String> {
     let bytes = serde_json::to_vec_pretty(&metadata).map_err(|error| error.to_string())?;
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(|error| format!("creating quarantine metadata: {error}"))?;
+    let mut options = CapOpenOptions::new();
+    options.write(true).create_new(true).mode(0o600);
+    let mut file = incident_dir
+        .open_with("metadata.json", &options)
+        .map_err(|error| format!("creating quarantine metadata with cap-std: {error}"))?;
     use std::io::Write;
     file.write_all(&bytes)
         .map_err(|error| format!("writing quarantine metadata: {error}"))?;
@@ -304,7 +338,9 @@ fn write_metadata(incident_dir: &Path, metadata: Metadata) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::OpenOptions;
     use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
 
     #[test]
     fn direct_candidate_requires_the_exact_user_writable_inode() {
@@ -339,7 +375,7 @@ mod tests {
     #[test]
     fn incident_directory_is_private_and_rejects_path_tricks() {
         let dir = tempfile::tempdir().unwrap();
-        let created = prepare_incident_dir(dir.path(), "ssh-0000000000000001").unwrap();
+        let (_, created) = prepare_incident_dir(dir.path(), "ssh-0000000000000001").unwrap();
         assert_eq!(
             fs::metadata(&created).unwrap().permissions().mode() & 0o777,
             0o700

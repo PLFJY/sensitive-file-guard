@@ -22,17 +22,27 @@ pub const MAX_SSH_BEHAVIOR_WINDOW_SECS: u64 = 60;
 pub enum SshIncidentState {
     Observing,
     PendingDecision,
+    BlockedUntilExit,
     Allowed,
     Expired,
     Quarantined,
-    Terminated,
+    Exited,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IncidentResolution {
-    AllowNetwork,
-    StopAndQuarantine,
+    BlockAndQuarantine,
+    Block,
+    Allow,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessedKey {
+    pub resource_id: String,
+    pub path: PathBuf,
+    pub first_read_ms: u64,
+    pub last_read_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,8 +71,7 @@ pub struct QuarantineCandidate {
 pub struct SshExposureIncident {
     pub id: String,
     pub uid: u32,
-    pub key_resource_id: String,
-    pub key_path: PathBuf,
+    pub accessed_keys: Vec<AccessedKey>,
     pub root_process: ProcessStableId,
     /// Linux thread-group leader used by the BPF send map. The stable process
     /// identity above remains the authorization/audit identity; this is not a
@@ -97,6 +106,7 @@ pub enum NetworkDecision {
 #[derive(Debug, Default)]
 pub struct ExposureTracker {
     next_id: u64,
+    key_accesses: u64,
     incidents: HashMap<String, SshExposureIncident>,
 }
 
@@ -120,11 +130,14 @@ impl ExposureTracker {
         now_ms: u64,
         window_secs: u64,
     ) -> (SshExposureIncident, bool) {
+        self.key_accesses = self.key_accesses.saturating_add(1);
         self.expire(now_ms);
         if let Some(existing) = self.incidents.values_mut().find(|incident| {
             matches!(
                 incident.state,
-                SshIncidentState::Observing | SshIncidentState::PendingDecision
+                SshIncidentState::Observing
+                    | SshIncidentState::PendingDecision
+                    | SshIncidentState::BlockedUntilExit
             ) && (incident.root_tgid == root_tgid
                 && incident.root_process.start_time == process.stable.start_time
                 && incident.root_process.exe_identity() == process.stable.exe_identity()
@@ -133,7 +146,6 @@ impl ExposureTracker {
                     .ancestors
                     .iter()
                     .any(|ancestor| same_ancestor(ancestor, &incident.root_process)))
-                && incident.key_resource_id == resource.id.0
         }) {
             existing.last_sensitive_read_ms = now_ms;
             // A pending incident is already contained indefinitely.  A later
@@ -141,6 +153,20 @@ impl ExposureTracker {
             // shorten the observation deadline in either state machine.
             if existing.state == SshIncidentState::Observing {
                 existing.observe_until_ms = now_ms.saturating_add(window_secs.saturating_mul(1000));
+            }
+            if let Some(key) = existing
+                .accessed_keys
+                .iter_mut()
+                .find(|key| key.resource_id == resource.id.0)
+            {
+                key.last_read_ms = now_ms;
+            } else {
+                existing.accessed_keys.push(AccessedKey {
+                    resource_id: resource.id.0.clone(),
+                    path: resource.path.clone(),
+                    first_read_ms: now_ms,
+                    last_read_ms: now_ms,
+                });
             }
             return (existing.clone(), false);
         }
@@ -150,8 +176,12 @@ impl ExposureTracker {
         let incident = SshExposureIncident {
             id: id.clone(),
             uid: process.uid,
-            key_resource_id: resource.id.0.clone(),
-            key_path: resource.path.clone(),
+            accessed_keys: vec![AccessedKey {
+                resource_id: resource.id.0.clone(),
+                path: resource.path.clone(),
+                first_read_ms: now_ms,
+                last_read_ms: now_ms,
+            }],
             root_process: process.stable.clone(),
             root_tgid,
             process_exe: process.stable.exe.clone(),
@@ -209,10 +239,17 @@ impl ExposureTracker {
                     newly_pending: false,
                 }
             }
+            SshIncidentState::BlockedUntilExit => {
+                incident.blocked_network_attempts =
+                    incident.blocked_network_attempts.saturating_add(1);
+                NetworkDecision::Block {
+                    newly_pending: false,
+                }
+            }
             SshIncidentState::Allowed
             | SshIncidentState::Expired
             | SshIncidentState::Quarantined
-            | SshIncidentState::Terminated => NetworkDecision::Allow,
+            | SshIncidentState::Exited => NetworkDecision::Allow,
         }
     }
 
@@ -227,8 +264,9 @@ impl ExposureTracker {
         }
         incident.resolution = Some(resolution);
         incident.state = match resolution {
-            IncidentResolution::AllowNetwork => SshIncidentState::Allowed,
-            IncidentResolution::StopAndQuarantine => SshIncidentState::Terminated,
+            IncidentResolution::BlockAndQuarantine => SshIncidentState::Quarantined,
+            IncidentResolution::Block => SshIncidentState::BlockedUntilExit,
+            IncidentResolution::Allow => SshIncidentState::Allowed,
         };
         Ok(())
     }
@@ -240,20 +278,6 @@ impl ExposureTracker {
         }
         incident.resolution_detail = Some(detail);
         Ok(())
-    }
-
-    /// Remove a just-created observing incident when its kernel map arm failed
-    /// before the corresponding file access was allowed. Existing incidents
-    /// are never removed here because they may still represent a prior armed
-    /// read.
-    pub fn discard_unarmed(&mut self, id: &str) {
-        if self
-            .incidents
-            .get(id)
-            .is_some_and(|incident| incident.state == SshIncidentState::Observing)
-        {
-            self.incidents.remove(id);
-        }
     }
 
     /// Record a kernel-blocked send using the opaque incident ID carried in
@@ -300,9 +324,10 @@ impl ExposureTracker {
                 Some(true)
             }
             SshIncidentState::PendingDecision => Some(false),
+            SshIncidentState::BlockedUntilExit => Some(false),
             SshIncidentState::Allowed
             | SshIncidentState::Quarantined
-            | SshIncidentState::Terminated
+            | SshIncidentState::Exited
             | SshIncidentState::Expired => None,
         }
     }
@@ -329,33 +354,38 @@ impl ExposureTracker {
     }
 
     pub fn summary(&self) -> ExposureSummary {
-        self.incidents
-            .values()
-            .fold(ExposureSummary::default(), |mut summary, incident| {
-                summary.key_reads = summary.key_reads.saturating_add(1);
-                summary.network_blocks = summary
-                    .network_blocks
-                    .saturating_add(incident.blocked_network_attempts);
-                match incident.state {
-                    SshIncidentState::Observing => {
-                        summary.active = summary.active.saturating_add(1)
+        let mut summary =
+            self.incidents
+                .values()
+                .fold(ExposureSummary::default(), |mut summary, incident| {
+                    summary.network_blocks = summary
+                        .network_blocks
+                        .saturating_add(incident.blocked_network_attempts);
+                    match incident.state {
+                        SshIncidentState::Observing => {
+                            summary.active = summary.active.saturating_add(1)
+                        }
+                        SshIncidentState::PendingDecision => {
+                            summary.active = summary.active.saturating_add(1);
+                            summary.pending = summary.pending.saturating_add(1);
+                        }
+                        SshIncidentState::BlockedUntilExit => {
+                            summary.active = summary.active.saturating_add(1)
+                        }
+                        SshIncidentState::Allowed => {
+                            summary.active = summary.active.saturating_add(1);
+                            summary.user_allows = summary.user_allows.saturating_add(1);
+                        }
+                        SshIncidentState::Quarantined => {
+                            summary.quarantines = summary.quarantines.saturating_add(1)
+                        }
+                        SshIncidentState::Exited => {}
+                        SshIncidentState::Expired => {}
                     }
-                    SshIncidentState::PendingDecision => {
-                        summary.active = summary.active.saturating_add(1);
-                        summary.pending = summary.pending.saturating_add(1);
-                    }
-                    SshIncidentState::Allowed => {
-                        summary.active = summary.active.saturating_add(1);
-                        summary.user_allows = summary.user_allows.saturating_add(1);
-                    }
-                    SshIncidentState::Quarantined => {
-                        summary.quarantines = summary.quarantines.saturating_add(1)
-                    }
-                    SshIncidentState::Terminated => {}
-                    SshIncidentState::Expired => {}
-                }
-                summary
-            })
+                    summary
+                });
+        summary.key_reads = self.key_accesses;
+        summary
     }
 
     pub fn expire(&mut self, now_ms: u64) {
@@ -363,6 +393,32 @@ impl ExposureTracker {
             if incident.state == SshIncidentState::Observing && now_ms >= incident.observe_until_ms
             {
                 incident.state = SshIncidentState::Expired;
+            }
+        }
+    }
+
+    /// Mark live userspace incidents terminal once the kernel no longer has
+    /// any process-tree member for them. Historical metadata remains visible.
+    pub fn reconcile_live_kernel_ids(&mut self, live_ids: &std::collections::HashSet<u64>) {
+        for incident in self.incidents.values_mut() {
+            if !matches!(
+                incident.state,
+                SshIncidentState::Observing
+                    | SshIncidentState::PendingDecision
+                    | SshIncidentState::BlockedUntilExit
+                    | SshIncidentState::Allowed
+            ) {
+                continue;
+            }
+            let Some(kernel_id) = incident
+                .id
+                .strip_prefix("ssh-")
+                .and_then(|value| u64::from_str_radix(value, 16).ok())
+            else {
+                continue;
+            };
+            if !live_ids.contains(&kernel_id) {
+                incident.state = SshIncidentState::Exited;
             }
         }
     }
@@ -379,6 +435,7 @@ impl ExposureTracker {
                     incident.state,
                     SshIncidentState::Observing
                         | SshIncidentState::PendingDecision
+                        | SshIncidentState::BlockedUntilExit
                         | SshIncidentState::Allowed
                 )
         })
@@ -530,9 +587,7 @@ mod tests {
             tracker.network_send(&reader, destination(), 200),
             NetworkDecision::Block { .. }
         ));
-        tracker
-            .resolve(&id, IncidentResolution::AllowNetwork)
-            .unwrap();
+        tracker.resolve(&id, IncidentResolution::Allow).unwrap();
         assert_eq!(
             tracker.network_send(&reader, destination(), 201),
             NetworkDecision::Allow
@@ -556,16 +611,6 @@ mod tests {
                 .blocked_network_attempts,
             2
         );
-    }
-
-    #[test]
-    fn failed_new_arm_can_be_discarded_without_an_incident() {
-        let mut tracker = ExposureTracker::default();
-        let reader = process(12, 1, vec![]);
-        let (incident, is_new) = tracker.arm(&key(), &reader, None, 12, 100, 10);
-        assert!(is_new);
-        tracker.discard_unarmed(&incident.id);
-        assert!(tracker.incident_for_kernel_id(1).is_none());
     }
 
     #[test]
@@ -616,6 +661,48 @@ mod tests {
     }
 
     #[test]
+    fn multiple_keys_share_one_process_tree_exposure() {
+        let mut tracker = ExposureTracker::default();
+        let reader = process(12, 1, vec![]);
+        let first = key();
+        let mut second = key();
+        second.id = ProtectedResourceId("ssh/synthetic-2".into());
+        second.path = "/synthetic/id_rsa".into();
+        let (incident, is_new) = tracker.arm(&first, &reader, None, 12, 100, 10);
+        assert!(is_new);
+        let (same, is_new) = tracker.arm(&second, &reader, None, 12, 200, 10);
+        assert!(!is_new);
+        assert_eq!(same.id, incident.id);
+        assert_eq!(same.accessed_keys.len(), 2);
+        assert_eq!(tracker.summary().key_reads, 2);
+    }
+
+    #[test]
+    fn block_keeps_tree_alive_and_network_denied_until_exit() {
+        let mut tracker = ExposureTracker::default();
+        let reader = process(12, 1, vec![]);
+        let (incident, _) = tracker.arm(&key(), &reader, None, 12, 100, 10);
+        assert!(matches!(
+            tracker.network_send(&reader, destination(), 200),
+            NetworkDecision::Block { .. }
+        ));
+        tracker
+            .resolve(&incident.id, IncidentResolution::Block)
+            .unwrap();
+        assert_eq!(
+            tracker.network_send(&reader, destination(), 50_000),
+            NetworkDecision::Block {
+                newly_pending: false
+            }
+        );
+        tracker.reconcile_live_kernel_ids(&std::collections::HashSet::new());
+        assert_eq!(
+            tracker.incident_for_kernel_id(1).unwrap().state,
+            SshIncidentState::Exited
+        );
+    }
+
+    #[test]
     fn resolution_detail_requires_and_follows_resolution() {
         let mut tracker = ExposureTracker::default();
         let reader = process(12, 1, vec![]);
@@ -628,7 +715,7 @@ mod tests {
             NetworkDecision::Block { .. }
         ));
         tracker
-            .resolve(&incident.id, IncidentResolution::StopAndQuarantine)
+            .resolve(&incident.id, IncidentResolution::BlockAndQuarantine)
             .unwrap();
         tracker
             .set_resolution_detail(&incident.id, "terminated; no file moved".into())

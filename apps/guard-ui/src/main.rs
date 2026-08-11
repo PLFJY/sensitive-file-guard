@@ -86,12 +86,10 @@ fn health_label(h: Health) -> &'static str {
 
 fn ssh_behavior_summary(status: &guard_ipc::StatusInfo) -> String {
     match status.ssh_behavior_status.as_str() {
-        "ACTIVE" => "active".into(),
-        "UNAVAILABLE" => {
-            "unavailable — raw SSH-key reads remain blocked; see guardd journal".into()
-        }
-        "DEGRADED" => "degraded — raw SSH-key reads remain blocked; see guardd journal".into(),
-        _ => "status unknown — raw SSH-key reads remain blocked".into(),
+        "ACTIVE" => "Active — key access is allowed and monitored for immediate external network activity".into(),
+        "UNAVAILABLE" => "Unavailable — key access is still allowed and reported, but immediate external network activity cannot currently be blocked".into(),
+        "DEGRADED" => "Degraded — key access is still allowed and reported; some immediate external network activity may not be blocked".into(),
+        _ => "Unknown — key access is still allowed and reported; network blocking status is unknown".into(),
     }
 }
 
@@ -422,7 +420,9 @@ fn is_blocked_event(event: &guard_ipc::EventInfo) -> bool {
 }
 
 fn is_visible_event(event: &guard_ipc::EventInfo) -> bool {
-    cfg!(debug_assertions) || is_blocked_event(event)
+    cfg!(debug_assertions)
+        || is_blocked_event(event)
+        || event.event_code.starts_with("ssh_behavior_")
 }
 
 fn load_configuration(state: &UiState) {
@@ -1002,7 +1002,9 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow) {
             let pending_incidents = guard_client::incidents(&socket)
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|incident| incident.state == "PendingDecision")
+                .filter(|incident| {
+                    incident.state == guard_ipc::SshIncidentStateInfo::PendingDecision
+                })
                 .collect::<Vec<_>>();
             let service_active = Command::new("systemctl").args(["is-active", "--quiet", "guardd.service"]).status().map(|s| s.success()).unwrap_or(false);
             let notification_active = Command::new("systemctl")
@@ -1046,15 +1048,16 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow) {
             for event in recent_events {
                 let row = gtk::ListBoxRow::new();
                 let box_ = gtk::Box::new(gtk::Orientation::Vertical, 2);
-                let decision = if event.backend_diag.starts_with("ssh_behavior_key_read;") {
-                    "KEY ACCESSED"
-                } else if event.backend_diag == "ssh_behavior_user_allow" {
-                    "ALLOWED BY USER"
-                } else if event.backend_diag.starts_with("ssh_behavior_stop_containment;") {
-                    "PROCESS STOPPED"
-                } else if event.reason_code.as_deref() == Some("ssh_behavior_network_blocked") {
-                    "NETWORK BLOCKED"
-                } else if is_blocked_event(&event) { "BLOCKED" } else if event.decision.starts_with("AllowByLease") { "ALLOWED BY LEASE" } else { "ALLOWED" };
+                let decision = match event.event_code.as_str() {
+                    "ssh_behavior_key_accessed" => "KEY ACCESSED",
+                    "ssh_behavior_network_blocked" => "NETWORK BLOCKED",
+                    "ssh_behavior_blocked_by_user" => "BLOCKED BY USER",
+                    "ssh_behavior_allowed_by_user" => "ALLOWED BY USER",
+                    "ssh_behavior_blocked_and_quarantined" => "BLOCKED & QUARANTINED",
+                    _ if is_blocked_event(&event) => "BLOCKED",
+                    _ if event.decision.starts_with("AllowByLease") => "ALLOWED BY LEASE",
+                    _ => "ALLOWED",
+                };
                 let title = gtk::Label::new(Some(&format!("{}  ·  {}", decision, event.exe)));
                 title.set_xalign(0.0); title.add_css_class(if matches!(decision, "BLOCKED" | "NETWORK BLOCKED") { "error" } else { "success" });
                 let subtitle = gtk::Label::new(Some(&format!("#{} · {} · {}", event.id, event.resource_kind, event.path)));
@@ -1089,59 +1092,71 @@ fn present_incident_dialog(window: &adw::ApplicationWindow, incident: guard_ipc:
         }
         _ => String::new(),
     };
+    let keys = if incident.accessed_key_paths.len() <= 1 {
+        incident.key_path.clone()
+    } else {
+        format!(
+            "{} (and {} other protected key(s))",
+            incident.key_path,
+            incident.accessed_key_paths.len() - 1
+        )
+    };
+    let since_access_ms = incident
+        .first_network_ms
+        .unwrap_or(incident.last_sensitive_read_ms)
+        .saturating_sub(incident.last_sensitive_read_ms);
     let dialog = gtk::MessageDialog::builder()
         .transient_for(&window)
         .modal(true)
         .message_type(gtk::MessageType::Warning)
         .text("Sensitive-key network activity blocked")
         .secondary_text(format!(
-            "{process} recently read:\n{}\n\nIt then attempted outbound network activity.{}\n\nThis does not establish what data was sent.",
-            incident.key_path, destination
+            "Program: {process}\nPID: {}\nKey accessed: {keys}\nTime since access: {since_access_ms} ms{}\n\nThe program recently accessed a protected SSH private key and then attempted external network activity.\n\nThis does not establish what data was sent.",
+            incident.pid, destination
         ))
         .build();
-    dialog.add_button("Stop & Quarantine", gtk::ResponseType::Reject);
-    dialog.add_button("Allow Upload", gtk::ResponseType::Accept);
+    let quarantine = dialog.add_button("Block & Quarantine", gtk::ResponseType::Reject);
+    quarantine.add_css_class("destructive-action");
+    dialog.add_button("Block", gtk::ResponseType::No);
+    let allow = dialog.add_button("Allow", gtk::ResponseType::Accept);
+    allow.add_css_class("suggested-action");
+    dialog.set_default_response(gtk::ResponseType::No);
     dialog.connect_response(move |dialog, response| {
-        if matches!(
-            response,
-            gtk::ResponseType::Accept | gtk::ResponseType::Reject
-        ) {
-            let id = incident.id.clone();
-            let action = if response == gtk::ResponseType::Accept {
-                guard_ipc::IncidentResolutionAction::AllowNetwork
-            } else {
-                guard_ipc::IncidentResolutionAction::StopAndQuarantine
+        let id = incident.id.clone();
+        let action = match response {
+            gtk::ResponseType::Reject => guard_ipc::IncidentResolutionAction::BlockAndQuarantine,
+            gtk::ResponseType::Accept => guard_ipc::IncidentResolutionAction::Allow,
+            // Closing/dismissing is deliberately Block, never Allow.
+            _ => guard_ipc::IncidentResolutionAction::Block,
+        };
+        let parent = window.clone();
+        glib::MainContext::default().spawn_local(async move {
+            let socket = PathBuf::from(SOCKET);
+            let result =
+                gio::spawn_blocking(move || guard_client::resolve_incident(&socket, &id, action))
+                    .await;
+            let (title, detail) = match result {
+                Ok(Ok(resolved)) => (
+                    "Incident resolved",
+                    resolved
+                        .resolution_detail
+                        .unwrap_or_else(|| "The incident resolution completed.".into()),
+                ),
+                Ok(Err(error)) => ("Incident resolution failed", error.to_string()),
+                Err(_) => (
+                    "Incident resolution failed",
+                    "The background resolver stopped unexpectedly.".into(),
+                ),
             };
-            let parent = window.clone();
-            glib::MainContext::default().spawn_local(async move {
-                let socket = PathBuf::from(SOCKET);
-                let result = gio::spawn_blocking(move || {
-                    guard_client::resolve_incident(&socket, &id, action)
-                })
-                .await;
-                let (title, detail) = match result {
-                    Ok(Ok(resolved)) => (
-                        "Incident resolved",
-                        resolved
-                            .resolution_detail
-                            .unwrap_or_else(|| "The incident resolution completed.".into()),
-                    ),
-                    Ok(Err(error)) => ("Incident resolution failed", error.to_string()),
-                    Err(_) => (
-                        "Incident resolution failed",
-                        "The background resolver stopped unexpectedly.".into(),
-                    ),
-                };
-                gtk::MessageDialog::builder()
-                    .transient_for(&parent)
-                    .modal(true)
-                    .message_type(gtk::MessageType::Info)
-                    .text(title)
-                    .secondary_text(detail)
-                    .build()
-                    .show();
-            });
-        }
+            gtk::MessageDialog::builder()
+                .transient_for(&parent)
+                .modal(true)
+                .message_type(gtk::MessageType::Info)
+                .text(title)
+                .secondary_text(detail)
+                .build()
+                .show();
+        });
         dialog.close();
     });
     dialog.show();
@@ -1290,7 +1305,7 @@ mod tests {
             Some("loading BPF object: Invalid argument; verifier_log=R1=ctx() ...".into());
         assert_eq!(
             ssh_behavior_summary(&status),
-            "unavailable — raw SSH-key reads remain blocked; see guardd journal"
+            "Unavailable — key access is still allowed and reported, but immediate external network activity cannot currently be blocked"
         );
         assert_eq!(
             health_from_evidence(true, true, Some(&status), true),

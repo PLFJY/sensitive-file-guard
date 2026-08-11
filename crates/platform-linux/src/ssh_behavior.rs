@@ -29,10 +29,6 @@ impl SshBehaviorBackendStatus {
         }
     }
 
-    pub fn can_guard_raw_reads(&self) -> bool {
-        matches!(self, Self::Active)
-    }
-
     pub fn detail(&self) -> Option<&str> {
         match self {
             Self::Active => None,
@@ -183,7 +179,8 @@ unsafe impl Send for SshBehaviorBackend {}
 
 impl SshBehaviorBackend {
     /// Load the embedded BPF ELF and attach every required program. A caller
-    /// may allow an SSH read only after this succeeds.
+    /// SSH reads remain allowed if this fails; only network containment is
+    /// unavailable in that case.
     pub fn attach() -> Result<Self, String> {
         let mut verifier_log = vec![0u8; 64 * 1024];
         let options = BpfObjectOpenOpts {
@@ -379,11 +376,13 @@ impl SshBehaviorBackend {
             observe_until_ns,
             state: match state {
                 SshIncidentState::Observing => EXPOSURE_OBSERVING,
-                SshIncidentState::PendingDecision => EXPOSURE_PENDING,
+                SshIncidentState::PendingDecision | SshIncidentState::BlockedUntilExit => {
+                    EXPOSURE_PENDING
+                }
                 SshIncidentState::Allowed => EXPOSURE_ALLOWED,
                 SshIncidentState::Expired
                 | SshIncidentState::Quarantined
-                | SshIncidentState::Terminated => {
+                | SshIncidentState::Exited => {
                     return Err(format!("cannot arm SSH exposure in {state:?} state"));
                 }
             },
@@ -494,6 +493,14 @@ impl SshBehaviorBackend {
             .exposures()?
             .into_iter()
             .filter_map(|(tgid, value)| (value.incident_id == incident_id).then_some(tgid))
+            .collect())
+    }
+
+    pub fn live_incident_ids(&self) -> Result<std::collections::HashSet<u64>, String> {
+        Ok(self
+            .exposures()?
+            .into_iter()
+            .map(|(_, value)| value.incident_id)
             .collect())
     }
 
@@ -774,7 +781,7 @@ pub fn detect_backend() -> SshBehaviorBackendStatus {
     };
     if !lsm.trim().split(',').any(|entry| entry == "bpf") {
         return SshBehaviorBackendStatus::Unavailable {
-            reason: "BPF LSM is not active; refusing unguarded raw SSH-key reads".into(),
+            reason: "BPF LSM is not active. Protected-key access is still reported, but immediate outbound network activity cannot currently be blocked.".into(),
         };
     }
     if !std::path::Path::new("/sys/kernel/btf/vmlinux").is_file() {
@@ -792,15 +799,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unavailable_never_claims_raw_read_guarding() {
-        assert!(!SshBehaviorBackendStatus::Unavailable {
-            reason: "test".into()
-        }
-        .can_guard_raw_reads());
-        assert!(!SshBehaviorBackendStatus::Degraded {
-            reason: "test".into()
-        }
-        .can_guard_raw_reads());
+    fn unavailable_status_is_explicit() {
+        assert_eq!(
+            SshBehaviorBackendStatus::Unavailable {
+                reason: "test".into()
+            }
+            .label(),
+            "UNAVAILABLE"
+        );
     }
 
     #[test]

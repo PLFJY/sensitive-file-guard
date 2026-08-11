@@ -104,44 +104,44 @@ done
 grep -q "enforcement ACTIVE" "$WORK/guardd.log" || { echo "guardd did not become active"; cat "$WORK/guardd.log"; exit 1; }
 echo "guardd active (pid=$GUARDD_PID)"
 
-echo "==> Test 1: cat the protected private key => denied"
+echo "==> Test 1: cat the protected private key => allowed and reported"
 if cat "$PRIV_KEY" > "$WORK/t1.out" 2>/dev/null; then
-  note_fail "cat unexpectedly read protected private key"
+  note_pass "cat read was not interrupted"
 else
-  note_pass "cat denied before open completed"
+  note_fail "cat read was interrupted"
 fi
 
-echo "==> Test 2: cp the protected private key => denied (source open fails)"
+echo "==> Test 2: cp the protected private key => allowed"
 if cp "$PRIV_KEY" "$WORK/t2.copy" 2>/dev/null; then
-  note_fail "cp unexpectedly copied protected private key"
+  note_pass "copy read was not interrupted"
   rm -f "$WORK/t2.copy"
 else
-  note_pass "cp denied because source open failed"
+  note_fail "copy read was interrupted"
 fi
 
-echo "==> Test 3: guard-test-probe (Rust child) reads the protected key => denied"
+echo "==> Test 3: guard-test-probe reads the protected key => allowed"
 if "$PROBE" read "$PRIV_KEY" > "$WORK/t3.out" 2>/dev/null; then
-  note_fail "guard-test-probe unexpectedly read protected private key"
+  note_pass "Rust child read was not interrupted"
 else
-  note_pass "Rust child probe denied"
+  note_fail "Rust child read was interrupted"
 fi
 
-echo "==> Test 4: Python reads the protected key => denied (if python3 available)"
+echo "==> Test 4: Python reads the protected key => allowed (if available)"
 if command -v python3 >/dev/null 2>&1; then
   if python3 -c "import sys; open(sys.argv[1]).read()" "$PRIV_KEY" 2>/dev/null; then
-    note_fail "python3 unexpectedly read protected private key"
+    note_pass "Python child read was not interrupted"
   else
-    note_pass "Python child probe denied"
+    note_fail "Python child read was interrupted"
   fi
 else
   note_blocked "python3 not available for probe test"
 fi
 
-echo "==> Test 5: shell script (sh -c cat) reads the protected key => denied"
+echo "==> Test 5: shell script reads the protected key => allowed"
 if sh -c "cat '$PRIV_KEY'" > "$WORK/t5.out" 2>/dev/null; then
-  note_fail "sh -c cat unexpectedly read protected private key"
+  note_pass "shell read was not interrupted"
 else
-  note_pass "shell script probe denied"
+  note_fail "shell read was interrupted"
 fi
 
 echo "==> Test 6: public key remains readable (not protected)"
@@ -164,24 +164,24 @@ for f in "$CONFIG_FILE" "$KNOWN_HOSTS" "$NOTES"; do
   fi
 done
 
-echo "==> Test 8: hardlink to protected private key => denied by inode mark"
+echo "==> Test 8: hardlink read follows SSH behavioral allow"
 ln -f "$PRIV_KEY" "$WORK/hard-to-key" 2>/dev/null || {
   note_blocked "hardlink creation not supported on this filesystem ($WORK)"
 }
 if [ -e "$WORK/hard-to-key" ]; then
   if cat "$WORK/hard-to-key" > "$WORK/t8.out" 2>/dev/null; then
-    note_fail "cat read protected key via hardlink"
+    note_pass "hardlink read was not interrupted"
   else
-    note_pass "hardlink to protected key denied (inode mark + fd_index)"
+    note_fail "hardlink read was interrupted"
   fi
 fi
 
-echo "==> Test 9: symlink to protected private key => denied"
+echo "==> Test 9: symlink read follows SSH behavioral allow"
 ln -sf "$PRIV_KEY" "$WORK/sym-to-key"
 if cat "$WORK/sym-to-key" > "$WORK/t9.out" 2>/dev/null; then
-  note_fail "cat read protected key via symlink"
+  note_pass "symlink read was not interrupted"
 else
-  note_pass "symlink to protected key denied"
+  note_fail "symlink read was interrupted"
 fi
 
 echo "==> Test 10: runtime guardctl ssh protect on a NEW key => protects it"
@@ -204,11 +204,11 @@ if "$GUARDCTL" --socket "$SOCK" ssh protect "$RUNTIME_KEY" > "$WORK/t10.out" 2>&
 else
   note_fail "guardctl ssh protect failed: $(cat "$WORK/t10.out")"
 fi
-# After protection: denied.
+# After protection: still readable, with behavioral observation enabled.
 if cat "$RUNTIME_KEY" > "$WORK/t10b.out" 2>/dev/null; then
-  note_fail "runtime key readable AFTER guardctl ssh protect"
+  note_pass "runtime key read remained uninterrupted after protection"
 else
-  note_pass "runtime key denied after guardctl ssh protect"
+  note_fail "runtime key read was interrupted after protection"
 fi
 
 echo "==> Test 11: guardctl ssh protect rejects .pub file"

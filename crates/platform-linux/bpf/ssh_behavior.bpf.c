@@ -268,15 +268,17 @@ static __always_inline int external_destination(struct socket *sock,
     __u32 name_len = BPF_CORE_READ(msg, msg_namelen);
     if (!name || name_len < sizeof(__u16))
         return 1;
-    if (bpf_probe_read_user(&family, sizeof(family), name) < 0)
+    /* security_socket_sendmsg receives the kernel msghdr after the syscall
+     * layer has copied any userspace sockaddr into kernel storage. */
+    if (bpf_probe_read_kernel(&family, sizeof(family), name) < 0)
         return 1;
     if (family == 2 && name_len >= sizeof(address4)) {
-        if (bpf_probe_read_user(&address4, sizeof(address4), name) < 0)
+        if (bpf_probe_read_kernel(&address4, sizeof(address4), name) < 0)
             return 1;
         return bpf_ntohl(address4.sin_addr) >> 24 != 127;
     }
     if (family == 10 && name_len >= sizeof(address6)) {
-        if (bpf_probe_read_user(&address6, sizeof(address6), name) < 0)
+        if (bpf_probe_read_kernel(&address6, sizeof(address6), name) < 0)
             return 1;
         return !ipv6_is_loopback(&address6.sin6_addr);
     }

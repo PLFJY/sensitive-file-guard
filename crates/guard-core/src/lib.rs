@@ -14,9 +14,10 @@ pub mod resource;
 
 pub use identity::{AncestorSummary, ProcessIdentity, ProcessStableId, StableIdentity, TrustTier};
 pub use incident::{
-    ExposureSummary, ExposureTracker, IncidentResolution, NetworkDecision, NetworkDestination,
-    QuarantineCandidate, QuarantineCandidateKind, SshExposureIncident, SshIncidentState,
-    DEFAULT_SSH_BEHAVIOR_WINDOW_SECS, MAX_SSH_BEHAVIOR_WINDOW_SECS, MIN_SSH_BEHAVIOR_WINDOW_SECS,
+    AccessedKey, ExposureSummary, ExposureTracker, IncidentResolution, NetworkDecision,
+    NetworkDestination, QuarantineCandidate, QuarantineCandidateKind, SshExposureIncident,
+    SshIncidentState, DEFAULT_SSH_BEHAVIOR_WINDOW_SECS, MAX_SSH_BEHAVIOR_WINDOW_SECS,
+    MIN_SSH_BEHAVIOR_WINDOW_SECS,
 };
 pub use lease::{LeaseId, LeaseSet, MigrationAccessLease, MigrationLeaseState, SshLoadLease};
 pub use logging::init_logging;

@@ -6,24 +6,24 @@
 > This is an Alpha with the explicit non-goals below, not a claim of protection
 > against root, browser compromise, or already-open descriptors.
 
-> SSH behavioral containment is a separate Phase 22.1 capability and remains
-> runtime-unaccepted on this checkout's currently installed daemon until the
-> privileged BPF acceptance matrix passes. Raw SSH-key reads fail closed when
-> that backend is unavailable.
+> SSH private-key reads are always allowed and reported. When the behavioral
+> backend is active, the exact reader process tree is watched briefly and its
+> immediate external sends are blocked pending a user decision. See the
+> [canonical SSH behavior contract](docs/SSH_BEHAVIOR_MODEL.md).
 
-A narrow local capability firewall for sensitive files. It prevents
-unauthorized local processes from reading protected local secrets **before**
-the protected file is successfully opened.
+A narrow local capability firewall. Browser auth/session resources retain
+pre-open access denial. Protected SSH-key reads use a separate behavioral
+model: allow and report the read, then briefly block immediate external sends.
 
-> Core principle: **Prevent browser-secret access. SSH behavioral containment
-> is capability-gated and does not claim payload provenance.**
+> Core principle: **Prevent browser-secret access. Correlate SSH-key access
+> with immediate external sends without claiming payload provenance.**
 
 ## ⚠️ Do not test on real secrets
 
 Never point this tool, its tests, or its fixtures at your real browser profiles,
 cookies, saved passwords, session tokens, or real SSH private keys. All tests
 use synthetic fixtures only (see `crates/guard-test-fixtures`). Browser and
-ordinary tests use no IP networking; the Phase 22.1 privileged harness uses
+ordinary tests use no IP networking; the Phase 22.2 privileged harness uses
 only a disposable non-loopback dummy address in the local namespace and never
 contacts the Internet.
 
@@ -33,21 +33,21 @@ contacts the Internet.
    browser key material, selected Local/Session Storage and IndexedDB trees,
    saved-login databases (secondary priority).
 2. SSH private keys: the existing hardened `ssh-agent` path remains supported.
-   When the live BPF-LSM backend is attached, a raw protected-key read is
-   allowed for legitimate local use while the exact process tree is watched
-   briefly for external sends. Without that backend, raw reads remain
-   fail-closed rather than being allowed unguarded.
+   Every protected-key read is allowed and reported. When BPF-LSM is active,
+   the exact process tree is watched briefly and immediate external sends are
+   blocked. Backend failure never turns a key read into a denial.
 
 ## Threat model
 
 **Blocks:** ordinary same-user cookie stealers directly opening/copying protected
 browser files; Python/Node/shell scripts reading protected browser data;
-malicious build/postinstall scripts reading protected data; ordinary processes
-reading/copying registered SSH private keys; coding/AI agents reading SSH
-private-key files.
+malicious build/postinstall scripts reading protected browser data; and
+immediate external TCP/UDP sends by a process tree that just accessed a
+protected SSH private key.
 
-**Allows:** a browser accessing its own profile; normal `git push`, SSH
-authentication, and SSH-format Git signing through `ssh-agent`; cross-browser
+**Allows:** a browser accessing its own profile; all protected SSH-key reads
+(with an informational notification); normal `git push`, SSH authentication,
+and SSH-format Git signing through `ssh-agent`; cross-browser
 migration only under an explicit, temporary `MigrationAccessLease` that binds
 on first use to one exact process tree; an
 explicit one-shot `SshLoadLease` for loading a private key into `ssh-agent`.
@@ -183,7 +183,7 @@ drops, classifier failures, topology health, and hardlink-alias scans. Strict
 startup fails instead of reporting ACTIVE if any required profile/key
 filesystem cannot be marked.
 
-### SSH behavioral-containment capability
+### SSH behavioral protection
 
 Browser secrets remain a pre-access firewall: unauthorized access is denied.
 SSH has a separate, deliberately modest path: an actual private-key
@@ -197,14 +197,14 @@ The selected Linux hook is BPF LSM `socket_sendmsg`, because connect-only and
 cgroup-egress designs do not provide the required current-task coverage for a
 socket opened before the read. The daemon builds and loads this hook through
 libbpf, then exposes `ssh_behavior_backend` in `guardctl status`. It
-deliberately reports `UNAVAILABLE` and retains raw-key denial unless every
-required hook attached; do not interpret an otherwise ACTIVE browser firewall
-as behavioral SSH containment. `guardctl incidents list|show ID|allow ID|
-quarantine ID` is the typed CLI surface; resolution has a non-cached polkit
-boundary and no bypass flag. Stop & Quarantine first performs pidfd-based
-process containment for the verified incident tree. The result explicitly
-reports that no file was quarantined until the separate TOCTOU-safe
-file-quarantine transaction is available.
+reports `UNAVAILABLE` without denying key access when the hook cannot attach;
+do not interpret an otherwise ACTIVE browser firewall as behavioral SSH
+containment. `guardctl incidents list|show ID|block-and-quarantine ID|block ID|
+allow ID` is the typed CLI surface; resolution has a non-cached polkit boundary
+and no bypass flag. Block keeps only this live tree's external networking
+denied. Block & Quarantine performs pidfd-based verified process containment
+and uses `cap-std` capability-scoped filesystem operations for an attributable
+artifact. See [SSH_BEHAVIOR_MODEL.md](docs/SSH_BEHAVIOR_MODEL.md).
 
 The GTK overview keeps backend failures concise and actionable; detailed
 libbpf/verifier diagnostics are available in `journalctl -u guardd`.
@@ -315,3 +315,9 @@ Conservative mode is explicitly not promoted. See
 [`reports/phase-19.md`](reports/phase-19.md),
 [`reports/phase-19.1.md`](reports/phase-19.1.md), plus
 [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md).
+
+Those acceptance statements are historical browser-firewall and hardened
+SSH-broker evidence. The rewritten Phase 22.2 behavioral backend is **not yet
+security-accepted** until its new privileged BPF matrix and real GTK flow are
+run. Current evidence and the exact blocked rerun command are recorded in
+[`reports/phase-22.2.md`](reports/phase-22.2.md).

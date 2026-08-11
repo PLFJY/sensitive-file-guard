@@ -30,15 +30,16 @@ and Fedora use `polkit`; Arch `libnotify` provides `notify-send`.
 
 ### SSH behavioral backend compatibility
 
-The Phase 22.1 model requires an attached BPF LSM `socket_sendmsg` hook to block
+The [canonical SSH behavior model](SSH_BEHAVIOR_MODEL.md) uses an attached BPF
+LSM `socket_sendmsg` hook to block
 an actual outbound send from the reader's process tree, including a socket
 opened before the key was read. It needs an active `bpf` entry in
 `/sys/kernel/security/lsm`, kernel BTF at `/sys/kernel/btf/vmlinux`, and the
 privilege/runtime loader required to attach the program. The package needs
-libbpf at runtime and clang while building the embedded object. It leaves raw
-SSH reads fail-closed whenever loading or attachment fails. Check `guardctl
-status` for `ssh_behavior_backend`; `UNAVAILABLE` or `DEGRADED` is not
-behavioral SSH protection.
+libbpf at runtime and clang while building the embedded object. Protected-key
+reads are always allowed and reported. If loading or attachment fails, status
+reports `UNAVAILABLE`/`DEGRADED` and immediate external sends cannot reliably
+be blocked; key access is never denied as compensation.
 
 The GTK overview intentionally shows a short actionable message when this
 backend is unavailable; full libbpf/verifier diagnostics remain in

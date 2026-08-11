@@ -60,6 +60,19 @@ expect_denied_eventually() {
   return 1
 }
 
+expect_allowed_eventually() {
+  local path=$1
+  for _ in $(seq 1 100); do
+    if "$PROBE" read "$path" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.02
+  done
+  echo "FAIL: SSH behavioral read remained interrupted: $path"
+  cat "$WORK/guardd.log"
+  return 1
+}
+
 # New inode at an already-protected critical path.
 rm -f "$PROFILE/Network/Cookies"
 printf '%s' 'synthetic-cookie-v2' > "$PROFILE/Network/Cookies"
@@ -81,6 +94,6 @@ expect_denied_eventually "$NEW_PROFILE/Network/Cookies"
 rm -f "$SSH_KEY"
 printf '%s' 'synthetic-ephemeral-key-fixture-v2' > "$SSH_KEY"
 chmod 0600 "$SSH_KEY"
-expect_denied_eventually "$SSH_KEY"
+expect_allowed_eventually "$SSH_KEY"
 
-echo "PASS: browser/SSH replacement inodes, new nested tree, and new profile converge to FAN_OPEN_PERM protection"
+echo "PASS: browser replacements converge to denial; SSH replacement read remains allowed"

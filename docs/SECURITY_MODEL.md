@@ -19,14 +19,13 @@ gated model. This is not an antivirus, EDR, DLP, or payload-inspection product.
 
 Browser resources remain denied before access. SSH private keys use an exact
 `FAN_ACCESS_PERM` file mark so the daemon observes an actual read request,
-rather than adding filesystem-wide read mediation. A valid `SshLoadLease`
-still authorizes the brokered `ssh-add` read. Ordinary raw reads are allowed
-only when a BPF LSM send hook is loaded before the fanotify allow response; if
-that backend is unavailable, they remain denied with no misleading ACTIVE
-claim. The backend blocks external IPv4/IPv6 sends at `socket_sendmsg` while
-allowing AF_UNIX, AF_NETLINK, and IPv4/IPv6 loopback. It reports ACTIVE only
-after libbpf has successfully loaded and attached every required hook at
-daemon startup.
+rather than adding filesystem-wide read mediation. Protected SSH-key reads are
+always allowed and reported, including when the behavioral backend is
+unavailable. When active, the BPF LSM backend correlates the exact reader
+process tree and blocks actual external IPv4/IPv6 sends at `socket_sendmsg`
+while allowing AF_UNIX, AF_NETLINK, and IPv4/IPv6 loopback. Backend status is
+reported separately and is never filesystem-read authority. The canonical
+contract and state machine are in [SSH_BEHAVIOR_MODEL.md](SSH_BEHAVIOR_MODEL.md).
 
 ## Guarantees
 
@@ -86,8 +85,9 @@ A process owned by a different UID than the resource owner is denied
 ### 9. One-shot SSH load leases
 A `SshLoadLease` authorizes exactly one `open()` of a protected SSH private
 key by the exact `ssh-add` invocation (bound by `StableIdentity`). The `used`
-flag is set on the first `AllowByLease`; a second open by the same process is
-denied with `OneShotLeaseUsed`.
+flag is set on the first `AllowByLease`. A second open cannot reuse that lease,
+but it follows the ordinary SSH behavioral path and is therefore allowed,
+reported, and observed for immediate external sends.
 
 The client cannot declare that identity. It submits only a stopped child PID;
 the daemon verifies that the child is the IPC peer's direct child, is stopped,
@@ -120,10 +120,13 @@ The authorization decision is a deterministic function of `(resource, process,
 operation, leases)`. It never waits for a human UI. Deny is immediate; audit
 and notification happen out-of-band.
 
-### 12. Fail-closed on classification failure
-If `classify_fd` cannot determine whether a fd is protected (race, unmarked
-path, fd_path readlink failure), the decision is `Deny(UnclassifiedFd)` — the
-engine fails closed, not open.
+### 12. Classification failure boundaries
+Browser `FAN_OPEN_PERM` classification failures produce
+`Deny(UnclassifiedFd)` so browser protection remains fail-closed. The narrow
+SSH `FAN_ACCESS_PERM` path never denies a read: if key classification or
+process identity cannot be resolved, guardd allows immediately and reports as
+much metadata as it can. Missing identity cannot be treated as permission to
+send-block an unrelated process tree.
 
 ### 13. Conservative dynamic resource rediscovery
 An inotify watcher is established before initial fanotify marking and watches
@@ -195,7 +198,7 @@ mode is `0660 root:guardd-users`; every connection gets kernel credentials from
 | `SshProtect` | root or `stat`-verified file owner; canonical regular-file candidate, name, owner, and successful fanotify mark checked | adds protection but no read capability; polkit for non-root |
 | `SshLoadAuthorize` | protected key owner; direct stopped child and trusted `ssh-add`; verified/pinned trusted `ssh-agent`; all kernel facts rechecked after authorization | grants one matching open for 30 seconds; polkit for non-root |
 | `LeasesRevoke` | lease owner or root; ownership comes from daemon state | removes privilege; no polkit, and cross-user revocation is denied |
-| `IncidentResolve` | incident owner or root may locate the exact ID; daemon then rechecks the peer's live PID/start token | fixed `AllowNetwork` or `StopAndQuarantine` action only, crossing non-cached `org.guardd.incident-resolve` polkit authorization |
+| `IncidentResolve` | incident owner or root may locate the exact ID; daemon then rechecks the peer's live PID/start token | typed `block_and_quarantine`, `block`, or `allow`; each crosses non-cached `org.guardd.incident-resolve` polkit authorization |
 
 Polkit process subjects include PID, start time, and UID. While `pkcheck` is
 pending, guardd monitors the IPC process's start token and the accepted socket;
@@ -235,19 +238,21 @@ the same fanotify limitation as above — the `open()` happened before the mark.
 Once a key is loaded into `ssh-agent` (via the Phase 11 `SshLoadLease` flow),
 same-UID malware that can reach `SSH_AUTH_SOCK` may request signatures
 depending on agent and key constraints. V1 mediates raw private-key file
-access; it does not mediate agent signing authority. Users can mitigate with
+access behavior; it does not deny reads or mediate agent signing authority. Users can mitigate with
 `ssh-add -c` (confirmation) or `ssh-add -t` (lifetime).
 
 ### 5. SSH behavioral model limits
-Even on a compatible BPF-LSM deployment, the model is only: protected
-SSH-key read + short (default 10-second) window + same process/future child
-actual external IPv4/IPv6 send. It does not prove that any attempted payload
-is a key, inspect TLS/plaintext, or provide full taint tracking. AF_UNIX,
+Even on a compatible BPF-LSM deployment, the model is only: protected SSH-key
+read + short (default 10-second) window + same process/future-child actual
+external IPv4/IPv6 TCP/UDP send. It does not prove that an attempted payload is
+a key, inspect TLS/plaintext, or provide full taint tracking. AF_UNIX,
 AF_NETLINK, and loopback are deliberately local-only exclusions. Deliberate
-bypasses outside this V1 scope include sleeping past the window, arbitrary IPC or
-shared-memory transfer to an already-running process, local temporary-file
-handoff, root/kernel compromise, and untested exotic send paths. Loopback/local
-IPC is not the target.
+bypasses outside this V1 scope include sleeping past the window, arbitrary IPC
+or shared-memory transfer to an already-running process, local temporary-file
+handoff, root/kernel compromise, daemon/backend failure, and untested exotic
+send paths. Loopback/local IPC is not the target. Backend unavailability is an
+explicit degraded state: reads remain allowed and reported, but outbound
+blocking is unavailable.
 
 ### 6. Not an antivirus / EDR
 The firewall does not scan file contents for malware or maintain reputation
@@ -386,7 +391,7 @@ noise and are recorded only as a usability smoke test. Strict remains opt-in.
 | Threat | Protected? | Notes |
 | --- | --- | --- |
 | Unprivileged process reads browser cookies | **Yes** | `FAN_OPEN_PERM` deny before open |
-| Unprivileged process reads SSH private key | **Conditional** | Allowed only with ACTIVE BPF behavioral backend; otherwise fail-closed |
+| Unprivileged process reads SSH private key | **Observed, not denied** | Always allowed and reported; active BPF observes its exact process tree for immediate sends |
 | Hardlink to protected file | **Yes** | Inode index; Strict also scans new multi-link aliases before allow |
 | Symlink to protected file | **Yes** | Canonical path resolution |
 | Relative path `..` traversal | **Yes** | Canonicalize resolves `..` |
@@ -400,7 +405,8 @@ noise and are recorded only as a usability smoke test. Strict remains opt-in.
 | Pre-open fd (opened before mark) | **No** | Fundamental fanotify limitation |
 | Inherited fd from pre-open parent | **No** | Same fanotify limitation |
 | ssh-agent signing misuse | **No** | Agent authority not mediated |
-| Network exfiltration of in-memory secret | **No** | Not a network firewall |
+| Immediate external TCP/UDP send by recent key-reader tree | **Conditional** | Blocked before payload egress only while the BPF backend and exposure window are active |
+| Delayed or uncorrelated network exfiltration | **No** | Not full DLP or information-flow tracking |
 | Daemon crash window | **No** | Fail-open on daemon death (systemd restart mitigates) |
 | New nested sensitive path, Strict | **Yes** | Filesystem mark + structural classifier; first attempt denied |
 | New nested dir, Conservative | **No** | Documented and measured topology window |
