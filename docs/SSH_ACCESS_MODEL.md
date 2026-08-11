@@ -16,7 +16,7 @@ the existing lease interface.
 
 The resolving client keeps its authenticated IPC connection open while Polkit
 is displayed; it does not apply the short status-poll timeout to a password
-prompt. Guardd remains responsible for the 120-second authorization deadline
+prompt. Guardd remains responsible for the 60-second authorization deadline
 and cancels if that authenticated peer actually disconnects.
 
 After Polkit succeeds, guardd completes reader revalidation and lease creation

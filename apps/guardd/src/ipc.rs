@@ -1331,7 +1331,7 @@ fn authorize_sensitive(
     let mut child = command.spawn().map_err(|error| {
         format!("authorization unavailable for {action}: cannot execute pkcheck: {error}")
     })?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     loop {
         match child.try_wait() {
             Ok(Some(status)) if status.success() => {
@@ -1378,7 +1378,7 @@ fn authorize_sensitive(
             let _ = child.kill();
             let _ = child.wait();
             return Err(format!(
-                "authorization timed out for {action} after 120 seconds"
+                "authorization timed out for {action} after 60 seconds"
             ));
         }
         std::thread::sleep(std::time::Duration::from_millis(50));

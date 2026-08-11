@@ -9,7 +9,7 @@ guardd correctly observed the disconnect and cancelled `pkcheck`.
 
 Interactive migration authorization, migration resolution, and SSH-read
 resolution now keep the IPC read open. Guardd retains the authoritative
-120-second deadline and its PID/start-token/socket liveness checks. Normal
+60-second deadline and its PID/start-token/socket liveness checks. Normal
 status and polling calls remain bounded to two seconds.
 
 ## Verification
