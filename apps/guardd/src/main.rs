@@ -149,10 +149,17 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                 ssh_behavior::SshBehaviorBackendStatus::Active,
                 Some(Arc::new(Mutex::new(backend))),
             ),
-            Err(error) => (
-                ssh_behavior::SshBehaviorBackendStatus::Unavailable { reason: error },
-                None,
-            ),
+            Err(error) => {
+                // Keep verifier/libbpf output in journald for diagnosis, not
+                // in the IPC status string rendered by guard-ui.
+                tracing::error!(error = %error, "SSH behavioral BPF backend attachment failed");
+                (
+                    ssh_behavior::SshBehaviorBackendStatus::Unavailable {
+                        reason: "BPF behavioral protection unavailable; raw SSH-key reads remain blocked. See the guardd journal for diagnostics.".into(),
+                    },
+                    None,
+                )
+            }
         }
     };
     if !cfg.ssh_keys.is_empty() && !ssh_behavior_backend.can_guard_raw_reads() {

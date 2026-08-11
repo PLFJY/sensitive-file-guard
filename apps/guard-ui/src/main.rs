@@ -84,6 +84,17 @@ fn health_label(h: Health) -> &'static str {
     }
 }
 
+fn ssh_behavior_summary(status: &guard_ipc::StatusInfo) -> String {
+    match status.ssh_behavior_status.as_str() {
+        "ACTIVE" => "active".into(),
+        "UNAVAILABLE" => {
+            "unavailable — raw SSH-key reads remain blocked; see guardd journal".into()
+        }
+        "DEGRADED" => "degraded — raw SSH-key reads remain blocked; see guardd journal".into(),
+        _ => "status unknown — raw SSH-key reads remain blocked".into(),
+    }
+}
+
 #[derive(Clone)]
 struct UiState {
     candidate: Rc<RefCell<Option<platform_linux::config::EnforcementConfig>>>,
@@ -1024,7 +1035,7 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow) {
             }
             let service_state = if service_active { "active" } else { "inactive" };
             let notification_state = if notification_active { "active" } else { "inactive" };
-            detail.set_text(&daemon.map(|s| format!("Mode: {} · browsers: {} · SSH keys: {} · SSH behavior: {}{} · allowed: {} · denied: {} · marks: {}/{} · service: {} · notifications: {}", s.mode, s.browsers, s.ssh_protected_keys, s.ssh_behavior_status, s.ssh_behavior_detail.as_ref().map(|d| format!(" ({d})")).unwrap_or_default(), s.allowed, s.denied, s.marked_filesystems, s.required_filesystems, service_state, notification_state)).unwrap_or_else(|| format!("guardd IPC is unavailable · service: {} · notifications: {}", service_state, notification_state)));
+            detail.set_text(&daemon.map(|s| format!("Mode: {} · browsers: {} · SSH keys: {} · SSH behavior: {} · allowed: {} · denied: {} · marks: {}/{} · service: {} · notifications: {}", s.mode, s.browsers, s.ssh_protected_keys, ssh_behavior_summary(&s), s.allowed, s.denied, s.marked_filesystems, s.required_filesystems, service_state, notification_state)).unwrap_or_else(|| format!("guardd IPC is unavailable · service: {} · notifications: {}", service_state, notification_state)));
             if after_id.is_none() {
                 while let Some(child) = events.first_child() { events.remove(&child); }
                 *event_data.borrow_mut() = recent_events.clone();
@@ -1239,7 +1250,7 @@ mod tests {
     use super::*;
     #[test]
     fn health_requires_live_evidence() {
-        let status = guard_ipc::StatusInfo {
+        let mut status = guard_ipc::StatusInfo {
             version: "x".into(),
             enforcement_active: true,
             status: "ACTIVE".into(),
@@ -1275,6 +1286,12 @@ mod tests {
             ssh_behavior_quarantines: 0,
             ssh_behavior_backend_failures: 0,
         };
+        status.ssh_behavior_detail =
+            Some("loading BPF object: Invalid argument; verifier_log=R1=ctx() ...".into());
+        assert_eq!(
+            ssh_behavior_summary(&status),
+            "unavailable — raw SSH-key reads remain blocked; see guardd journal"
+        );
         assert_eq!(
             health_from_evidence(true, true, Some(&status), true),
             Health::Active

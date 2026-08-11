@@ -1,7 +1,7 @@
 # Maintainer: PLFJY <https://github.com/PLFJY>
 
 pkgname=sensitive-file-guard-git
-pkgver=0.1.0.r18.g3b596e7
+pkgver=0.1.0.r19.gd5b29be
 pkgrel=1
 pkgdesc='Pre-open local access firewall for browser authentication data and SSH private keys'
 arch=('x86_64')

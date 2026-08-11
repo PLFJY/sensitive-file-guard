@@ -206,6 +206,9 @@ process containment for the verified incident tree. The result explicitly
 reports that no file was quarantined until the separate TOCTOU-safe
 file-quarantine transaction is available.
 
+The GTK overview keeps backend failures concise and actionable; detailed
+libbpf/verifier diagnostics are available in `journalctl -u guardd`.
+
 ## Logs
 
 ```sh

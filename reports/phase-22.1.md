@@ -145,8 +145,10 @@ non-quarantine behavior require privileged runtime testing and remain BLOCKED.
 The existing dialog exposes exactly Stop & Quarantine and Allow Upload. A
 non-action close response does not resolve the incident, so containment remains
 pending. The key-read normal event and network-block critical event strings are
-wired in guard-notify; real delivery and GTK activation are BLOCKED without
-the live backend and desktop authorization session.
+wired in guard-notify; the Overview suppresses raw libbpf/verifier detail and
+shows a concise unavailable/degraded explanation while retaining full
+diagnostics in the guardd journal. Real delivery and GTK activation are
+BLOCKED without the live backend and desktop authorization session.
 
 ## PRIVILEGED ACCEPTANCE
 

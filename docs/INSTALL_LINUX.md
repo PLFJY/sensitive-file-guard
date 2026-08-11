@@ -40,6 +40,10 @@ SSH reads fail-closed whenever loading or attachment fails. Check `guardctl
 status` for `ssh_behavior_backend`; `UNAVAILABLE` or `DEGRADED` is not
 behavioral SSH protection.
 
+The GTK overview intentionally shows a short actionable message when this
+backend is unavailable; full libbpf/verifier diagnostics remain in
+`journalctl -u guardd` rather than being rendered into the user interface.
+
 The `guardd` system unit bounds `CAP_BPF` and `CAP_PERFMON` in addition to the
 existing fanotify/process capabilities. These are the minimum capabilities
 used by libbpf for the BPF-LSM and scheduler tracepoint links; the unit does
