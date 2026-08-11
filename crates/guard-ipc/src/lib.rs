@@ -16,7 +16,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Wire protocol version. Bumped on incompatible changes.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Hard upper bound on a single request frame. The server rejects anything
 /// larger (and any malformed length prefix) so a peer cannot exhaust memory.
@@ -79,6 +79,14 @@ pub enum RequestOp {
         source_profile: String,
         target_browser: String,
         duration_secs: Option<u64>,
+    },
+    MigrationPendingList,
+    MigrationPendingGet {
+        id: String,
+    },
+    MigrationResolve {
+        id: String,
+        action: MigrationResolutionAction,
     },
     /// Enroll a single SSH private key at runtime (Phase 10). The daemon
     /// canonicalizes + stats `path`, refuses `.pub` / reserved names, enrolls
@@ -163,6 +171,9 @@ pub enum ResponseBody {
     /// seconds), the armed target browser identity (canonical exe path), and
     /// an explicit statement that Linux V1 does not guarantee read-only access.
     MigrationAuthorized(MigrationAuthorizedInfo),
+    MigrationPending(Vec<MigrationPendingInfo>),
+    MigrationPendingItem(Box<MigrationPendingInfo>),
+    MigrationResolved(MigrationResolutionInfo),
     /// Result of `SshProtect`: the now-protected canonical path + owner uid.
     SshProtected(SshProtectedInfo),
     /// Result of `SshLoadAuthorize`: the one-shot lease id and its expiry.
@@ -175,6 +186,20 @@ pub enum IncidentResolutionAction {
     BlockAndQuarantine,
     Block,
     Allow,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MigrationResolutionAction {
+    AllowImport,
+    Block,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MigrationResolutionInfo {
+    Allowed,
+    Blocked,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -287,6 +312,23 @@ pub struct MigrationAuthorizedInfo {
     /// Always false on the fanotify backend: its event fd flags do not expose
     /// the triggering process's original open mode.
     pub read_only_guaranteed: bool,
+}
+
+/// Daemon-recorded facts for an import waiting on human confirmation. Clients
+/// receive this view only; resolution accepts only `id` plus a fixed action.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigrationPendingInfo {
+    pub id: String,
+    pub uid: u32,
+    pub source_browser: String,
+    pub source_profile: String,
+    pub target_browser: String,
+    pub target_exe: String,
+    pub target_pid: u32,
+    pub target_start_time: u64,
+    pub requested_data: String,
+    pub created_at: u64,
+    pub expires_at: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -504,6 +546,14 @@ mod tests {
                 source_profile: "Default".into(),
                 target_browser: "firefox".into(),
                 duration_secs: None,
+            },
+            RequestOp::MigrationPendingList,
+            RequestOp::MigrationPendingGet {
+                id: "pending-1".into(),
+            },
+            RequestOp::MigrationResolve {
+                id: "pending-1".into(),
+                action: MigrationResolutionAction::AllowImport,
             },
             RequestOp::SshProtect {
                 path: "/home/u/.ssh/id_ed25519".into(),

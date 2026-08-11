@@ -113,6 +113,7 @@ struct UiState {
     protection: Rc<RefCell<Option<adw::SwitchRow>>>,
     protection_syncing: Rc<Cell<bool>>,
     shown_incidents: Rc<RefCell<HashSet<String>>>,
+    shown_migrations: Rc<RefCell<HashSet<String>>>,
 }
 
 fn main() {
@@ -165,6 +166,7 @@ fn build_ui(app: &adw::Application) {
         protection: Rc::new(RefCell::new(None)),
         protection_syncing: Rc::new(Cell::new(false)),
         shown_incidents: Rc::new(RefCell::new(HashSet::new())),
+        shown_migrations: Rc::new(RefCell::new(HashSet::new())),
     };
     let overview = scroll_page(overview_page(&state));
     let protection = scroll_page(protection_page(&state));
@@ -423,6 +425,7 @@ fn is_visible_event(event: &guard_ipc::EventInfo) -> bool {
     cfg!(debug_assertions)
         || is_blocked_event(event)
         || event.event_code.starts_with("ssh_behavior_")
+        || event.event_code.starts_with("browser_migration_")
 }
 
 fn load_configuration(state: &UiState) {
@@ -989,6 +992,7 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow) {
     let protection = state.protection.clone();
     let protection_syncing = state.protection_syncing.clone();
     let shown_incidents = state.shown_incidents.clone();
+    let shown_migrations = state.shown_migrations.clone();
     let window = window.clone();
     let after_id = event_data.borrow().first().map(|event| event.id);
     glib::MainContext::default().spawn_local(async move {
@@ -1006,15 +1010,16 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow) {
                     incident.state == guard_ipc::SshIncidentStateInfo::PendingDecision
                 })
                 .collect::<Vec<_>>();
+            let pending_migrations = guard_client::migration_pending(&socket).unwrap_or_default();
             let service_active = Command::new("systemctl").args(["is-active", "--quiet", "guardd.service"]).status().map(|s| s.success()).unwrap_or(false);
             let notification_active = Command::new("systemctl")
                 .args(["--user", "is-active", "--quiet", "guard-notify.service"])
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false);
-            (service_active, notification_active, daemon, recent_events, pending_incidents)
+            (service_active, notification_active, daemon, recent_events, pending_incidents, pending_migrations)
         }).await;
-        if let Ok((service_active, notification_active, daemon, recent_events, pending_incidents)) = result {
+        if let Ok((service_active, notification_active, daemon, recent_events, pending_incidents, pending_migrations)) = result {
             let health = health_from_evidence(
                 service_active,
                 notification_active,
@@ -1049,6 +1054,10 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow) {
                 let row = gtk::ListBoxRow::new();
                 let box_ = gtk::Box::new(gtk::Orientation::Vertical, 2);
                 let decision = match event.event_code.as_str() {
+                    "browser_migration_confirmation_required" => "IMPORT CONFIRMATION REQUIRED",
+                    "browser_migration_allowed" => "IMPORT ALLOWED",
+                    "browser_migration_blocked" => "IMPORT BLOCKED",
+                    "browser_migration_timed_out" => "IMPORT TIMED OUT",
                     "ssh_behavior_key_accessed" => "KEY ACCESSED",
                     "ssh_behavior_network_blocked" => "NETWORK BLOCKED",
                     "ssh_behavior_blocked_by_user" => "BLOCKED BY USER",
@@ -1070,10 +1079,88 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow) {
                     present_incident_dialog(&window, incident);
                 }
             }
+            for migration in pending_migrations {
+                if shown_migrations.borrow_mut().insert(migration.id.clone()) {
+                    present_migration_dialog(&window, migration);
+                }
+            }
         }
         poll_in_flight.set(false);
         let _ = events;
     });
+}
+
+fn browser_label(id: &str) -> String {
+    match id {
+        "chrome" => "Google Chrome".into(),
+        "chromium" => "Chromium".into(),
+        "firefox" => "Firefox".into(),
+        "firefox-esr" => "Firefox ESR".into(),
+        "edge" => "Microsoft Edge".into(),
+        "brave" => "Brave".into(),
+        "zen" => "Zen".into(),
+        "opera" => "Opera".into(),
+        "vivaldi" => "Vivaldi".into(),
+        _ => id.to_owned(),
+    }
+}
+
+fn present_migration_dialog(
+    window: &adw::ApplicationWindow,
+    migration: guard_ipc::MigrationPendingInfo,
+) {
+    let source = browser_label(&migration.source_browser);
+    let target = browser_label(&migration.target_browser);
+    let dialog = gtk::MessageDialog::builder()
+        .transient_for(window)
+        .modal(true)
+        .message_type(gtk::MessageType::Warning)
+        .text("Browser data import detected")
+        .secondary_text(format!(
+            "{target} is trying to access protected {source} data.\n\nAre you importing data from {source} into {target}?\n\nSource browser: {source}\nSource profile: {}\nTarget browser: {target}\nTarget process: {}\nPID: {}\nRequested data: {}",
+            migration.source_profile,
+            migration.target_exe,
+            migration.target_pid,
+            migration.requested_data,
+        ))
+        .build();
+    let block = dialog.add_button("No, block", gtk::ResponseType::Reject);
+    block.add_css_class("destructive-action");
+    let allow = dialog.add_button("Yes, allow this import", gtk::ResponseType::Accept);
+    allow.add_css_class("suggested-action");
+    let resolved = Rc::new(Cell::new(false));
+    let resolve = {
+        let id = migration.id.clone();
+        let resolved = resolved.clone();
+        move |action: guard_ipc::MigrationResolutionAction| {
+            if resolved.replace(true) {
+                return;
+            }
+            let socket = PathBuf::from(SOCKET);
+            let id = id.clone();
+            glib::MainContext::default().spawn_local(async move {
+                let _ = gio::spawn_blocking(move || {
+                    guard_client::resolve_migration(&socket, &id, action)
+                })
+                .await;
+            });
+        }
+    };
+    let resolve_response = resolve.clone();
+    dialog.connect_response(move |dialog, response| {
+        let action = if response == gtk::ResponseType::Accept {
+            guard_ipc::MigrationResolutionAction::AllowImport
+        } else {
+            guard_ipc::MigrationResolutionAction::Block
+        };
+        resolve_response(action);
+        dialog.close();
+    });
+    dialog.connect_close_request(move |_| {
+        resolve(guard_ipc::MigrationResolutionAction::Block);
+        glib::Propagation::Proceed
+    });
+    dialog.present();
 }
 
 fn present_incident_dialog(window: &adw::ApplicationWindow, incident: guard_ipc::SshIncidentInfo) {

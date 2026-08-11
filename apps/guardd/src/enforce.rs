@@ -34,7 +34,9 @@ use guard_audit::AuditRecord;
 use guard_browser::{CustomProfile, ProtectedResourceRegistry};
 use guard_core::identity::{ExeIdentity, ProcessIdentity};
 use guard_core::lease::{LeaseId, LeaseSet, MigrationAccessLease, MigrationLeaseState};
-use guard_core::policy::{evaluate, AccessEvent, AccessOperation, Decision, DenyReason};
+use guard_core::policy::{
+    evaluate, AccessEvent, AccessOperation, Decision, DenyReason, MigrationCandidate,
+};
 #[cfg(test)]
 use guard_core::resource::BrowserFamily;
 use guard_core::resource::{
@@ -68,6 +70,16 @@ pub const DEFAULT_SSH_LOAD_DURATION_SECS: u64 = 30;
 pub const MAX_SSH_LOAD_DURATION_SECS: u64 = 300;
 
 pub type InodeIndex = Arc<RwLock<HashMap<(u64, u64), ProtectedResource>>>;
+
+/// Daemon-owned facts captured for a single pending browser import.  This is
+/// created only after the pure policy has recognized a trusted target browser;
+/// the target identity is checked again before a lease is created.
+#[derive(Debug, Clone)]
+pub struct MigrationPendingDetails {
+    pub candidate: MigrationCandidate,
+    pub resource: ProtectedResource,
+    pub target: ProcessIdentity,
+}
 
 /// The enforcement engine. Owns the registry, identity cache, enrollment store,
 /// fd-identity index, and the active lease set. `decide` is the hot-path entry.
@@ -289,6 +301,84 @@ impl EnforcementEngine {
             revoked: false,
         });
         Ok((id, expires_at))
+    }
+
+    /// Capture the daemon-verified details that a pending prompt needs.  The
+    /// fanotify fd stays with the pending store; this method never takes fd
+    /// ownership.
+    pub fn pending_migration_details(
+        &mut self,
+        pid: i32,
+        fd: RawFd,
+        candidate: &MigrationCandidate,
+    ) -> Option<MigrationPendingDetails> {
+        let resource = self.classify_fd(fd)?;
+        if resource.browser.as_ref() != Some(&candidate.source_browser)
+            || resource.profile.as_ref() != Some(&candidate.source_profile)
+        {
+            return None;
+        }
+        let (target, _) = self.resolve_process(pid)?;
+        if !target.is_trusted_browser()
+            || target.browser.as_ref() != Some(&candidate.target_browser)
+            || target.uid != resource.owner_uid
+        {
+            return None;
+        }
+        Some(MigrationPendingDetails {
+            candidate: candidate.clone(),
+            resource,
+            target,
+        })
+    }
+
+    /// Revalidate the exact initiating browser process and bind a short-lived
+    /// lease directly to it.  Unlike manual authorization this never creates
+    /// an executable-wide armed capability.
+    pub fn approve_pending_migration(
+        &mut self,
+        pending: &MigrationPendingDetails,
+    ) -> Result<(LeaseId, u64), String> {
+        self.identity_cache.remove(&pending.target.stable.pid);
+        let (current, _) = self
+            .resolve_process(pending.target.stable.pid as i32)
+            .ok_or_else(|| "target browser exited before confirmation".to_string())?;
+        if current.stable != pending.target.stable
+            || current.uid != pending.target.uid
+            || !current.is_trusted_browser()
+            || current.browser.as_ref() != Some(&pending.candidate.target_browser)
+        {
+            return Err("target browser identity changed before confirmation".to_string());
+        }
+        self.next_lease_id = self.next_lease_id.saturating_add(1);
+        let id = LeaseId(self.next_lease_id);
+        let expires_at = now_secs().saturating_add(DEFAULT_MIGRATION_DURATION_SECS);
+        self.leases.migration.push(MigrationAccessLease {
+            id,
+            source_browser: pending.candidate.source_browser.clone(),
+            source_profile: pending.candidate.source_profile.clone(),
+            target_browser: pending.candidate.target_browser.clone(),
+            uid: pending.target.uid,
+            state: MigrationLeaseState::Bound {
+                root: pending.target.stable.clone(),
+            },
+            expires_at,
+            revoked: false,
+        });
+        Ok((id, expires_at))
+    }
+
+    pub fn migration_audit_record(
+        &self,
+        pending: &MigrationPendingDetails,
+        event_code: &str,
+        decision: Decision,
+        detail: &str,
+    ) -> AuditRecord {
+        let mut record =
+            build_audit_record(&pending.resource, Some(&pending.target), decision, detail);
+        record.event_code = event_code.to_owned();
+        record
     }
 
     /// Authorize a one-shot SSH load lease (Phase 11). The lease is bound to
@@ -645,34 +735,36 @@ impl EnforcementEngine {
             } else {
                 "ssh_behavior_key_accessed;incident=untracked;monitoring=unavailable".into()
             };
-            let mut event = build_audit_record(&resource, Some(&process), decision, &diagnostic);
+            let mut event =
+                build_audit_record(&resource, Some(&process), decision.clone(), &diagnostic);
             event.event_code = "ssh_behavior_key_accessed".into();
             key_read_event = Some(event);
         }
-        match decision {
+        match &decision {
             Decision::Allow | Decision::AllowByLease(_) => self.allowed += 1,
             Decision::Deny(_) => self.denied += 1,
+            Decision::RequireMigrationConfirmation(_) => {}
         }
         // Phase 11: mark one-shot SSH load lease as used after a successful
         // allow. The lease binds to the exact ssh-add invocation; once it
         // reads the key, the `used` flag prevents any further open — even by
         // the same process — from re-using it.
-        if let Decision::AllowByLease(id) = decision {
+        if let Decision::AllowByLease(id) = &decision {
             let mut consumed = false;
             for l in &mut self.leases.ssh {
-                if l.id == id {
+                if l.id == *id {
                     l.used = true;
                     consumed = true;
                     break;
                 }
             }
             if consumed {
-                self.ssh_agent_bindings.remove(&id);
+                self.ssh_agent_bindings.remove(id);
             }
         }
         let record = if let Some(event) = key_read_event {
             Some(event)
-        } else if should_record_decision(decision) {
+        } else if should_record_decision(&decision) {
             let backend_diag = format!(
                 "{};classify={};trust={:?}",
                 resolve_diag, classification, process.trust_tier
@@ -680,7 +772,7 @@ impl EnforcementEngine {
             Some(build_audit_record(
                 &resource,
                 Some(&process),
-                decision,
+                decision.clone(),
                 &backend_diag,
             ))
         } else {
@@ -991,12 +1083,12 @@ fn build_audit_record(
     let parent_exe = process
         .and_then(|p| p.ancestors.first())
         .map(|a| a.exe.to_string_lossy().into_owned());
-    let lease_id = match decision {
+    let lease_id = match &decision {
         Decision::AllowByLease(id) => Some(id.0),
         _ => None,
     };
-    let deny_reason = match decision {
-        Decision::Deny(r) => Some(r),
+    let deny_reason = match &decision {
+        Decision::Deny(r) => Some(*r),
         _ => None,
     };
     AuditRecord {
@@ -1026,7 +1118,7 @@ fn build_audit_record(
 /// allows in debug builds preserves diagnostics and tests without imposing
 /// per-open string/path allocation and SQLite queue pressure in production.
 #[inline]
-fn should_record_decision(decision: Decision) -> bool {
+fn should_record_decision(decision: &Decision) -> bool {
     cfg!(debug_assertions) || matches!(decision, Decision::Deny(_))
 }
 
@@ -1359,7 +1451,7 @@ mod tests {
     }
 
     #[test]
-    fn decide_cross_browser_denied_without_lease() {
+    fn decide_cross_browser_requires_confirmation_without_lease() {
         let chrome = ChromiumProfile::create("Default").unwrap();
         let ff = FirefoxProfile::create("ff-profile").unwrap();
         let sleep = find_sleep();
@@ -1377,8 +1469,8 @@ mod tests {
         let f = std::fs::File::open(&ff.cookies_sqlite).unwrap();
         let d = engine.decide(pid, f.as_raw_fd());
         assert!(
-            matches!(d, Decision::Deny(DenyReason::CrossBrowserWithoutLease)),
-            "chrome reading firefox without lease => CrossBrowserWithoutLease, got {:?}",
+            matches!(d, Decision::RequireMigrationConfirmation(_)),
+            "chrome reading firefox without lease => confirmation required, got {:?}",
             d
         );
     }
@@ -1499,12 +1591,12 @@ mod tests {
         let (guard, ff_pid) = spawn_exe(&ff_exe);
         let _g = KillOnDrop(Some(guard));
 
-        // Before lease: firefox opening chrome cookies => cross-browser deny.
+        // Before lease: firefox opening chrome cookies => confirmation required.
         let f = std::fs::File::open(&chrome.cookies).unwrap();
         let d = engine.decide(ff_pid, f.as_raw_fd());
         assert!(
-            matches!(d, Decision::Deny(DenyReason::CrossBrowserWithoutLease)),
-            "firefox reading chrome without lease => CrossBrowserWithoutLease, got {d:?}"
+            matches!(d, Decision::RequireMigrationConfirmation(_)),
+            "firefox reading chrome without lease => confirmation required, got {d:?}"
         );
 
         // Authorize a migration: firefox may read chrome/Default.
@@ -1539,6 +1631,42 @@ mod tests {
         assert!(
             matches!(d3, Decision::Deny(_)),
             "reading firefox under a firefox->chrome lease => deny, got {d3:?}"
+        );
+    }
+
+    #[test]
+    fn pending_migration_approval_binds_the_triggering_browser_instance() {
+        let chrome = ChromiumProfile::create("Default").unwrap();
+        let ff = FirefoxProfile::create("ff-profile").unwrap();
+        let ff_exe = ff.root_path().join("fake-firefox-bin");
+        std::fs::copy(find_sleep(), &ff_exe).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&ff_exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut engine = EnforcementEngine::from_config(&migration_config(
+            &chrome.user_data_dir,
+            &ff.profile_dir,
+            &ff_exe,
+        ))
+        .unwrap();
+        let (child, pid) = spawn_exe(&ff_exe);
+        let _child = KillOnDrop(Some(child));
+        let file = std::fs::File::open(&chrome.cookies).unwrap();
+        let candidate = match engine.decide(pid, file.as_raw_fd()) {
+            Decision::RequireMigrationConfirmation(candidate) => candidate,
+            other => panic!("expected confirmation candidate, got {other:?}"),
+        };
+        let details = engine
+            .pending_migration_details(pid, file.as_raw_fd(), &candidate)
+            .expect("daemon re-verifies pending target facts");
+        let (lease_id, _) = engine.approve_pending_migration(&details).unwrap();
+        assert!(matches!(
+            engine.leases().migration[0].state,
+            MigrationLeaseState::Bound { ref root } if *root == details.target.stable
+        ));
+        let file = std::fs::File::open(&chrome.cookies).unwrap();
+        assert_eq!(
+            engine.decide(pid, file.as_raw_fd()),
+            Decision::AllowByLease(lease_id)
         );
     }
 

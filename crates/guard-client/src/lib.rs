@@ -154,6 +154,31 @@ pub fn migration_authorize(
     )
 }
 
+pub fn migration_pending(socket: &Path) -> anyhow::Result<Vec<guard_ipc::MigrationPendingInfo>> {
+    exchange(socket, RequestOp::MigrationPendingList, |body| match body {
+        ResponseBody::MigrationPending(value) => Some(value),
+        _ => None,
+    })
+}
+
+pub fn resolve_migration(
+    socket: &Path,
+    id: &str,
+    action: guard_ipc::MigrationResolutionAction,
+) -> anyhow::Result<guard_ipc::MigrationResolutionInfo> {
+    exchange(
+        socket,
+        RequestOp::MigrationResolve {
+            id: id.to_owned(),
+            action,
+        },
+        |body| match body {
+            ResponseBody::MigrationResolved(value) => Some(value),
+            _ => None,
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

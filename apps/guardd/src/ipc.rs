@@ -26,7 +26,8 @@ use std::sync::{Arc, Mutex};
 use guard_audit::{AuditRecord, AuditStore};
 use guard_ipc::{
     ConfigCheckInfo, EventInfo, IncidentResolutionAction, IncidentResolutionInfo, LeaseInfo,
-    MigrationAuthorizedInfo, Response, ResponseBody, SshIncidentInfo, SshIncidentStateInfo,
+    MigrationAuthorizedInfo, MigrationPendingInfo, MigrationResolutionAction,
+    MigrationResolutionInfo, Response, ResponseBody, SshIncidentInfo, SshIncidentStateInfo,
     SshLoadAuthorizedInfo, SshProtectedInfo, StatusInfo, MAX_REQUEST_BYTES, PROTOCOL_VERSION,
 };
 use guard_ipc::{Request, RequestOp};
@@ -34,6 +35,7 @@ use platform_linux::fanotify::FanotifyGroup;
 use platform_linux::ipc::{read_request, write_response, IpcServer, PeerCreds};
 
 use crate::enforce::{EnforcementEngine, SshAgentBinding};
+use crate::pending::PendingMigrationStore;
 
 static NEXT_AGENT_PIN: AtomicU64 = AtomicU64::new(1);
 
@@ -63,6 +65,7 @@ pub struct IpcState {
     /// not exposed as a generic backend-control IPC capability.
     pub ssh_behavior_runtime: Option<Arc<Mutex<platform_linux::ssh_behavior::SshBehaviorBackend>>>,
     pub incidents: Arc<Mutex<guard_core::ExposureTracker>>,
+    pub pending_migrations: Arc<Mutex<PendingMigrationStore>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -163,6 +166,11 @@ fn handle_request_with_connection(
             target_browser,
             duration_secs,
         ),
+        RequestOp::MigrationPendingList => handle_migration_pending_list(state, creds),
+        RequestOp::MigrationPendingGet { id } => handle_migration_pending_get(state, creds, &id),
+        RequestOp::MigrationResolve { id, action } => {
+            handle_migration_resolve(state, creds, connection_fd, &id, action)
+        }
         RequestOp::SshProtect { path } => handle_ssh_protect(state, creds, connection_fd, path),
         RequestOp::SshLoadAuthorize { path, ssh_add_pid } => {
             handle_ssh_load_authorize(state, creds, connection_fd, path, ssh_add_pid)
@@ -727,6 +735,165 @@ fn handle_incident_resolve(
 }
 
 // --- helpers ---
+
+fn handle_migration_pending_list(state: &IpcState, creds: PeerCreds) -> Response {
+    let pending = state
+        .pending_migrations
+        .lock()
+        .expect("pending migration mutex poisoned");
+    let values = pending
+        .list_for_uid(creds.uid, creds.uid == 0)
+        .into_iter()
+        .map(pending_info_to_ipc)
+        .collect();
+    Response::ok(ResponseBody::MigrationPending(values))
+}
+
+fn handle_migration_pending_get(state: &IpcState, creds: PeerCreds, id: &str) -> Response {
+    let pending = state
+        .pending_migrations
+        .lock()
+        .expect("pending migration mutex poisoned");
+    match pending
+        .get_for_uid(id, creds.uid, creds.uid == 0)
+        .map(|value| Box::new(pending_info_to_ipc(value)))
+    {
+        Some(value) => Response::ok(ResponseBody::MigrationPendingItem(value)),
+        None => Response::err("pending migration request not found"),
+    }
+}
+
+fn handle_migration_resolve(
+    state: &IpcState,
+    creds: PeerCreds,
+    connection_fd: Option<RawFd>,
+    id: &str,
+    action: MigrationResolutionAction,
+) -> Response {
+    // Fetch daemon-recorded facts first.  The IPC client never supplies a
+    // browser, profile, PID, executable path, uid, or duration for resolution.
+    let info = {
+        let pending = state
+            .pending_migrations
+            .lock()
+            .expect("pending migration mutex poisoned");
+        pending.get_for_uid(id, creds.uid, creds.uid == 0)
+    };
+    let Some(info) = info else {
+        return Response::err("pending migration request not found or already resolved");
+    };
+    if matches!(action, MigrationResolutionAction::AllowImport) {
+        if let Err(error) = authorize_sensitive(
+            state,
+            creds,
+            connection_fd,
+            "org.guardd.migration-resolve",
+            &[
+                ("source_browser", &info.source_browser),
+                ("source_profile", &info.source_profile),
+                ("target_browser", &info.target_browser),
+                ("pending_id", &info.id),
+            ],
+        ) {
+            return Response::err(error);
+        }
+    }
+
+    let block = matches!(action, MigrationResolutionAction::Block);
+    let request = state
+        .pending_migrations
+        .lock()
+        .expect("pending migration mutex poisoned")
+        .take_for_resolution(id, creds.uid, creds.uid == 0, unix_secs(), block);
+    let Some(request) = request else {
+        return Response::err("pending migration request already resolved");
+    };
+    let details = request.details.clone();
+
+    if block {
+        request.resolve(false);
+        let record = state
+            .engine
+            .lock()
+            .expect("engine mutex poisoned")
+            .migration_audit_record(
+                &details,
+                "browser_migration_blocked",
+                guard_core::Decision::Deny(guard_core::DenyReason::CrossBrowserWithoutLease),
+                "browser_migration_blocked;resolution=user_block",
+            );
+        state.audit.record(record);
+        return Response::ok(ResponseBody::MigrationResolved(
+            MigrationResolutionInfo::Blocked,
+        ));
+    }
+
+    let outcome = state
+        .engine
+        .lock()
+        .expect("engine mutex poisoned")
+        .approve_pending_migration(&details);
+    match outcome {
+        Ok((lease_id, expires_at)) => {
+            request.resolve(true);
+            let record = state
+                .engine
+                .lock()
+                .expect("engine mutex poisoned")
+                .migration_audit_record(
+                    &details,
+                    "browser_migration_allowed",
+                    guard_core::Decision::AllowByLease(lease_id),
+                    &format!(
+                        "browser_migration_allowed;request={};lease={};expires_at={}",
+                        id, lease_id.0, expires_at
+                    ),
+                );
+            state.audit.record(record);
+            Response::ok(ResponseBody::MigrationResolved(
+                MigrationResolutionInfo::Allowed,
+            ))
+        }
+        Err(error) => {
+            request.resolve(false);
+            let record = state
+                .engine
+                .lock()
+                .expect("engine mutex poisoned")
+                .migration_audit_record(
+                    &details,
+                    "browser_migration_blocked",
+                    guard_core::Decision::Deny(guard_core::DenyReason::IdentityMismatch),
+                    &format!("browser_migration_blocked;resolution=identity_revalidation;{error}"),
+                );
+            state.audit.record(record);
+            Response::err(error)
+        }
+    }
+}
+
+fn pending_info_to_ipc(value: crate::pending::PendingMigrationInfo) -> MigrationPendingInfo {
+    MigrationPendingInfo {
+        id: value.id,
+        uid: value.uid,
+        source_browser: value.source_browser,
+        source_profile: value.source_profile,
+        target_browser: value.target_browser,
+        target_exe: value.target_exe,
+        target_pid: value.target_pid,
+        target_start_time: value.target_start_time,
+        requested_data: value.requested_data,
+        created_at: value.created_at,
+        expires_at: value.expires_at,
+    }
+}
+
+fn unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
 
 fn handle_migration_authorize(
     state: &IpcState,
@@ -1554,6 +1721,7 @@ mod tests {
             )),
             ssh_behavior_runtime: None,
             incidents: Arc::new(Mutex::new(guard_core::ExposureTracker::default())),
+            pending_migrations: Arc::new(Mutex::new(PendingMigrationStore::default())),
         };
         (state, (p.root, audit_dir))
     }
@@ -1565,7 +1733,7 @@ mod tests {
             uid,
             pid: 4242,
             start_time: 9999,
-            decision,
+            decision: decision.clone(),
             deny_reason: match decision {
                 Decision::Deny(r) => Some(r),
                 _ => None,
@@ -2098,6 +2266,7 @@ mod tests {
             )),
             ssh_behavior_runtime: None,
             incidents: Arc::new(Mutex::new(guard_core::ExposureTracker::default())),
+            pending_migrations: Arc::new(Mutex::new(PendingMigrationStore::default())),
         };
         (state, (chrome_p.root, ff_p.root, audit_dir))
     }
@@ -2437,6 +2606,7 @@ mod tests {
             )),
             ssh_behavior_runtime: None,
             incidents: Arc::clone(&state.incidents),
+            pending_migrations: Arc::clone(&state.pending_migrations),
         };
         let sock_path = sock.clone();
         let server_handle = thread::spawn(move || {
@@ -2525,6 +2695,7 @@ mod tests {
             )),
             ssh_behavior_runtime: None,
             incidents: Arc::clone(&state.incidents),
+            pending_migrations: Arc::clone(&state.pending_migrations),
         };
         let sock_path = sock.clone();
         let server_handle = thread::spawn(move || {
@@ -2604,6 +2775,7 @@ mod tests {
             )),
             ssh_behavior_runtime: None,
             incidents: Arc::clone(&state.incidents),
+            pending_migrations: Arc::clone(&state.pending_migrations),
         };
         let sock_path = sock.clone();
         let server_handle = thread::spawn(move || {

@@ -22,13 +22,24 @@ use serde::{Deserialize, Serialize};
 
 use crate::identity::{AncestorSummary, ProcessIdentity, ProcessStableId};
 use crate::lease::{LeaseId, LeaseSet, MigrationLeaseState};
-use crate::resource::{ProtectedResource, ProtectedResourceKind};
+use crate::resource::{BrowserId, ProfileId, ProtectedResource, ProtectedResourceKind};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// A policy-only description of a trusted browser attempting to import one
+/// enrolled browser profile into another.  It deliberately has no fd or UI
+/// state: the Linux enforcement layer owns the pending fanotify operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MigrationCandidate {
+    pub source_browser: BrowserId,
+    pub source_profile: ProfileId,
+    pub target_browser: BrowserId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Decision {
     Allow,
     Deny(DenyReason),
     AllowByLease(LeaseId),
+    RequireMigrationConfirmation(MigrationCandidate),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -157,8 +168,14 @@ fn decide_browser(event: &AccessEvent, leases: &LeaseSet, now: u64) -> Decision 
     if scope_match {
         Decision::Deny(DenyReason::IdentityMismatch)
     } else if proc.is_trusted_browser() {
-        // Trusted browser, wrong profile, no covering lease.
-        Decision::Deny(DenyReason::CrossBrowserWithoutLease)
+        // A positively enrolled browser may ask a human to confirm an import.
+        // Unknown processes and untrusted executable identities still fail
+        // closed below; browser descendants are not candidates here.
+        Decision::RequireMigrationConfirmation(MigrationCandidate {
+            source_browser: res_browser.clone(),
+            source_profile: res_profile.clone(),
+            target_browser: proc.browser.clone().expect("trusted browser has BrowserId"),
+        })
     } else if proc.browser.is_some() {
         Decision::Deny(DenyReason::NotTrustedIdentity)
     } else {
@@ -381,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn cross_browser_without_lease_denied() {
+    fn edge_to_chrome_requires_migration_confirmation() {
         let res = browser_resource(
             ProtectedResourceKind::CookieStore,
             "chrome",
@@ -396,8 +413,38 @@ mod tests {
         );
         assert_eq!(
             evaluate(&event(res, proc), &LeaseSet::default(), NOW),
-            Decision::Deny(DenyReason::CrossBrowserWithoutLease)
+            Decision::RequireMigrationConfirmation(MigrationCandidate {
+                source_browser: BrowserId("chrome".into()),
+                source_profile: ProfileId("Default".into()),
+                target_browser: BrowserId("firefox".into()),
+            })
         );
+    }
+
+    #[test]
+    fn recognized_cross_browser_pairs_require_confirmation() {
+        for (source, target) in [
+            ("chrome", "edge"),
+            ("firefox", "zen"),
+            ("chrome", "chromium"),
+        ] {
+            let res = browser_resource(ProtectedResourceKind::CookieStore, source, "Default", 1000);
+            let proc = browser_proc(
+                Some(target),
+                TrustTier::SystemPackage,
+                1000,
+                stable(2, 200, &format!("/usr/bin/{target}")),
+            );
+            assert_eq!(
+                evaluate(&event(res, proc), &LeaseSet::default(), NOW),
+                Decision::RequireMigrationConfirmation(MigrationCandidate {
+                    source_browser: BrowserId(source.into()),
+                    source_profile: ProfileId("Default".into()),
+                    target_browser: BrowserId(target.into()),
+                }),
+                "{target} -> {source} must ask rather than deny"
+            );
+        }
     }
 
     #[test]
@@ -649,7 +696,11 @@ mod tests {
         };
         assert_eq!(
             evaluate(&event(res, proc), &ls, NOW),
-            Decision::Deny(DenyReason::CrossBrowserWithoutLease)
+            Decision::RequireMigrationConfirmation(MigrationCandidate {
+                source_browser: BrowserId("chrome".into()),
+                source_profile: ProfileId("Default".into()),
+                target_browser: BrowserId("firefox".into()),
+            })
         );
     }
 
@@ -889,7 +940,11 @@ mod tests {
         };
         assert_eq!(
             evaluate(&event(res, proc), &ls, NOW),
-            Decision::Deny(DenyReason::CrossBrowserWithoutLease)
+            Decision::RequireMigrationConfirmation(MigrationCandidate {
+                source_browser: BrowserId("chrome".into()),
+                source_profile: ProfileId("Profile1".into()),
+                target_browser: BrowserId("firefox".into()),
+            })
         );
     }
 

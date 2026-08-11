@@ -39,7 +39,8 @@ fn main() -> ExitCode {
                     for event in events.iter().filter(|event| {
                         event.id > previous
                             && (event.decision.contains("Deny")
-                                || event.event_code.starts_with("ssh_behavior_"))
+                                || event.event_code.starts_with("ssh_behavior_")
+                                || event.event_code == "browser_migration_confirmation_required")
                     }) {
                         if !should_notify(&mut last_notified, event, now_ms) {
                             continue;
@@ -53,6 +54,9 @@ fn main() -> ExitCode {
                             eprintln!("guard-notify: delivered event_id={}", event.id);
                         }
                         if event.event_code == "ssh_behavior_network_blocked" {
+                            activate_guard_ui();
+                        }
+                        if event.event_code == "browser_migration_confirmation_required" {
                             activate_guard_ui();
                         }
                     }
@@ -155,6 +159,20 @@ fn notification_text(event: &EventInfo) -> (String, String, &'static str) {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| event.exe.clone());
+    if event.event_code == "browser_migration_confirmation_required" {
+        let source = event
+            .resource_browser
+            .as_deref()
+            .unwrap_or("another browser");
+        let target = event.process_browser.as_deref().unwrap_or(&exe);
+        return (
+            "Browser data import confirmation required".into(),
+            format!(
+                "{target} is trying to access protected {source} data. Open Sensitive File Guard to confirm whether you are importing browser data."
+            ),
+            "normal",
+        );
+    }
     if event.reason_code.as_deref() == Some("migration_lease_required") {
         return (
             "Blocked cross-browser data access".into(),

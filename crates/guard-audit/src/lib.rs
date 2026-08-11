@@ -231,7 +231,7 @@ fn insert_record(conn: &Connection, r: &AuditRecord) -> anyhow::Result<()> {
             r.uid,
             r.pid,
             r.start_time as i64,
-            decision_str(r.decision),
+            decision_str(&r.decision),
             r.deny_reason.map(deny_reason_str),
             resource_kind_str(r.resource_kind),
             r.resource_browser.as_ref().map(|b| b.0.as_str()),
@@ -412,15 +412,19 @@ fn reconstruct_decision(
         "allow_by_lease" => {
             Decision::AllowByLease(guard_core::lease::LeaseId(lease_id.unwrap_or(0) as u64))
         }
+        "migration_confirmation_required" => {
+            Decision::Deny(deny_reason.unwrap_or(DenyReason::CrossBrowserWithoutLease))
+        }
         _ => Decision::Deny(deny_reason.unwrap_or(DenyReason::UnknownProcess)),
     }
 }
 
-fn decision_str(d: Decision) -> &'static str {
+fn decision_str(d: &Decision) -> &'static str {
     match d {
         Decision::Allow => "allow",
         Decision::Deny(_) => "deny",
         Decision::AllowByLease(_) => "allow_by_lease",
+        Decision::RequireMigrationConfirmation(_) => "migration_confirmation_required",
     }
 }
 
@@ -515,7 +519,7 @@ mod tests {
             uid,
             pid: 4242,
             start_time: 9999,
-            decision,
+            decision: decision.clone(),
             deny_reason: match decision {
                 Decision::Deny(r) => Some(r),
                 _ => None,

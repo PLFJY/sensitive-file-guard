@@ -47,9 +47,11 @@ protected SSH private key.
 
 **Allows:** a browser accessing its own profile; all protected SSH-key reads
 (with an informational notification); normal `git push`, SSH authentication,
-and SSH-format Git signing through `ssh-agent`; cross-browser
-migration only under an explicit, temporary `MigrationAccessLease` that binds
-on first use to one exact process tree; an
+and SSH-format Git signing through `ssh-agent`; a recognized, trusted browser
+import from another enrolled browser profile is held for a one-time user
+confirmation, then receives a temporary `MigrationAccessLease` bound directly
+to that exact process tree. `guardctl migration authorize` remains available
+for advanced pre-authorization; an
 explicit one-shot `SshLoadLease` for loading a private key into `ssh-agent`.
 The Linux fanotify backend does **not** claim that migration access is
 read-only because permission events do not reveal the opener's original flags.
@@ -103,6 +105,16 @@ The Protection page discovers installed native browser sources on refresh and
 also supports an explicit custom browser entry (family, existing profile root,
 and canonical executable). It shows metadata-only SSH key suggestions without
 enrolling them; discovery alone never grants trust.
+
+### Browser imports
+
+Browser imports work without a preparatory command. A trusted enrolled browser
+opening its own enrolled profile is allowed immediately. An unknown process,
+fake browser executable, or cross-UID process is denied immediately. When a
+trusted enrolled browser opens another enrolled browser's profile, the current
+open remains blocked while guard-ui asks whether this is an import. Allow binds
+a 10-minute lease to that exact browser process tree; Block, closing the dialog,
+and timeout deny the queued opens. See [the browser migration model](docs/BROWSER_MIGRATION_MODEL.md).
 
 ## Install
 

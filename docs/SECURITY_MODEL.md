@@ -115,10 +115,18 @@ Audit records contain metadata only (path, exe, uid, pid, decision, deny
 reason, resource kind). They never contain file contents, cookie values,
 passwords, key bytes, or private-key material.
 
-### 11. Deterministic policy, no UI on the hot path
+### 11. Deterministic policy and bounded import confirmation
 The authorization decision is a deterministic function of `(resource, process,
-operation, leases)`. It never waits for a human UI. Deny is immediate; audit
-and notification happen out-of-band.
+operation, leases)`. Ordinary Allow/Deny decisions never wait for a human UI.
+The sole exception is a typed `RequireMigrationConfirmation` result for a
+trusted enrolled browser reading another enrolled browser profile for the same
+UID. The event loop transfers that event fd to a bounded pending store and
+continues serving other fanotify events. A user can allow or block only by
+pending request ID plus a fixed action; Allow crosses a non-cached polkit
+boundary and revalidates PID, start time, executable identity, UID and browser
+mapping before binding the lease. Timeout, dialog close, target exit and failed
+revalidation deny. Unknown processes, fake browser names and cross-UID access
+remain immediate denial paths.
 
 ### 12. Classification failure boundaries
 Browser `FAN_OPEN_PERM` classification failures produce
@@ -145,6 +153,13 @@ access, the enforcement engine binds it to the exact browser root process
 (PID + start time + executable path/dev/inode). Only that process tree can use
 the capability; it becomes dead when the root process exits or the PID is
 reused.
+
+Interactive import approval creates the same lease already `Bound` to the
+verified browser process that triggered the pending open. It is scoped to one
+source browser/profile, target browser, UID and exact process tree, expires
+after 10 minutes by default, and has no permanent “always allow” option.
+Rejected requests receive a short process-instance-scoped suppression window
+to prevent retry popup storms.
 
 ### 15. Strict filesystem first-open enforcement
 `strict-filesystem` deduplicates protected roots by filesystem device and
@@ -195,6 +210,8 @@ mode is `0660 root:guardd-users`; every connection gets kernel credentials from
 | Operation | Caller and independent verification | Capability and authorization |
 | --- | --- | --- |
 | `MigrationAuthorize` | peer UID/PID from `SO_PEERCRED`; source/profile/target must resolve to enrolled daemon configuration; peer start token must remain live | grants an armed, expiring process-tree capability; polkit for non-root |
+| `MigrationPendingList/Get` | peer UID from `SO_PEERCRED`; non-root sees only its own daemon-recorded requests | metadata-only view; no client-supplied browser/process facts |
+| `MigrationResolve` | pending ID belongs to peer UID (or root); daemon revalidates target process identity | fixed `allow_import` or `block`; Allow requires non-cached `org.guardd.migration-resolve` polkit authorization |
 | `SshProtect` | root or `stat`-verified file owner; canonical regular-file candidate, name, owner, and successful fanotify mark checked | adds protection but no read capability; polkit for non-root |
 | `SshLoadAuthorize` | protected key owner; direct stopped child and trusted `ssh-add`; verified/pinned trusted `ssh-agent`; all kernel facts rechecked after authorization | grants one matching open for 30 seconds; polkit for non-root |
 | `LeasesRevoke` | lease owner or root; ownership comes from daemon state | removes privilege; no polkit, and cross-user revocation is denied |

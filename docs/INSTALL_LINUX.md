@@ -58,6 +58,19 @@ Launch it from the logged-in desktop session with `guard-ui` (or the
 “Sensitive File Guard” application entry after installation). For a source
 checkout before installation, use `target/release/guard-ui`.
 
+### Interactive browser imports
+
+No `guardctl migration authorize` command is needed for a normal browser
+import. When a trusted enrolled browser first opens another enrolled browser's
+profile for the same Unix user, guardd keeps that open pending and guard-notify
+brings guard-ui forward. The dialog allows the current import or blocks it;
+closing it and a 60-second timeout both block. The existing `guardctl migration
+authorize` command remains an advanced/headless pre-authorization option.
+
+Do not expect a prompt for a process merely named `chrome`, a browser-launched
+shell helper, an unknown process, or a cross-user request: those remain
+immediate denials.
+
 ## Source installation
 
 ```sh

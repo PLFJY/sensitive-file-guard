@@ -16,6 +16,17 @@
     </defaults>
   </action>
 
+  <action id="org.guardd.migration-resolve">
+    <description>Confirm a detected browser data import</description>
+    <message>Authentication is required to let $(target_browser) import protected $(source_browser) profile $(source_profile)</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <!-- Never cache import approval: same-UID malware must not reuse it. -->
+      <allow_active>auth_self</allow_active>
+    </defaults>
+  </action>
+
   <action id="org.guardd.ssh-protect">
     <description>Add an SSH private key to guardd protection</description>
     <message>Authentication is required to protect SSH key $(path)</message>

@@ -11,6 +11,7 @@
 
 mod enforce;
 mod ipc;
+mod pending;
 mod strict;
 
 use std::io::Write;
@@ -276,6 +277,7 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
     let group = Arc::new(group);
     let engine = Arc::new(Mutex::new(engine));
     let incidents = Arc::new(Mutex::new(guard_core::ExposureTracker::default()));
+    let pending_migrations = Arc::new(Mutex::new(pending::PendingMigrationStore::default()));
 
     // A startup-only fanotify snapshot is not sufficient: browser databases
     // are routinely replaced with new inodes and profiles gain directories at
@@ -355,6 +357,7 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
             ssh_behavior_backend: Arc::clone(&ssh_behavior_backend),
             ssh_behavior_runtime: ssh_behavior_runtime.as_ref().map(Arc::clone),
             incidents: Arc::clone(&incidents),
+            pending_migrations: Arc::clone(&pending_migrations),
         };
         Some(
             std::thread::Builder::new()
@@ -451,6 +454,27 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
             .lock()
             .expect("incident mutex poisoned")
             .expire(now_ns / 1_000_000);
+        // Pending import consent is independent of fanotify reads.  Expire it
+        // on the poll tick so a silent desktop session cannot hold event fds
+        // indefinitely, even when no further filesystem events arrive.
+        let expired_migrations = pending_migrations
+            .lock()
+            .expect("pending migration mutex poisoned")
+            .expire(unix_secs());
+        for request in expired_migrations {
+            let details = request.details.clone();
+            request.resolve(false);
+            let record = engine
+                .lock()
+                .expect("engine mutex poisoned")
+                .migration_audit_record(
+                    &details,
+                    "browser_migration_timed_out",
+                    guard_core::Decision::Deny(guard_core::DenyReason::CrossBrowserWithoutLease),
+                    "browser_migration_timed_out;resolution=timeout_or_target_exit",
+                );
+            audit.record(record);
+        }
         if let Some(runtime) = &ssh_behavior_runtime {
             runtime
                 .lock()
@@ -501,7 +525,7 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                 continue;
             }
 
-            let (decision, audit_record) = if let Some(classifier) = &strict_classifier {
+            let (decision, mut audit_record) = if let Some(classifier) = &strict_classifier {
                 backend_metrics
                     .strict_events_total
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -583,9 +607,87 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                 eng.decide_event_with_behavior(ev.pid, ev.fd, ev.is_access_perm(), Some(&behavior))
             };
             let allow = matches!(
-                decision,
+                &decision,
                 guard_core::policy::Decision::Allow | guard_core::policy::Decision::AllowByLease(_)
             );
+
+            // Only a positively recognized trusted browser can produce this
+            // typed decision. Transfer the event fd into the bounded pending
+            // store and continue draining unrelated fanotify events.
+            let mut fd_transferred = false;
+            if let guard_core::policy::Decision::RequireMigrationConfirmation(candidate) = &decision
+            {
+                if ev.has_fd() {
+                    let details = engine
+                        .lock()
+                        .expect("engine mutex poisoned")
+                        .pending_migration_details(ev.pid, ev.fd, candidate);
+                    if let Some(details) = details {
+                        let audit_details = details.clone();
+                        let outcome = pending_migrations
+                            .lock()
+                            .expect("pending migration mutex poisoned")
+                            .enqueue(
+                                details,
+                                pending::PendingPermission::new(ev.fd, Arc::clone(&group)),
+                                unix_secs(),
+                            );
+                        match outcome {
+                            pending::EnqueueResult::Created(info) => {
+                                let record = engine
+                                    .lock()
+                                    .expect("engine mutex poisoned")
+                                    .migration_audit_record(
+                                        &audit_details,
+                                        "browser_migration_confirmation_required",
+                                        decision.clone(),
+                                        &format!(
+                                            "browser_migration_confirmation_required;request={};expires_at={}",
+                                            info.id, info.expires_at
+                                        ),
+                                    );
+                                audit_record = Some(record);
+                                fd_transferred = true;
+                            }
+                            pending::EnqueueResult::Joined => fd_transferred = true,
+                            pending::EnqueueResult::DenySuppressed => {
+                                // `PendingPermission` was dropped in enqueue
+                                // and therefore denied + closed exactly once.
+                                audit_record = Some(
+                                    engine
+                                        .lock()
+                                        .expect("engine mutex poisoned")
+                                        .migration_audit_record(
+                                            &audit_details,
+                                            "browser_migration_blocked",
+                                            guard_core::Decision::Deny(
+                                                guard_core::DenyReason::CrossBrowserWithoutLease,
+                                            ),
+                                            "browser_migration_blocked;resolution=retry_suppressed",
+                                        ),
+                                );
+                                fd_transferred = true;
+                            }
+                            pending::EnqueueResult::DenyLimit => {
+                                audit_record = Some(
+                                    engine
+                                        .lock()
+                                        .expect("engine mutex poisoned")
+                                        .migration_audit_record(
+                                            &audit_details,
+                                            "browser_migration_blocked",
+                                            guard_core::Decision::Deny(
+                                                guard_core::DenyReason::CrossBrowserWithoutLease,
+                                            ),
+                                            "browser_migration_blocked;resolution=pending_limit",
+                                        ),
+                                );
+                                fd_transferred = true;
+                            }
+                        }
+                    }
+                }
+            }
 
             // Non-blocking audit record. Dropped if the channel is full. The
             // Each blocked event reaches the audit log. Desktop presentation is owned
@@ -599,13 +701,16 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                 eprintln!(
                     "guardd: pid={} decision={} allow={}",
                     ev.pid,
-                    match decision {
+                    match &decision {
                         guard_core::policy::Decision::Allow => "ALLOW".into(),
                         guard_core::policy::Decision::AllowByLease(id) => {
                             format!("ALLOW_BY_LEASE({})", id.0)
                         }
                         guard_core::policy::Decision::Deny(r) => {
                             format!("DENY({:?})", r)
+                        }
+                        guard_core::policy::Decision::RequireMigrationConfirmation(_) => {
+                            "MIGRATION_CONFIRMATION_REQUIRED".into()
                         }
                     },
                     allow
@@ -615,7 +720,7 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                 tracing::debug!(pid = ev.pid, allow, ?decision, "decision");
             }
 
-            if ev.has_fd() {
+            if ev.has_fd() && !fd_transferred {
                 group.respond(ev.fd, allow)?;
                 fanotify::close_event_fd(ev.fd);
             }
@@ -784,6 +889,13 @@ fn unix_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
         .unwrap_or(0)
 }
 

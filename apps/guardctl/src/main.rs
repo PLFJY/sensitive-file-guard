@@ -954,6 +954,31 @@ fn print_human(resp: &Response) {
         }
         Some(ResponseBody::ConfigCheck(c)) => print_config_check(c),
         Some(ResponseBody::MigrationAuthorized(m)) => print_migration_authorized(m),
+        Some(ResponseBody::MigrationPending(items)) => {
+            for item in items {
+                println!(
+                    "{}: {} {} -> {} (pid {})",
+                    item.id,
+                    item.source_browser,
+                    item.source_profile,
+                    item.target_browser,
+                    item.target_pid
+                );
+            }
+        }
+        Some(ResponseBody::MigrationPendingItem(item)) => {
+            println!(
+                "{}: {} {} -> {} (pid {})",
+                item.id,
+                item.source_browser,
+                item.source_profile,
+                item.target_browser,
+                item.target_pid
+            );
+        }
+        Some(ResponseBody::MigrationResolved(result)) => {
+            println!("Migration resolution: {result:?}")
+        }
         Some(ResponseBody::SshProtected(s)) => print_ssh_protected(s),
         Some(ResponseBody::SshLoadAuthorized(s)) => print_ssh_load_authorized(s),
         None => println!("(no response body)"),
