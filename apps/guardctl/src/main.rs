@@ -939,6 +939,11 @@ fn print_human(resp: &Response) {
         Some(ResponseBody::Status(s)) => print_status(s),
         Some(ResponseBody::Resources(rs)) => print_resources(rs),
         Some(ResponseBody::Browsers(bs)) => print_browsers(bs),
+        Some(ResponseBody::Configuration(configuration)) => {
+            println!("Active configuration: {}", configuration.enforcement_mode);
+            println!("  browsers : {}", configuration.browsers.len());
+            println!("  SSH keys : {}", configuration.ssh_keys.len());
+        }
         Some(ResponseBody::Events(es)) => print_events(es),
         Some(ResponseBody::Explain(e)) => print_explain(e),
         Some(ResponseBody::Leases(ls)) => print_leases(ls),

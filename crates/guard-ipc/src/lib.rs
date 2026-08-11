@@ -16,7 +16,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Wire protocol version. Bumped on incompatible changes.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Hard upper bound on a single request frame. The server rejects anything
 /// larger (and any malformed length prefix) so a peer cannot exhaust memory.
@@ -44,6 +44,10 @@ pub enum RequestOp {
     Status,
     ResourcesList,
     BrowsersList,
+    /// Metadata-only snapshot of the configuration currently loaded by the
+    /// daemon. This lets an unprivileged UI render the active policy without
+    /// reading the root-owned configuration file directly.
+    ConfigurationGet,
     Events {
         limit: Option<u32>,
         #[serde(default)]
@@ -154,6 +158,7 @@ pub enum ResponseBody {
     Status(StatusInfo),
     Resources(Vec<ResourceInfo>),
     Browsers(Vec<BrowserInfo>),
+    Configuration(ConfigurationInfo),
     Events(Vec<EventInfo>),
     Incidents(Vec<SshIncidentInfo>),
     Incident(Box<SshIncidentInfo>),
@@ -432,6 +437,28 @@ pub struct BrowserInfo {
     pub exe_paths: Vec<String>,
 }
 
+/// Active policy snapshot. It contains paths and policy metadata only, never
+/// browser database rows, SSH key bytes, cookies, or credentials.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigurationInfo {
+    pub enforcement_mode: String,
+    pub browsers: Vec<ConfiguredBrowserInfo>,
+    pub enrolled_exes: Vec<String>,
+    pub ssh_keys: Vec<String>,
+    pub ssh_behavior_window_secs: u64,
+}
+
+/// Browser enrollment exactly as configured, including whether ownership was
+/// explicitly pinned or derived by the daemon at startup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfiguredBrowserInfo {
+    pub id: String,
+    pub family: String,
+    pub profile_root: String,
+    pub owner_uid: Option<u32>,
+    pub exe_paths: Vec<String>,
+}
+
 /// One audit event as shown to the CLI. Mirrors `guard_audit::AuditEvent` but
 /// as a plain wire struct (no storage coupling). Contains NO secret contents.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -511,6 +538,7 @@ mod tests {
             RequestOp::Status,
             RequestOp::ResourcesList,
             RequestOp::BrowsersList,
+            RequestOp::ConfigurationGet,
             RequestOp::Events {
                 limit: Some(50),
                 before_id: None,

@@ -109,6 +109,10 @@ pub struct EnforcementEngine {
     next_lease_id: u64,
     /// The browser enrollment config, retained for IPC `browsers list` queries.
     browser_config: Vec<BrowserEnrollmentConfig>,
+    /// The metadata-only policy snapshot used by unprivileged UI clients. It
+    /// deliberately contains paths and policy settings, never protected file
+    /// contents or credentials.
+    configuration: EnforcementConfig,
     /// Decision counters (hot-path observability; no per-event allocation).
     pub allowed: u64,
     pub denied: u64,
@@ -196,6 +200,7 @@ impl EnforcementEngine {
             ssh_agent_bindings: HashMap::new(),
             next_lease_id: 0,
             browser_config: cfg.browsers.clone(),
+            configuration: cfg.clone(),
             allowed: 0,
             denied: 0,
             unclassified: 0,
@@ -217,6 +222,13 @@ impl EnforcementEngine {
     /// Browser enrollment config (for IPC `browsers list`).
     pub fn browser_config(&self) -> &[BrowserEnrollmentConfig] {
         &self.browser_config
+    }
+
+    /// Configuration loaded for this daemon generation. UI clients obtain a
+    /// metadata-only projection through authenticated local IPC instead of
+    /// reading the root-owned config file themselves.
+    pub fn configuration(&self) -> &EnforcementConfig {
+        &self.configuration
     }
 
     /// Active leases (for IPC `leases list`). Phase 08 adds creation; Phase 07

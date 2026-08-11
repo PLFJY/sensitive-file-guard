@@ -53,6 +53,12 @@ pub fn browsers(socket: &Path) -> anyhow::Result<Vec<guard_ipc::BrowserInfo>> {
         _ => None,
     })
 }
+pub fn configuration(socket: &Path) -> anyhow::Result<guard_ipc::ConfigurationInfo> {
+    exchange(socket, RequestOp::ConfigurationGet, |b| match b {
+        ResponseBody::Configuration(v) => Some(v),
+        _ => None,
+    })
+}
 pub fn leases(socket: &Path) -> anyhow::Result<Vec<guard_ipc::LeaseInfo>> {
     exchange(socket, RequestOp::LeasesList, |b| match b {
         ResponseBody::Leases(v) => Some(v),

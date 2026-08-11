@@ -488,6 +488,66 @@ fn load_configuration(state: &UiState) {
     refresh_browser_sources(state);
 }
 
+/// Build the editable UI model from the policy loaded by guardd. The GUI runs
+/// as the desktop user and must not treat an unreadable root-owned config file
+/// as an empty policy. This metadata-only snapshot never includes key bytes or
+/// browser data.
+fn configuration_from_daemon(
+    info: guard_ipc::ConfigurationInfo,
+) -> Option<platform_linux::config::EnforcementConfig> {
+    let enforcement_mode = match info.enforcement_mode.as_str() {
+        "strict-filesystem" => platform_linux::config::EnforcementMode::StrictFilesystem,
+        "conservative" => platform_linux::config::EnforcementMode::Conservative,
+        _ => return None,
+    };
+    let mut browsers = Vec::with_capacity(info.browsers.len());
+    for browser in info.browsers {
+        let family = match browser.family.as_str() {
+            "Chromium" | "chromium" => guard_core::BrowserFamily::Chromium,
+            "Firefox" | "firefox" => guard_core::BrowserFamily::Firefox,
+            "Zen" | "zen" => guard_core::BrowserFamily::Zen,
+            _ => return None,
+        };
+        browsers.push(platform_linux::config::BrowserEnrollmentConfig {
+            id: browser.id,
+            family,
+            profile_root: PathBuf::from(browser.profile_root),
+            owner_uid: browser.owner_uid,
+            exe_paths: browser.exe_paths.into_iter().map(PathBuf::from).collect(),
+        });
+    }
+    Some(platform_linux::config::EnforcementConfig {
+        enforcement_mode,
+        browsers,
+        enrolled_exes: info.enrolled_exes.into_iter().map(PathBuf::from).collect(),
+        ssh_keys: info.ssh_keys.into_iter().map(PathBuf::from).collect(),
+        ssh_behavior_window_secs: info.ssh_behavior_window_secs,
+    })
+}
+
+fn hydrate_configuration_from_daemon(state: &UiState, info: guard_ipc::ConfigurationInfo) {
+    // A directly readable config is authoritative for this UI session. When it
+    // is root-readable only, replace the first-run placeholder with guardd's
+    // active configuration exactly once; later polling must not discard edits.
+    if state.persisted.borrow().is_some() {
+        return;
+    }
+    let Some(cfg) = configuration_from_daemon(info) else {
+        state.detail.set_text(
+            "guardd returned an invalid configuration snapshot; the active policy was not changed.",
+        );
+        return;
+    };
+    *state.persisted.borrow_mut() = Some(cfg.clone());
+    *state.candidate.borrow_mut() = Some(cfg.clone());
+    state
+        .mode
+        .set_active_id(Some(cfg.enforcement_mode.as_str()));
+    state.apply.set_sensitive(false);
+    state.apply.set_tooltip_text(None);
+    refresh_browser_sources(state);
+}
+
 fn refresh_browser_sources(state: &UiState) {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -1009,11 +1069,13 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow) {
     let protection_syncing = state.protection_syncing.clone();
     let shown_incidents = state.shown_incidents.clone();
     let shown_migrations = state.shown_migrations.clone();
+    let config_state = state.clone();
     let window = window.clone();
     let after_id = event_data.borrow().first().map(|event| event.id);
     glib::MainContext::default().spawn_local(async move {
         let result = gio::spawn_blocking(move || {
             let daemon = guard_client::status(&socket).ok();
+            let configuration = guard_client::configuration(&socket).ok();
             let recent_events = guard_client::events_cursor(&socket, Some(100), None, after_id)
                 .unwrap_or_default()
                 .into_iter()
@@ -1033,9 +1095,12 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow) {
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false);
-            (service_active, notification_active, daemon, recent_events, pending_incidents, pending_migrations)
+            (service_active, notification_active, daemon, configuration, recent_events, pending_incidents, pending_migrations)
         }).await;
-        if let Ok((service_active, notification_active, daemon, recent_events, pending_incidents, pending_migrations)) = result {
+        if let Ok((service_active, notification_active, daemon, configuration, recent_events, pending_incidents, pending_migrations)) = result {
+            if let Some(configuration) = configuration {
+                hydrate_configuration_from_daemon(&config_state, configuration);
+            }
             let health = health_from_evidence(
                 service_active,
                 notification_active,
@@ -1441,6 +1506,34 @@ fn spawn_apply(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn daemon_configuration_preserves_ssh_enrollment_for_the_ui() {
+        let config = configuration_from_daemon(guard_ipc::ConfigurationInfo {
+            enforcement_mode: "strict-filesystem".into(),
+            browsers: vec![guard_ipc::ConfiguredBrowserInfo {
+                id: "firefox".into(),
+                family: "Firefox".into(),
+                profile_root: "/home/test/.mozilla/firefox".into(),
+                owner_uid: None,
+                exe_paths: vec!["/usr/lib/firefox/firefox".into()],
+            }],
+            enrolled_exes: vec!["/usr/bin/known-good-helper".into()],
+            ssh_keys: vec!["/home/test/.ssh/id_ed25519".into()],
+            ssh_behavior_window_secs: 30,
+        })
+        .expect("supported daemon snapshot");
+        assert_eq!(
+            config.enforcement_mode,
+            platform_linux::config::EnforcementMode::StrictFilesystem
+        );
+        assert_eq!(
+            config.ssh_keys,
+            vec![PathBuf::from("/home/test/.ssh/id_ed25519")]
+        );
+        assert_eq!(config.browsers[0].owner_uid, None);
+    }
+
     #[test]
     fn health_requires_live_evidence() {
         let mut status = guard_ipc::StatusInfo {

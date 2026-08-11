@@ -25,10 +25,11 @@ use std::sync::{Arc, Mutex};
 
 use guard_audit::{AuditRecord, AuditStore};
 use guard_ipc::{
-    ConfigCheckInfo, EventInfo, IncidentResolutionAction, IncidentResolutionInfo, LeaseInfo,
-    MigrationAuthorizedInfo, MigrationPendingInfo, MigrationResolutionAction,
-    MigrationResolutionInfo, Response, ResponseBody, SshIncidentInfo, SshIncidentStateInfo,
-    SshLoadAuthorizedInfo, SshProtectedInfo, StatusInfo, MAX_REQUEST_BYTES, PROTOCOL_VERSION,
+    ConfigCheckInfo, ConfigurationInfo, ConfiguredBrowserInfo, EventInfo, IncidentResolutionAction,
+    IncidentResolutionInfo, LeaseInfo, MigrationAuthorizedInfo, MigrationPendingInfo,
+    MigrationResolutionAction, MigrationResolutionInfo, Response, ResponseBody, SshIncidentInfo,
+    SshIncidentStateInfo, SshLoadAuthorizedInfo, SshProtectedInfo, StatusInfo, MAX_REQUEST_BYTES,
+    PROTOCOL_VERSION,
 };
 use guard_ipc::{Request, RequestOp};
 use platform_linux::fanotify::FanotifyGroup;
@@ -138,6 +139,7 @@ fn handle_request_with_connection(
         RequestOp::Status => handle_status(state, creds),
         RequestOp::ResourcesList => handle_resources_list(state, creds),
         RequestOp::BrowsersList => handle_browsers_list(state, creds),
+        RequestOp::ConfigurationGet => handle_configuration_get(state, creds),
         RequestOp::ConfigCheck => handle_config_check(state, creds),
         RequestOp::Events {
             limit,
@@ -323,6 +325,40 @@ fn handle_browsers_list(state: &IpcState, _creds: PeerCreds) -> Response {
         })
         .collect();
     Response::ok(ResponseBody::Browsers(browsers))
+}
+
+fn handle_configuration_get(state: &IpcState, _creds: PeerCreds) -> Response {
+    let engine = state.engine.lock().expect("engine mutex poisoned");
+    let cfg = engine.configuration();
+    Response::ok(ResponseBody::Configuration(ConfigurationInfo {
+        enforcement_mode: cfg.enforcement_mode.as_str().to_owned(),
+        browsers: cfg
+            .browsers
+            .iter()
+            .map(|browser| ConfiguredBrowserInfo {
+                id: browser.id.clone(),
+                family: format!("{:?}", browser.family),
+                profile_root: browser.profile_root.to_string_lossy().into_owned(),
+                owner_uid: browser.owner_uid,
+                exe_paths: browser
+                    .exe_paths
+                    .iter()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect(),
+            })
+            .collect(),
+        enrolled_exes: cfg
+            .enrolled_exes
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect(),
+        ssh_keys: cfg
+            .ssh_keys
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect(),
+        ssh_behavior_window_secs: cfg.ssh_behavior_window_secs,
+    }))
 }
 
 fn handle_config_check(state: &IpcState, _creds: PeerCreds) -> Response {
@@ -1848,6 +1884,30 @@ mod tests {
                 assert!(s.protected_files > 0);
             }
             _ => panic!("expected Status"),
+        }
+    }
+
+    #[test]
+    fn configuration_snapshot_preserves_configured_browser_metadata() {
+        let (state, _t) = make_state(1000);
+        let response = handle_request(
+            &state,
+            PeerCreds {
+                pid: 1,
+                uid: 1000,
+                gid: 1000,
+            },
+            RequestOp::ConfigurationGet,
+        );
+        assert!(response.ok);
+        match response.body.unwrap() {
+            ResponseBody::Configuration(configuration) => {
+                assert_eq!(configuration.enforcement_mode, "conservative");
+                assert_eq!(configuration.browsers.len(), 1);
+                assert_eq!(configuration.browsers[0].owner_uid, Some(1000));
+                assert!(configuration.ssh_keys.is_empty());
+            }
+            _ => panic!("expected Configuration"),
         }
     }
 
