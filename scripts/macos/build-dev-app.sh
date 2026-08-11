@@ -38,6 +38,15 @@ case "$build_profile" in
     release) cargo_profile=release; cargo_flags=--release ;;
     *) echo "BUILD_PROFILE must be debug or release" >&2; exit 2 ;;
 esac
+case "${GUARD_ES_POC:-0}" in
+    0) feature_flags= ;;
+    1)
+        : "${GUARD_ES_POC_FILE:?GUARD_ES_POC_FILE is required when GUARD_ES_POC=1}"
+        : "${GUARD_ES_POC_ALLOW_EXE:?GUARD_ES_POC_ALLOW_EXE is required when GUARD_ES_POC=1}"
+        feature_flags="--features guard-es/es-poc"
+        ;;
+    *) echo "GUARD_ES_POC must be 0 or 1" >&2; exit 2 ;;
+esac
 case "$build_root" in
     /|"$repo_dir") echo "refusing unsafe MACOS_BUILD_ROOT: $build_root" >&2; exit 2 ;;
 esac
@@ -56,7 +65,7 @@ xcrun --sdk macosx --show-sdk-path >/dev/null
 
 cd "$repo_dir"
 GUARD_SYSTEM_EXTENSION_BUNDLE_ID="$extension_bundle_id" \
-    cargo build -p guard-ui -p guard-es $cargo_flags
+    cargo build -p guard-ui -p guard-es $cargo_flags $feature_flags
 
 if [ -e "$app_bundle" ]; then
     rm -rf -- "$app_bundle"
@@ -80,6 +89,21 @@ render_plist() {
 
 render_plist packaging/macos/Guard.Info.plist.in "$app_bundle/Contents/Info.plist"
 render_plist packaging/macos/GuardES.Info.plist.in "$extension_bundle/Contents/Info.plist"
+
+if [ -n "${HOST_PROVISIONING_PROFILE:-}" ] || [ -n "${EXTENSION_PROVISIONING_PROFILE:-}" ]; then
+    : "${HOST_PROVISIONING_PROFILE:?both host and extension provisioning profiles are required}"
+    : "${EXTENSION_PROVISIONING_PROFILE:?both host and extension provisioning profiles are required}"
+    test -f "$HOST_PROVISIONING_PROFILE" || {
+        echo "host provisioning profile not found: $HOST_PROVISIONING_PROFILE" >&2
+        exit 2
+    }
+    test -f "$EXTENSION_PROVISIONING_PROFILE" || {
+        echo "extension provisioning profile not found: $EXTENSION_PROVISIONING_PROFILE" >&2
+        exit 2
+    }
+    cp "$HOST_PROVISIONING_PROFILE" "$app_bundle/Contents/embedded.provisionprofile"
+    cp "$EXTENSION_PROVISIONING_PROFILE" "$extension_bundle/Contents/embedded.provisionprofile"
+fi
 
 if [ "${SKIP_SIGNING:-0}" != "1" ]; then
     codesign --force --sign "$signing_identity" \

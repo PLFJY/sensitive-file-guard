@@ -10,6 +10,27 @@ if rg -n 'NetworkExtension|NEFilter|systemextensionsctl' \
     echo "macOS boundary violation: Network Extension or undocumented lifecycle CLI found" >&2
     failed=1
 fi
+if rg -n 'ES_EVENT_TYPE_(AUTH|NOTIFY)_[A-Z_]+' \
+    "$repo_dir/native/macos/endpoint_security_bridge.c" \
+    | rg -v 'ES_EVENT_TYPE_AUTH_OPEN'; then
+    echo "macOS boundary violation: Phase 03 subscribes to an ES event other than AUTH_OPEN" >&2
+    failed=1
+fi
+if rg -n 'es_respond_auth_result|es_copy_message|es_free_message' \
+    "$repo_dir/native/macos/endpoint_security_bridge.c"; then
+    echo "macOS boundary violation: wrong or deprecated Endpoint Security response/lifetime API" >&2
+    failed=1
+fi
+if rg -n 'O_RDONLY|O_RDWR|O_WRONLY' \
+    "$repo_dir/native/macos/endpoint_security_bridge.c"; then
+    echo "macOS boundary violation: AUTH_OPEN must use kernel FFLAGS, not open(2) O_* flags" >&2
+    failed=1
+fi
+if ! rg -U -q 'es_respond_flags_result\([^;]*false' \
+    "$repo_dir/native/macos/endpoint_security_bridge.c"; then
+    echo "macOS boundary violation: AUTH_OPEN response must hardcode cache=false" >&2
+    failed=1
+fi
 if rg -n 'platform-macos[[:space:]]*=' "$repo_dir/apps/guard-ui/Cargo.toml" | head -n 1 >/dev/null; then
     if ! rg -n -B 2 '\[target.*target_os = "macos".*dependencies\]' "$repo_dir/apps/guard-ui/Cargo.toml" >/dev/null; then
         echo "macOS boundary violation: guard-ui Apple dependency is not target-specific" >&2

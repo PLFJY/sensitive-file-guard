@@ -9,25 +9,101 @@ fn main() -> ExitCode {
         ExitCode::from(78)
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", not(feature = "es-poc")))]
     {
-        eprintln!("guard-es: starting Endpoint Security system-extension skeleton");
-        match platform_macos::system_extension::endpoint_security_entitlement_present() {
-            Ok(true) => {
+        eprintln!("guard-es: checking Endpoint Security client availability");
+        match platform_macos::endpoint_security::diagnose_client_creation() {
+            Ok(()) => {
                 eprintln!(
-                    "guard-es: embedded entitlement claim is present; provisioning and Endpoint Security acceptance are not proven; Phase 02 intentionally subscribes to no events"
+                    "guard-es: Endpoint Security client creation succeeded, but no protected synthetic fixture is compiled in; AUTH_OPEN is not subscribed and enforcement is not active"
                 );
-                ExitCode::SUCCESS
-            }
-            Ok(false) => {
-                eprintln!("guard-es: missing com.apple.developer.endpoint-security.client entitlement; enforcement is not active");
                 ExitCode::from(78)
             }
             Err(error) => {
-                eprintln!(
-                    "guard-es: entitlement diagnostic failed: {error}; enforcement is not active"
-                );
-                ExitCode::FAILURE
+                eprintln!("guard-es: {error}; enforcement is not active");
+                ExitCode::from(78)
+            }
+        }
+    }
+
+    #[cfg(all(target_os = "macos", feature = "es-poc"))]
+    run_poc()
+}
+
+#[cfg(all(target_os = "macos", feature = "es-poc"))]
+fn run_poc() -> ExitCode {
+    use platform_macos::endpoint_security::{EndpointSecurityBackend, EndpointSecurityConfig};
+    use std::os::unix::fs::MetadataExt;
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    let Some(protected_file) = option_env!("GUARD_ES_POC_FILE") else {
+        eprintln!("guard-es: es-poc requires GUARD_ES_POC_FILE at compile time");
+        return ExitCode::from(78);
+    };
+    let Some(allowed_executable) = option_env!("GUARD_ES_POC_ALLOW_EXE") else {
+        eprintln!("guard-es: es-poc requires GUARD_ES_POC_ALLOW_EXE at compile time");
+        return ExitCode::from(78);
+    };
+    let allowed_executable = match std::fs::canonicalize(allowed_executable) {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("guard-es: cannot canonicalize synthetic allow executable: {error}");
+            return ExitCode::from(78);
+        }
+    };
+    let allowed_metadata = match std::fs::metadata(&allowed_executable) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            eprintln!("guard-es: cannot stat synthetic allow executable: {error}");
+            return ExitCode::from(78);
+        }
+    };
+    let config =
+        match EndpointSecurityConfig::synthetic_exact_paths([PathBuf::from(protected_file)]) {
+            Ok(config) => config,
+            Err(error) => {
+                eprintln!("guard-es: invalid synthetic fixture configuration: {error}");
+                return ExitCode::from(78);
+            }
+        };
+    let backend = match EndpointSecurityBackend::start(config) {
+        Ok(backend) => backend,
+        Err(error) => {
+            eprintln!("guard-es: {error}; enforcement is not active");
+            return ExitCode::from(78);
+        }
+    };
+    eprintln!("guard-es: development AUTH_OPEN PoC active for one synthetic fixture; cache=false");
+    loop {
+        match backend.recv_timeout(Duration::from_secs(1)) {
+            Ok(event)
+                if event.facts.executable == allowed_executable
+                    && event.facts.executable_dev == allowed_metadata.dev()
+                    && event.facts.executable_ino == allowed_metadata.ino() =>
+            {
+                if let Err(error) = event.permission.allow() {
+                    eprintln!("guard-es: synthetic allow response failed: {error}");
+                }
+            }
+            Ok(event) => {
+                if let Err(error) = event.permission.deny() {
+                    eprintln!("guard-es: synthetic deny response failed: {error}");
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                let health = backend.health();
+                if !health.active {
+                    eprintln!(
+                        "guard-es: backend degraded: {}",
+                        health.diagnostic.as_deref().unwrap_or("unknown error")
+                    );
+                    return ExitCode::FAILURE;
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                eprintln!("guard-es: authorization queue disconnected; enforcement is not active");
+                return ExitCode::FAILURE;
             }
         }
     }
