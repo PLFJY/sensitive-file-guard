@@ -17,6 +17,7 @@ use pending_dialog::{PendingDialogController, PendingPrompt, PromptKey, PromptKi
 
 const APP_ID: &str = "io.github.plfjy.SensitiveFileGuard";
 const SOCKET: &str = "/run/guardd/guardd.sock";
+const PENDING_ONLY_ARG: &str = "--pending-only";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Health {
@@ -106,16 +107,17 @@ struct UiState {
 }
 
 fn main() {
+    let pending_only = std::env::args().any(|arg| arg == PENDING_ONLY_ARG);
     adw::init().expect("libadwaita initialization");
     // Let libadwaita own the color preference instead of inheriting the
     // deprecated GtkSettings dark-theme toggle from the desktop session.
     adw::StyleManager::default().set_color_scheme(adw::ColorScheme::Default);
     let app = adw::Application::new(Some(APP_ID), gio::ApplicationFlags::empty());
-    app.connect_activate(build_ui);
+    app.connect_activate(move |app| build_ui(app, pending_only));
     app.run();
 }
 
-fn build_ui(app: &adw::Application) {
+fn build_ui(app: &adw::Application, pending_only: bool) {
     // `guard-notify` can activate the application more than once while an
     // import is pending. GApplication routes those activations to this primary
     // process, so creating another UiState here would poll the same pending ID
@@ -210,7 +212,7 @@ fn build_ui(app: &adw::Application) {
     window.present();
 
     load_configuration(&state);
-    start_polling(state, window);
+    start_polling(state, window, pending_only);
 }
 
 fn scroll_page(content: gtk::Box) -> gtk::ScrolledWindow {
@@ -970,18 +972,18 @@ fn custom_browser_from_entries(
     })
 }
 
-fn start_polling(state: UiState, window: adw::ApplicationWindow) {
+fn start_polling(state: UiState, window: adw::ApplicationWindow, pending_only: bool) {
     let state = Rc::new(state);
     let poll_state = state.clone();
     let poll_window = window.clone();
     glib::timeout_add_seconds_local(2, move || {
-        refresh_state(&poll_state, &poll_window);
+        refresh_state(&poll_state, &poll_window, pending_only);
         glib::ControlFlow::Continue
     });
-    refresh_state(&state, &window);
+    refresh_state(&state, &window, pending_only);
 }
 
-fn refresh_state(state: &UiState, window: &adw::ApplicationWindow) {
+fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only: bool) {
     // Never queue refresh work behind a stalled socket or service query. One
     // background request is enough; the next timer tick retries after it ends.
     if state.poll_in_flight.replace(true) {
@@ -1110,7 +1112,12 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow) {
                     .flatten()
             };
             if let Some(prompt) = next_prompt {
-                present_pending_dialog(&window, pending_dialogs.clone(), prompt);
+                present_pending_dialog(
+                    &window,
+                    pending_dialogs.clone(),
+                    prompt,
+                    pending_only,
+                );
             }
         }
         poll_in_flight.set(false);
@@ -1444,6 +1451,7 @@ fn ssh_read_prompt(pending: guard_ipc::SshPendingInfo) -> PendingPrompt {
 fn present_next_pending_dialog(
     window: &adw::ApplicationWindow,
     controller: Rc<RefCell<PendingDialogController>>,
+    pending_only: bool,
 ) {
     let next = {
         let mut controller_ref = controller.borrow_mut();
@@ -1454,7 +1462,7 @@ fn present_next_pending_dialog(
         }
     };
     if let Some(prompt) = next {
-        present_pending_dialog(window, controller, prompt);
+        present_pending_dialog(window, controller, prompt, pending_only);
     }
 }
 
@@ -1462,6 +1470,7 @@ fn present_pending_dialog(
     window: &adw::ApplicationWindow,
     controller: Rc<RefCell<PendingDialogController>>,
     prompt: PendingPrompt,
+    pending_only: bool,
 ) {
     let dialog = gtk::MessageDialog::builder()
         .transient_for(window)
@@ -1478,6 +1487,7 @@ fn present_pending_dialog(
     let response_controller = controller.clone();
     let response_window = window.clone();
     let response_prompt = prompt.clone();
+    let response_pending_only = pending_only;
     let response_allow = allow.clone();
     let response_block = block.clone();
     let response_details = prompt.details.clone();
@@ -1505,6 +1515,7 @@ fn present_pending_dialog(
             response_controller.clone(),
             response_prompt.clone(),
             is_allow,
+            response_pending_only,
             PendingDialogUi {
                 dialog: dialog.clone(),
                 allow_button: response_allow.clone(),
@@ -1517,6 +1528,7 @@ fn present_pending_dialog(
     let close_controller = controller.clone();
     let close_window = window.clone();
     let close_prompt = prompt;
+    let close_pending_only = pending_only;
     let close_allow = allow.clone();
     let close_block = block.clone();
     let close_details = close_prompt.details.clone();
@@ -1539,6 +1551,7 @@ fn present_pending_dialog(
             close_controller.clone(),
             close_prompt.clone(),
             false,
+            close_pending_only,
             PendingDialogUi {
                 dialog: dialog.clone(),
                 allow_button: close_allow.clone(),
@@ -1564,6 +1577,7 @@ fn resolve_pending_in_background(
     controller: Rc<RefCell<PendingDialogController>>,
     prompt: PendingPrompt,
     allow: bool,
+    pending_only: bool,
     ui: PendingDialogUi,
 ) {
     glib::MainContext::default().spawn_local(async move {
@@ -1596,7 +1610,9 @@ fn resolve_pending_in_background(
         .await;
         if allow {
             match result {
-                Ok(Ok(())) => complete_pending_dialog(&window, &controller, &ui.dialog),
+                Ok(Ok(())) => {
+                    complete_pending_dialog(&window, &controller, &ui.dialog, pending_only, true)
+                }
                 Ok(Err(error)) => retry_pending_dialog(
                     &controller,
                     &ui.allow_button,
@@ -1615,7 +1631,7 @@ fn resolve_pending_in_background(
                 ),
             }
         } else {
-            complete_pending_dialog(&window, &controller, &ui.dialog);
+            complete_pending_dialog(&window, &controller, &ui.dialog, pending_only, false);
         }
     });
 }
@@ -1641,11 +1657,17 @@ fn complete_pending_dialog(
     window: &adw::ApplicationWindow,
     controller: &Rc<RefCell<PendingDialogController>>,
     dialog: &gtk::MessageDialog,
+    pending_only: bool,
+    close_when_empty: bool,
 ) {
     if controller.borrow_mut().finish() {
         dialog.close();
         controller.borrow_mut().release_terminal();
-        present_next_pending_dialog(window, controller.clone());
+        if close_when_empty && pending_only && controller.borrow().is_empty() {
+            window.close();
+        } else {
+            present_next_pending_dialog(window, controller.clone(), pending_only);
+        }
     }
 }
 

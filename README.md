@@ -119,7 +119,10 @@ open remains blocked while guard-ui asks whether this is an import. Allow binds
 processes from that same verified import burst share the one confirmation for
 60 seconds; each still receives its own revalidated, root-bound lease. This is
 daemon memory only, not a polkit-wide password cache. Block, closing the dialog,
-and timeout deny the queued opens. See [the browser migration model](docs/BROWSER_MIGRATION_MODEL.md).
+and timeout deny the queued opens. When `guard-notify` launched the UI for this
+confirmation, it closes after the final confirmed allow once no prompt remains
+queued; a manually opened control center stays open. See [the browser migration
+model](docs/BROWSER_MIGRATION_MODEL.md).
 
 ## Install
 

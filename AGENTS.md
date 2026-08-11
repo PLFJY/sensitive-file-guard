@@ -1,9 +1,5 @@
 # AGENTS.md — Sensitive Data Firewall
 
-This file restates the non-negotiable constraints for any agent working in this
-repository. Read it before changing code. Source of truth: `00_GLOBAL_CONTRACT.md`
-and `01_ARCHITECTURE_CONTEXT.md` under `sensitive-data-firewall-harness/`.
-
 ## Mission
 Prevent unauthorized local processes from reading protected local secrets
 (browser session/auth data + SSH private keys) **before** the protected file is
@@ -57,8 +53,6 @@ successfully opened. This is an access firewall, not an antivirus/EDR/DLP.
 5. relevant unit/integration tests
 6. fix failures (do not merely describe them)
 7. update docs for new user-visible behavior
-8. write `reports/phase-XX.md`
-9. only then continue to the next phase
 
 If a test needs root/kernel/entitlement that is genuinely unavailable: complete
 everything possible, give the exact blocked command/error, provide a deterministic

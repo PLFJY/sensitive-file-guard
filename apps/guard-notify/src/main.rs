@@ -222,6 +222,7 @@ fn activate_guard_ui() {
     // The UI remains an unprivileged presenter: it polls the authenticated
     // incident API and asks guardd to cross polkit for any resolution.
     if let Err(error) = Command::new("guard-ui")
+        .arg("--pending-only")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

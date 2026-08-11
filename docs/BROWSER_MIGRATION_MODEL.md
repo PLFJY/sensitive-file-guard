@@ -48,7 +48,10 @@ activations bring its existing window forward instead of creating independent
 pollers and duplicate dialogs. After **Yes** it keeps the dialog visible and
 disables both choices while the system polkit prompt is active; only a confirmed
 allow closes it. If authentication is cancelled or fails, the request remains
-pending and the user can retry or block it.
+pending and the user can retry or block it. When `guard-notify` launched the UI
+for this confirmation, the UI uses a pending-only session and exits after the
+last confirmed allow has released an empty local prompt queue. A manually
+launched control-center session is not closed by this behavior.
 
 The resolving IPC client keeps the authenticated connection open while Polkit
 is displayed. Its normal short polling timeout never cancels a password prompt;

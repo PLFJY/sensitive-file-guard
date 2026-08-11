@@ -97,6 +97,13 @@ impl PendingDialogController {
         self.active.as_ref().map(|(prompt, state)| (prompt, *state))
     }
 
+    /// Whether no prompt remains active or queued after a terminal prompt is
+    /// released. This is used by the transient confirmation client to decide
+    /// whether its host window can exit.
+    pub fn is_empty(&self) -> bool {
+        self.active.is_none() && self.queue.is_empty()
+    }
+
     pub fn begin_authorization(&mut self) -> bool {
         match self.active.as_mut() {
             Some((_, state)) if *state == PromptState::AwaitingChoice => {
@@ -237,6 +244,18 @@ mod tests {
         assert!(!controller.finish());
         assert!(controller.release_terminal());
         assert_eq!(controller.activate_next().unwrap().request_id, "2");
+    }
+
+    #[test]
+    fn empty_after_last_terminal_prompt_is_releasable() {
+        let mut controller = PendingDialogController::default();
+        controller.reconcile([prompt(PromptKind::SshRead, "ssh:1", "1")]);
+        controller.activate_next();
+        assert!(controller.begin_authorization());
+        assert!(controller.finish());
+        assert!(!controller.is_empty());
+        assert!(controller.release_terminal());
+        assert!(controller.is_empty());
     }
 
     #[test]

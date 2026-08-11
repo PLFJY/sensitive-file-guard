@@ -46,7 +46,9 @@ checkout before installation, use `target/release/guard-ui`.
 No `guardctl migration authorize` command is needed for a normal browser
 import. When a trusted enrolled browser first opens another enrolled browser's
 profile for the same Unix user, guardd keeps that open pending and guard-notify
-brings guard-ui forward. The dialog allows the current import or blocks it;
+brings guard-ui forward. The notification-launched, pending-only GUI closes
+after an allowed request completes and its prompt queue is empty; a GUI started
+manually remains open. The dialog allows the current import or blocks it;
 closing it and a 60-second timeout both block. The existing `guardctl migration
 authorize` command remains an advanced/headless pre-authorization option.
 
