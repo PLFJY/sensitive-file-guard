@@ -93,7 +93,7 @@ user-session notification presenter).
 ## Graphical control center
 
 `guard-ui` is the preferred interactive Linux client. It shows live ACTIVE,
-DEGRADED, STOPPED, UNREACHABLE, and NOT CONFIGURED states; stages Strict or
+DEGRADED, STOPPED, and UNREACHABLE states; stages Strict or
 Conservative policy and individual browser/SSH-key enrollments; applies a
 complete candidate through the authenticated `guardctl` helper; and displays
 the daemon's blocked-event audit log. It never writes `/etc/guardd/config.json`,
@@ -102,8 +102,11 @@ CLI/automation tool.
 Its Overview switch controls the system protection and the current user's
 desktop notification service together, and reflects both actual unit states.
 The Protection page loads the active metadata-only configuration snapshot from
-`guardd`, so root-only config-file permissions cannot make enrolled SSH keys
-appear unprotected. It discovers installed native browser sources on refresh and
+`guardd`, then separately polls any SSH keys actively enrolled at runtime, so
+root-only config-file permissions or a runtime enrollment cannot make a
+protected key appear unprotected. Its draft exists only in the open window;
+Discard fetches the daemon's active policy again, and the UI creates no local
+state file or database. It discovers installed native browser sources on refresh and
 also supports an explicit custom browser entry (family, existing profile root,
 and canonical executable). It shows metadata-only SSH key suggestions without
 enrolling them; discovery alone never grants trust.

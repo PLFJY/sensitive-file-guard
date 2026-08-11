@@ -13,7 +13,6 @@ use libadwaita as adw;
 
 const APP_ID: &str = "io.github.plfjy.SensitiveFileGuard";
 const SOCKET: &str = "/run/guardd/guardd.sock";
-const CONFIG: &str = "/etc/guardd/config.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Health {
@@ -21,7 +20,6 @@ enum Health {
     Degraded,
     Stopped,
     Unreachable,
-    NotConfigured,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,7 +44,6 @@ fn health_from_evidence(
     service_active: bool,
     notification_active: bool,
     daemon: Option<&guard_ipc::StatusInfo>,
-    configured: bool,
 ) -> Health {
     if service_active {
         if !notification_active {
@@ -67,11 +64,7 @@ fn health_from_evidence(
             Some(_) | None => Health::Unreachable,
         };
     }
-    if configured {
-        Health::Stopped
-    } else {
-        Health::NotConfigured
-    }
+    Health::Stopped
 }
 
 fn health_label(h: Health) -> &'static str {
@@ -80,7 +73,6 @@ fn health_label(h: Health) -> &'static str {
         Health::Degraded => "DEGRADED",
         Health::Stopped => "STOPPED / OFF",
         Health::Unreachable => "UNREACHABLE",
-        Health::NotConfigured => "NOT CONFIGURED",
     }
 }
 
@@ -93,10 +85,18 @@ fn ssh_behavior_summary(status: &guard_ipc::StatusInfo) -> String {
     }
 }
 
+fn ssh_key_subtitle(active: bool, configured: bool) -> &'static str {
+    match (active, configured) {
+        (true, true) => "Protected",
+        (true, false) => "Protected — runtime enrollment (not yet in saved configuration)",
+        (false, true) => "Configured — not active in the current guardd process",
+        (false, false) => "Detected — not protected",
+    }
+}
+
 #[derive(Clone)]
 struct UiState {
     candidate: Rc<RefCell<Option<platform_linux::config::EnforcementConfig>>>,
-    persisted: Rc<RefCell<Option<platform_linux::config::EnforcementConfig>>>,
     status: gtk::Label,
     detail: gtk::Label,
     apply: gtk::Button,
@@ -106,9 +106,10 @@ struct UiState {
     events: gtk::ListBox,
     event_data: Rc<RefCell<Vec<guard_ipc::EventInfo>>>,
     browser_sources: Rc<RefCell<Vec<BrowserSource>>>,
-    custom_browser_sources: Rc<RefCell<Vec<platform_linux::config::BrowserEnrollmentConfig>>>,
     ssh_sources: Rc<RefCell<Vec<SshSource>>>,
-    custom_ssh_sources: Rc<RefCell<HashSet<PathBuf>>>,
+    /// Last daemon-reported SSH resources. This is a display cache refreshed
+    /// from IPC, not a second enrollment registry.
+    active_ssh_keys: Rc<RefCell<HashSet<PathBuf>>>,
     poll_in_flight: Rc<Cell<bool>>,
     protection: Rc<RefCell<Option<adw::SwitchRow>>>,
     protection_syncing: Rc<Cell<bool>>,
@@ -165,7 +166,6 @@ fn build_ui(app: &adw::Application) {
 
     let state = UiState {
         candidate: Rc::new(RefCell::new(None)),
-        persisted: Rc::new(RefCell::new(None)),
         status: status.clone(),
         detail: detail.clone(),
         apply: apply.clone(),
@@ -175,9 +175,8 @@ fn build_ui(app: &adw::Application) {
         events: events.clone(),
         event_data: Rc::new(RefCell::new(Vec::new())),
         browser_sources: Rc::new(RefCell::new(Vec::new())),
-        custom_browser_sources: Rc::new(RefCell::new(Vec::new())),
         ssh_sources: Rc::new(RefCell::new(Vec::new())),
-        custom_ssh_sources: Rc::new(RefCell::new(HashSet::new())),
+        active_ssh_keys: Rc::new(RefCell::new(HashSet::new())),
         poll_in_flight: Rc::new(Cell::new(false)),
         protection: Rc::new(RefCell::new(None)),
         protection_syncing: Rc::new(Cell::new(false)),
@@ -335,25 +334,24 @@ fn protection_page(state: &UiState) -> gtk::Box {
     actions.append(&discard);
     page.append(&actions);
     let cand = state.candidate.clone();
-    let persisted = state.persisted.clone();
     let apply_btn = state.apply.clone();
     let render_state = state.clone();
     discard.connect_clicked(move |_| {
-        *cand.borrow_mut() = persisted.borrow().clone();
+        // The daemon owns the active policy. Drop this window's transient
+        // draft and let the next IPC poll obtain a fresh authoritative copy.
+        *cand.borrow_mut() = None;
         apply_btn.set_sensitive(false);
-        let cfg = render_state.candidate.borrow().clone();
-        if let Some(cfg) = cfg.as_ref() {
-            render_objects(&render_state, cfg);
-        }
+        render_state
+            .detail
+            .set_text("Reloading active policy from guardd…");
     });
     let cand = state.candidate.clone();
-    let persisted = state.persisted.clone();
     let apply_btn = state.apply.clone();
     state.apply.connect_clicked(move |_| {
         if let Some(cfg) = cand.borrow().clone() {
             if let Ok(bytes) = serde_json::to_vec(&cfg) {
                 apply_btn.set_sensitive(false);
-                spawn_apply(bytes, apply_btn.clone(), persisted.clone());
+                spawn_apply(bytes, apply_btn.clone());
             }
         }
     });
@@ -445,47 +443,9 @@ fn is_visible_event(event: &guard_ipc::EventInfo) -> bool {
 }
 
 fn load_configuration(state: &UiState) {
-    let parsed = std::fs::read(CONFIG).ok().and_then(|bytes| {
-        serde_json::from_slice::<platform_linux::config::EnforcementConfig>(&bytes).ok()
-    });
-    *state.persisted.borrow_mut() = parsed.clone();
-    *state.candidate.borrow_mut() = parsed.clone();
-    if let Some(cfg) = parsed {
-        state
-            .mode
-            .set_active_id(Some(cfg.enforcement_mode.as_str()));
-    } else {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/nonexistent"));
-        let found = platform_linux::config::discover_native_browsers(&home);
-        let cfg = platform_linux::config::EnforcementConfig {
-            enforcement_mode: platform_linux::config::EnforcementMode::StrictFilesystem,
-            browsers: found
-                .browsers
-                .into_iter()
-                .map(|b| platform_linux::config::BrowserEnrollmentConfig {
-                    id: b.id,
-                    family: b.family,
-                    profile_root: b.profile_root,
-                    owner_uid: None,
-                    exe_paths: b.exe_paths,
-                })
-                .collect(),
-            enrolled_exes: Vec::new(),
-            ssh_keys: Vec::new(),
-            ssh_behavior_window_secs: guard_core::DEFAULT_SSH_BEHAVIOR_WINDOW_SECS,
-        };
-        if cfg.browsers.is_empty() {
-            state.detail.set_text("No supported native browser was detected. Add a reviewed custom configuration or install a native browser.");
-        } else {
-            state.detail.set_text("First run: native browser suggestions are staged for review. SSH keys remain unselected.");
-        }
-        *state.candidate.borrow_mut() = Some(cfg.clone());
-        state.mode.set_active_id(Some("strict-filesystem"));
-        state.apply.set_sensitive(!cfg.browsers.is_empty());
-    }
-    refresh_browser_sources(state);
+    // The root-owned file is deliberately not read by the desktop process.
+    // Until the authenticated daemon reply arrives there is no editable draft.
+    state.detail.set_text("Loading active policy from guardd…");
 }
 
 /// Build the editable UI model from the policy loaded by guardd. The GUI runs
@@ -525,27 +485,37 @@ fn configuration_from_daemon(
     })
 }
 
-fn hydrate_configuration_from_daemon(state: &UiState, info: guard_ipc::ConfigurationInfo) {
+fn hydrate_configuration_from_daemon(state: &UiState, info: guard_ipc::ConfigurationInfo) -> bool {
     // A directly readable config is authoritative for this UI session. When it
     // is root-readable only, replace the first-run placeholder with guardd's
     // active configuration exactly once; later polling must not discard edits.
-    if state.persisted.borrow().is_some() {
-        return;
+    if state.candidate.borrow().is_none() {
+        let Some(cfg) = configuration_from_daemon(info) else {
+            state.detail.set_text(
+                "guardd returned an invalid configuration snapshot; the active policy was not changed.",
+            );
+            return false;
+        };
+        *state.candidate.borrow_mut() = Some(cfg.clone());
+        state
+            .mode
+            .set_active_id(Some(cfg.enforcement_mode.as_str()));
+        state.apply.set_sensitive(false);
+        state.apply.set_tooltip_text(None);
+        return true;
     }
-    let Some(cfg) = configuration_from_daemon(info) else {
-        state.detail.set_text(
-            "guardd returned an invalid configuration snapshot; the active policy was not changed.",
-        );
-        return;
-    };
-    *state.persisted.borrow_mut() = Some(cfg.clone());
-    *state.candidate.borrow_mut() = Some(cfg.clone());
-    state
-        .mode
-        .set_active_id(Some(cfg.enforcement_mode.as_str()));
-    state.apply.set_sensitive(false);
-    state.apply.set_tooltip_text(None);
-    refresh_browser_sources(state);
+    false
+}
+
+fn update_active_ssh_keys(state: &UiState, active_ssh_keys: Vec<PathBuf>) -> bool {
+    let active_ssh_keys = active_ssh_keys.into_iter().collect::<HashSet<_>>();
+    let mut known = state.active_ssh_keys.borrow_mut();
+    if *known == active_ssh_keys {
+        false
+    } else {
+        *known = active_ssh_keys;
+        true
+    }
 }
 
 fn refresh_browser_sources(state: &UiState) {
@@ -580,28 +550,12 @@ fn refresh_browser_sources(state: &UiState) {
         .as_ref()
         .map(|cfg| cfg.browsers.clone())
         .unwrap_or_default();
-    let custom_browser_sources = state.custom_browser_sources.borrow().clone();
     let mut sources = discovered;
     for browser in configured {
-        let explicitly_custom = custom_browser_sources
+        if !sources
             .iter()
-            .any(|custom| same_native_browser(custom, &browser));
-        if explicitly_custom {
-            if let Some(source) = sources
-                .iter_mut()
-                .find(|source| same_browser_source(&source.config, &browser))
-            {
-                source.origin = SourceOrigin::Custom;
-            } else {
-                sources.push(BrowserSource {
-                    config: browser,
-                    origin: SourceOrigin::Custom,
-                });
-            }
-        } else if !sources.iter().any(|source| {
-            source.origin == SourceOrigin::NativeDetected
-                && same_native_browser(&source.config, &browser)
-        }) {
+            .any(|source| same_native_browser(&source.config, &browser))
+        {
             sources.push(BrowserSource {
                 config: browser,
                 origin: SourceOrigin::Custom,
@@ -646,14 +600,18 @@ fn refresh_ssh_sources(state: &UiState) {
         .as_ref()
         .map(|cfg| cfg.ssh_keys.clone())
         .unwrap_or_default();
-    let custom_ssh_sources = state.custom_ssh_sources.borrow().clone();
+    let active_ssh_keys = state.active_ssh_keys.borrow().clone();
     let mut sources = suggestions;
     for key in configured {
-        if let Some(source) = sources.iter_mut().find(|source| source.path == key) {
-            if custom_ssh_sources.contains(&key) {
-                source.origin = SourceOrigin::Custom;
-            }
-        } else {
+        if !sources.iter().any(|source| source.path == key) {
+            sources.push(SshSource {
+                path: key,
+                origin: SourceOrigin::Custom,
+            });
+        }
+    }
+    for key in active_ssh_keys {
+        if !sources.iter().any(|source| source.path == key) {
             sources.push(SshSource {
                 path: key,
                 origin: SourceOrigin::Custom,
@@ -755,8 +713,6 @@ fn render_objects(state: &UiState, cfg: &platform_linux::config::EnforcementConf
             let candidate = state.candidate.clone();
             let apply = state.apply.clone();
             let render_state = state.clone();
-            let source_state = state.browser_sources.clone();
-            let custom_sources = state.custom_browser_sources.clone();
             let browser_copy = browser.clone();
             remove.connect_clicked(move |_| {
                 if let Some(cfg) = candidate.borrow_mut().as_mut() {
@@ -764,15 +720,7 @@ fn render_objects(state: &UiState, cfg: &platform_linux::config::EnforcementConf
                         .retain(|configured| !same_browser_source(configured, &browser_copy));
                     apply.set_sensitive(true);
                 }
-                source_state
-                    .borrow_mut()
-                    .retain(|source| !same_browser_source(&source.config, &browser_copy));
-                custom_sources
-                    .borrow_mut()
-                    .retain(|source| !same_native_browser(source, &browser_copy));
-                if let Some(cfg) = render_state.candidate.borrow().as_ref() {
-                    render_objects(&render_state, cfg);
-                }
+                refresh_browser_sources(&render_state);
             });
             row.add_suffix(&remove);
         }
@@ -799,15 +747,14 @@ fn render_objects(state: &UiState, cfg: &platform_linux::config::EnforcementConf
     }
     for source in ssh_sources {
         let key = source.path;
-        let enrolled = cfg.ssh_keys.contains(&key);
+        let configured = cfg.ssh_keys.contains(&key);
+        let active = state.active_ssh_keys.borrow().contains(&key);
         let row = adw::SwitchRow::new();
         row.set_title(&key.to_string_lossy());
-        row.set_subtitle(if enrolled {
-            "Configured"
-        } else {
-            "Detected — not protected"
-        });
-        row.set_active(enrolled);
+        row.set_subtitle(ssh_key_subtitle(active, configured));
+        // The visible switch is the daemon-reported state, not merely a bit
+        // copied from `/etc/guardd/config.json`.
+        row.set_active(active);
         let candidate = state.candidate.clone();
         let apply = state.apply.clone();
         let key_path = key.clone();
@@ -823,26 +770,18 @@ fn render_objects(state: &UiState, cfg: &platform_linux::config::EnforcementConf
                 apply.set_sensitive(true);
             }
         });
-        if enrolled && source.origin == SourceOrigin::Custom {
+        if configured && source.origin == SourceOrigin::Custom {
             let remove = remove_button("Remove SSH key protection");
             let candidate = state.candidate.clone();
             let apply = state.apply.clone();
             let render_state = state.clone();
-            let source_state = state.ssh_sources.clone();
-            let custom_sources = state.custom_ssh_sources.clone();
             let key_path = key.clone();
             remove.connect_clicked(move |_| {
                 if let Some(cfg) = candidate.borrow_mut().as_mut() {
                     cfg.ssh_keys.retain(|configured| configured != &key_path);
                     apply.set_sensitive(true);
                 }
-                source_state
-                    .borrow_mut()
-                    .retain(|source| source.path != key_path);
-                custom_sources.borrow_mut().remove(&key_path);
-                if let Some(cfg) = render_state.candidate.borrow().as_ref() {
-                    render_objects(&render_state, cfg);
-                }
+                refresh_browser_sources(&render_state);
             });
             row.add_suffix(&remove);
         }
@@ -890,12 +829,10 @@ fn show_add_key_dialog(state: &UiState) {
     );
     let candidate = state.candidate.clone();
     let apply = state.apply.clone();
-    let custom_sources = state.custom_ssh_sources.clone();
     let render_state = state.clone();
     dialog.connect_response(move |dialog, response| {
         if response == gtk::ResponseType::Accept {
             if let Some(path) = dialog.file().and_then(|file| file.path()) {
-                custom_sources.borrow_mut().insert(path.clone());
                 if let Some(cfg) = candidate.borrow_mut().as_mut() {
                     if !cfg.ssh_keys.contains(&path) {
                         cfg.ssh_keys.push(path);
@@ -961,8 +898,6 @@ fn show_add_browser_dialog(state: &UiState) {
     }
     content.append(&error);
 
-    let source_state = state.browser_sources.clone();
-    let custom_sources = state.custom_browser_sources.clone();
     let candidate = state.candidate.clone();
     let apply = state.apply.clone();
     let render_state = state.clone();
@@ -973,7 +908,6 @@ fn show_add_browser_dialog(state: &UiState) {
         }
         match custom_browser_from_entries(&id, &family, &profile, &executable) {
             Ok(browser) => {
-                custom_sources.borrow_mut().push(browser.clone());
                 if let Some(cfg) = candidate.borrow_mut().as_mut() {
                     if !cfg
                         .browsers
@@ -982,16 +916,6 @@ fn show_add_browser_dialog(state: &UiState) {
                     {
                         cfg.browsers.push(browser.clone());
                     }
-                }
-                if !source_state
-                    .borrow()
-                    .iter()
-                    .any(|source| same_browser_source(&source.config, &browser))
-                {
-                    source_state.borrow_mut().push(BrowserSource {
-                        config: browser,
-                        origin: SourceOrigin::Custom,
-                    });
                 }
                 apply.set_sensitive(true);
                 refresh_browser_sources(&render_state);
@@ -1059,7 +983,6 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow) {
         return;
     }
     let socket = PathBuf::from(SOCKET);
-    let configured = state.persisted.borrow().is_some();
     let status = state.status.clone();
     let detail = state.detail.clone();
     let events = state.events.clone();
@@ -1076,6 +999,12 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow) {
         let result = gio::spawn_blocking(move || {
             let daemon = guard_client::status(&socket).ok();
             let configuration = guard_client::configuration(&socket).ok();
+            let active_ssh_keys = guard_client::resources(&socket)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|resource| resource.kind == "SshPrivateKey" && !resource.tree)
+                .map(|resource| PathBuf::from(resource.path))
+                .collect::<Vec<_>>();
             let recent_events = guard_client::events_cursor(&socket, Some(100), None, after_id)
                 .unwrap_or_default()
                 .into_iter()
@@ -1095,17 +1024,20 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow) {
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false);
-            (service_active, notification_active, daemon, configuration, recent_events, pending_incidents, pending_migrations)
+            (service_active, notification_active, daemon, configuration, active_ssh_keys, recent_events, pending_incidents, pending_migrations)
         }).await;
-        if let Ok((service_active, notification_active, daemon, configuration, recent_events, pending_incidents, pending_migrations)) = result {
-            if let Some(configuration) = configuration {
-                hydrate_configuration_from_daemon(&config_state, configuration);
+        if let Ok((service_active, notification_active, daemon, configuration, active_ssh_keys, recent_events, pending_incidents, pending_migrations)) = result {
+            let active_ssh_changed = update_active_ssh_keys(&config_state, active_ssh_keys);
+            let configuration_hydrated = configuration
+                .map(|configuration| hydrate_configuration_from_daemon(&config_state, configuration))
+                .unwrap_or(false);
+            if active_ssh_changed || configuration_hydrated {
+                refresh_browser_sources(&config_state);
             }
             let health = health_from_evidence(
                 service_active,
                 notification_active,
                 daemon.as_ref(),
-                configured,
             );
             status.set_text(health_label(health));
             // The switch represents the actual systemd service bundle.  Keep it
@@ -1467,11 +1399,7 @@ fn run_protection_bundle(verb: &str) -> bool {
     }
 }
 
-fn spawn_apply(
-    bytes: Vec<u8>,
-    button: gtk::Button,
-    persisted: Rc<RefCell<Option<platform_linux::config::EnforcementConfig>>>,
-) {
+fn spawn_apply(bytes: Vec<u8>, button: gtk::Button) {
     let write_bytes = bytes.clone();
     glib::MainContext::default().spawn_local(async move {
         let ok = gio::spawn_blocking(move || {
@@ -1491,11 +1419,7 @@ fn spawn_apply(
         .await
         .unwrap_or(false);
         button.set_sensitive(true);
-        if ok {
-            if let Ok(cfg) = serde_json::from_slice(&bytes) {
-                *persisted.borrow_mut() = Some(cfg);
-            }
-        } else {
+        if !ok {
             button.set_tooltip_text(Some(
                 "Apply failed; previous configuration was restored when possible.",
             ));
@@ -1532,6 +1456,18 @@ mod tests {
             vec![PathBuf::from("/home/test/.ssh/id_ed25519")]
         );
         assert_eq!(config.browsers[0].owner_uid, None);
+    }
+
+    #[test]
+    fn active_runtime_ssh_key_is_labeled_as_protected() {
+        assert_eq!(
+            ssh_key_subtitle(true, false),
+            "Protected — runtime enrollment (not yet in saved configuration)"
+        );
+        assert_eq!(
+            ssh_key_subtitle(false, true),
+            "Configured — not active in the current guardd process"
+        );
     }
 
     #[test]
@@ -1579,24 +1515,21 @@ mod tests {
             "Unavailable — key access is still allowed and reported, but immediate external network activity cannot currently be blocked"
         );
         assert_eq!(
-            health_from_evidence(true, true, Some(&status), true),
+            health_from_evidence(true, true, Some(&status)),
             Health::Active
         );
         assert_eq!(
-            health_from_evidence(true, true, Some(&status), false),
+            health_from_evidence(true, true, Some(&status)),
             Health::Active
         );
         assert_eq!(
-            health_from_evidence(true, false, Some(&status), true),
+            health_from_evidence(true, false, Some(&status)),
             Health::Degraded
         );
         assert_eq!(
-            health_from_evidence(false, false, Some(&status), true),
+            health_from_evidence(false, false, Some(&status)),
             Health::Stopped
         );
-        assert_eq!(
-            health_from_evidence(true, true, None, true),
-            Health::Unreachable
-        );
+        assert_eq!(health_from_evidence(true, true, None), Health::Unreachable);
     }
 }
