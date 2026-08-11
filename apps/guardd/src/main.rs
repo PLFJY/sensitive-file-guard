@@ -9,6 +9,8 @@
 //! Without it the daemon prints a precise error and exits 2 — it never silently
 //! falls back to notification-only while claiming enforcement.
 
+#![deny(clippy::significant_drop_in_scrutinee)]
+
 mod enforce;
 mod ipc;
 mod pending;

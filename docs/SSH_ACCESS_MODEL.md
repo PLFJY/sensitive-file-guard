@@ -19,6 +19,13 @@ is displayed; it does not apply the short status-poll timeout to a password
 prompt. Guardd remains responsible for the 120-second authorization deadline
 and cancels if that authenticated peer actually disconnects.
 
+After Polkit succeeds, guardd completes reader revalidation and lease creation
+under the enforcement-engine mutex, then releases that mutex before replying to
+the held fanotify permission, recording the audit event, or constructing the
+IPC response. A lock guard must never be kept in a `match` scrutinee whose arms
+re-enter the engine: blocking the fanotify loop can stall unrelated protected
+filesystem access system-wide.
+
 **Block**, dialog close, a full queue, repeated blocked requests during the
 short suppression interval, identity change, reader exit, and the 60-second
 pending timeout all answer `FAN_DENY`. Authentication failures leave the
