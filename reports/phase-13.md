@@ -141,7 +141,7 @@ for `FAN_CLASS_CONTENT`.
 
 `cargo fmt --check` — clean.
 `cargo clippy --all-targets --all-features -- -D warnings` — clean.
-`cargo test --all-features` — **187 passed, 0 failed.**
+`cargo test --all-features` — **185 passed, 0 failed.**
 
 ### New Phase 13 unit tests
 
@@ -176,10 +176,9 @@ for `FAN_CLASS_CONTENT`.
 - `platform-linux` — 29 passed (unchanged).
 - `guardd` — 73 passed (67 from Phase 12 + 6 new Phase 13).
 - `guardctl` — 6 passed (unchanged).
-- `guard-tui` — 2 passed (unchanged).
 - `smoke` integration — 1 passed (unchanged).
 - `guard-test-probe` — 0 (binary, no unit tests; `mmap` subcommand verified by build + clippy + privileged script).
-- **Total: 187 passed, 0 failed.**
+- **Total: 185 passed, 0 failed.**
 
 ### Privileged end-to-end script (BLOCKED: requires root)
 

@@ -43,7 +43,7 @@ check() {
 package() {
   cd "$srcdir/sensitive-file-guard"
 
-  for binary in guardd guardctl guard-tui guard-notify guard-ui; do
+  for binary in guardd guardctl guard-notify guard-ui; do
     install -Dm755 "target/release/$binary" "$pkgdir/usr/bin/$binary"
   done
 

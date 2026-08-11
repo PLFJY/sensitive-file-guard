@@ -21,8 +21,6 @@ GUARD_UI_BIN="$REPO/target/release/guard-ui"
 BIN_DIR="/usr/local/bin"
 GUARDD_DST="$BIN_DIR/guardd"
 GUARDCTL_DST="/usr/local/bin/guardctl"
-GUARD_TUI_BIN="$REPO/target/release/guard-tui"
-GUARD_TUI_DST="$BIN_DIR/guard-tui"
 GUARD_NOTIFY_DST="/usr/local/bin/guard-notify"
 GUARD_UI_DST="/usr/local/bin/guard-ui"
 DESKTOP_SRC="$REPO/data/io.github.plfjy.SensitiveFileGuard.desktop"
@@ -59,9 +57,9 @@ if [ "$UNINSTALL" = true ]; then
   rm -f "$POLKIT_DST"
   rm -f "$CONFIG_EXAMPLE_DST"
   systemctl daemon-reload
-  rm -f "$GUARDD_DST" "$GUARDCTL_DST" "$GUARD_TUI_DST" "$GUARD_NOTIFY_DST"
+  rm -f "$GUARDD_DST" "$GUARDCTL_DST" "$GUARD_NOTIFY_DST" "$BIN_DIR/guard-tui"
   rm -f "$GUARD_UI_DST" "/usr/share/applications/io.github.plfjy.SensitiveFileGuard.desktop" "/usr/share/metainfo/io.github.plfjy.SensitiveFileGuard.metainfo.xml" "/usr/share/icons/hicolor/scalable/apps/io.github.plfjy.SensitiveFileGuard.svg"
-  echo "    Removed: $UNIT_DST, $NOTIFY_UNIT_DST, $POLKIT_DST, $CONFIG_EXAMPLE_DST, $GUARDD_DST, $GUARDCTL_DST, $GUARD_TUI_DST, $GUARD_NOTIFY_DST"
+  echo "    Removed: $UNIT_DST, $NOTIFY_UNIT_DST, $POLKIT_DST, $CONFIG_EXAMPLE_DST, $GUARDD_DST, $GUARDCTL_DST, $GUARD_NOTIFY_DST (and any obsolete terminal UI binary)"
   echo "    Preserved: $CONFIG_DIR (edit to remove), $STATE_DIR (audit DB)"
   echo "==> Uninstall complete"
   exit 0
@@ -87,7 +85,7 @@ fi
 
 # Never compile as root: doing so pollutes root's Cargo home and makes the
 # result depend on a privileged toolchain. Refuse stale/missing artifacts.
-for artifact in "$GUARDD_BIN" "$GUARDCTL_BIN" "$GUARD_TUI_BIN" "$GUARD_NOTIFY_BIN" "$GUARD_UI_BIN"; do
+for artifact in "$GUARDD_BIN" "$GUARDCTL_BIN" "$GUARD_NOTIFY_BIN" "$GUARD_UI_BIN"; do
   if [ ! -x "$artifact" ]; then
     echo "ERROR: missing release artifact: $artifact"
     echo "Build first as your normal user: cargo build --release"
@@ -99,13 +97,14 @@ done
 mkdir -p "$BIN_DIR"
 install -m 0755 "$GUARDD_BIN" "$GUARDD_DST"
 install -m 0755 "$GUARDCTL_BIN" "$GUARDCTL_DST"
-install -m 0755 "$GUARD_TUI_BIN" "$GUARD_TUI_DST"
 install -m 0755 "$GUARD_NOTIFY_BIN" "$GUARD_NOTIFY_DST"
 install -m 0755 "$GUARD_UI_BIN" "$GUARD_UI_DST"
+# Remove the binary installed by releases that still shipped the terminal UI.
+rm -f "$BIN_DIR/guard-tui"
 install -Dm0644 "$DESKTOP_SRC" /usr/share/applications/io.github.plfjy.SensitiveFileGuard.desktop
 install -Dm0644 "$METAINFO_SRC" /usr/share/metainfo/io.github.plfjy.SensitiveFileGuard.metainfo.xml
 install -Dm0644 "$ICON_SRC" /usr/share/icons/hicolor/scalable/apps/io.github.plfjy.SensitiveFileGuard.svg
-echo "    Installed: $GUARDD_DST, $GUARDCTL_DST, $GUARD_TUI_DST, $GUARD_NOTIFY_DST, $GUARD_UI_DST"
+echo "    Installed: $GUARDD_DST, $GUARDCTL_DST, $GUARD_NOTIFY_DST, $GUARD_UI_DST"
 
 # 3. Install a non-active example. Never create /etc/guardd/config.json here:
 # an empty strict config would look configured while protecting no resources.

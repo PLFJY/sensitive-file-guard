@@ -1,4 +1,4 @@
-//! Unix domain socket IPC transport for `guardd` <-> `guardctl`/`guard-tui`.
+//! Unix domain socket IPC transport for `guardd` and its local clients.
 //!
 //! - `IpcServer::bind` creates a listening `AF_UNIX` socket. The daemon owns it.
 //! - `accept` returns a connection plus the peer's kernel-verified credentials
@@ -8,7 +8,7 @@
 //!   rejects frames larger than `MAX_REQUEST_BYTES` and malformed prefixes, so a
 //!   peer cannot exhaust daemon memory. `write_response` frames the reply.
 //! - `IpcClient::request` connects, sends a framed request, and reads one
-//!   framed response — the full `guardctl` round-trip.
+//!   framed response — the full local-client round-trip.
 //!
 //! None of this requires root: a Unix socket in a temp dir works as a normal
 //! user, and `SO_PEERCRED` is available to any process. The privileged fanotify
@@ -292,7 +292,7 @@ impl IpcClient {
     /// Connect to `path`, send a framed request, read one framed response.
     pub fn request(path: &Path, req_bytes: &[u8]) -> io::Result<Vec<u8>> {
         let mut stream = UnixStream::connect(path)?;
-        // A stalled local listener must not leave a CLI, TUI, or GTK worker
+        // A stalled local listener must not leave a CLI, notification, or GTK worker
         // blocked forever. Status/event requests are intentionally bounded;
         // callers can retry on the next poll or command invocation.
         stream.set_write_timeout(Some(Duration::from_secs(2)))?;

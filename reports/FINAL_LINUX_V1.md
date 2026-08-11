@@ -35,7 +35,7 @@ contacted.
 ## Accepted architecture
 
 ```text
-guardctl / guard-tui                 guard-notify (user session)
+guardctl / guard-ui                  guard-notify (user session)
           |                                      |
           +---------- Unix IPC / SO_PEERCRED ----+
                              |
@@ -230,7 +230,7 @@ denial, real polkit NO/YES, non-root broker load and notification delivery.
 cargo fmt --check                                           PASS
 cargo clippy --workspace --all-targets --all-features
   -- -D warnings                                            PASS
-cargo test --workspace --all-features                       201 passed, 0 failed
+cargo test --workspace --all-features                       199 passed, 0 failed
 cargo build --release                                       PASS
 ```
 

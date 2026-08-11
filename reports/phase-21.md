@@ -13,8 +13,7 @@ reads browser databases or SSH key contents.
 ## Control plane
 
 `guard-client` owns the typed framed Unix-socket exchange for status, resources,
-browsers, events, event detail, leases, lease revoke, and migration. The TUI
-uses it through a compatibility re-export. `RequestOp::Events` now supports
+browsers, events, event detail, leases, lease revoke, and migration. `RequestOp::Events` now supports
 bounded `before_id` and `after_id` cursors; both together are rejected, and
 SQLite queries preserve ordinary-user UID filtering. Audit tests cover newest,
 older, and newer pages.

@@ -64,7 +64,7 @@ out of a sensitive pathname without any open occurring while it has that name.
 ## Architecture
 
 ```
-              CLI / TUI / guard-notify
+              CLI / guard-notify
                      |
               local authenticated IPC
                      |
@@ -84,8 +84,8 @@ out of a sensitive pathname without any open occurring while it has that name.
 ```
 
 Binaries: `guardd` (daemon), `guardctl` (control), `guard-ui` (native GTK/libadwaita
-control center), `guard-tui` (terminal UI), and `guard-notify` (unprivileged
-user-session notification presenter).
+control center), and `guard-notify` (unprivileged user-session notification
+presenter).
 
 ## Graphical control center
 
@@ -165,8 +165,8 @@ sudo target/release/guardd \
 # In another terminal: query status.
 target/release/guardctl --socket /run/guardd/guardd.sock status
 
-# Terminal UI:
-target/release/guard-tui /run/guardd/guardd.sock
+# GUI control center:
+target/release/guard-ui
 ```
 
 ## Config

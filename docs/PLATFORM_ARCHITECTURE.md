@@ -27,7 +27,7 @@ guard-core / guard-browser / guard-ssh / guard-ipc / guard-audit
                   guardd / guardctl composition
 ```
 
-`guard-ui`, `guard-notify`, and `guard-tui` consume `guard-client`, IPC DTOs,
+`guard-ui` and `guard-notify` consume `guard-client`, IPC DTOs,
 and portable view/config types. `guardd` is still a Linux composition root in
 this phase; a separate `guard-runtime` crate was not created because the
 existing daemon state machine remains closely coupled to the enforcement loop.
@@ -99,7 +99,7 @@ portable policy only evaluates the resulting resource and stable identity facts.
 `guard-ipc` contains protocol DTOs only. `guard-client` provides typed request
 semantics and a bounded client-side local framing transport; server connection
 and peer authentication remain in the selected platform adapter. `guardctl`,
-GTK, notifications, and TUI no longer need the Linux transport crate merely to
+GTK, and notifications no longer need the Linux transport crate merely to
 issue ordinary protocol requests.
 
 ## Service boundary

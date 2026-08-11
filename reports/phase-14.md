@@ -151,13 +151,6 @@ guardd 0.1.0 — ACTIVE
   ...
 ```
 
-### TUI display
-
-`guard-tui` renders the status with color coding:
-- `ACTIVE` → green
-- `DEGRADED` → yellow
-- `NOT_ENFORCING` (or other) → red
-
 ## Stale socket recovery
 
 When `guardd` crashes (e.g. `kill -9`), the IPC socket file
@@ -238,14 +231,13 @@ cargo test --all-features
 
 `cargo fmt --check` — clean.
 `cargo clippy --all-targets --all-features -- -D warnings` — clean.
-`cargo test --all-features` — **187 passed, 0 failed.**
+`cargo test --all-features` — **185 passed, 0 failed.**
 
 No new unit tests were added in Phase 14 (the deliverables are deployment
 artifacts: systemd unit, install script, status field, privileged test
 script). The existing 187 tests cover the code changes:
 - `StatusInfo.status` field is exercised by existing status round-trip tests
-  in `guard-ipc` and `guard-tui` (updated test literals to include
-  `status: "ACTIVE"`).
+  in `guard-ipc` (updated test literals to include `status: "ACTIVE"`).
 - `handle_status` logic is covered by the `guardd` IPC integration tests.
 
 ### Test counts (unchanged from Phase 13)
@@ -259,9 +251,8 @@ script). The existing 187 tests cover the code changes:
 - `platform-linux` — 29
 - `guardd` — 73
 - `guardctl` — 6
-- `guard-tui` — 2
 - `smoke` integration — 1
-- **Total: 187 passed, 0 failed.**
+- **Total: 185 passed, 0 failed.**
 
 ## Known limitations
 

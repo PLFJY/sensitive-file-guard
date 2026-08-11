@@ -55,7 +55,7 @@ struct Cli {
     #[arg(long, default_value = "0")]
     exit_after: u64,
 
-    /// Unix domain socket path for IPC (guardctl/guard-tui). If omitted, no IPC
+    /// Unix domain socket path for IPC (guardctl and desktop clients). If omitted, no IPC
     /// server is started (useful for one-shot tests).
     #[arg(long, value_name = "PATH")]
     ipc_socket: Option<PathBuf>,

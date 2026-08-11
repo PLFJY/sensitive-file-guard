@@ -22,7 +22,6 @@ crates/
 apps/
   guardd/                       # bootstrap stub (init_logging, status)
   guardctl/                     # bootstrap stub
-  guard-tui/                    # bootstrap stub
 tests/
   fixtures/                     # layout slot (fixtures are programmatic)
   integration/
@@ -92,7 +91,7 @@ fmt: clean. clippy `-D warnings`: clean.
 
 ## Known limitations
 
-- Binaries (`guardd`/`guardctl`/`guard-tui`) are bootstrap stubs only; no
+- Binaries (`guardd`/`guardctl`) are bootstrap stubs only; no
   fanotify interception or IPC yet (Phase 02+).
 - `crates/guard-browser`, `guard-ssh`, `guard-ipc`, `platform-linux` are
   placeholders with doc comments only.

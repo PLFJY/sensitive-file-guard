@@ -18,7 +18,6 @@
 | `guard-client` | yes | no | typed client plus bounded client transport |
 | `guard-ui` | yes | no | portable config/view models and service facade |
 | `guard-notify` | yes | no | typed client transport |
-| `guard-tui` | test-only yes | no | synthetic test server uses client framing helpers |
 | `guardctl` | yes | yes | Linux composition for discovery, service, and trusted process helpers |
 | `guardd` | yes | yes | Linux composition and enforcement hot path |
 
@@ -27,7 +26,7 @@ code. The reusable client/UI/domain crates do not depend on `platform-linux`.
 
 ## OLD ARCHITECTURE
 
-`guard-client`, `guard-notify`, `guard-tui` tests, and `guard-ui` reached into
+`guard-client`, `guard-notify` tests, and `guard-ui` reached into
 `platform-linux` for ordinary transport/configuration behavior. The daemon's
 Linux mechanisms and product orchestration were also interleaved.
 
@@ -76,7 +75,7 @@ the selected control helper and decoded as portable discovery data.
 
 ## IPC BOUNDARY
 
-Protocol definitions remain in `guard-ipc`. CLI, notification, TUI, and GTK
+Protocol definitions remain in `guard-ipc`. CLI, notification, and GTK
 ordinary requests no longer import Linux IPC implementation types. Linux
 server framing and peer authentication remain in `platform-linux`/`guardd`.
 
@@ -111,8 +110,8 @@ Passed during refactor and final gates:
 - `git diff --check`
 - `./tests/check_platform_boundaries.sh`
 - `cargo check --workspace`
-- `cargo test -p guardd -p guard-client -p guard-ui -p guard-tui -p guard-notify`
-- 83 `guardd` unit tests, client/UI/notify tests, and two TUI framed IPC tests
+- `cargo test -p guardd -p guard-client -p guard-ui -p guard-notify`
+- 83 `guardd` unit tests plus client/UI/notify tests
 
 Full workspace gates and release build are recorded below after completion.
 

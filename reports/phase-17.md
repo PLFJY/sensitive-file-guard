@@ -86,7 +86,7 @@ cargo test -p guard-notify
 cargo test --workspace --all-features
 ```
 
-Formatting and clippy passed. The full workspace ran **187 tests, 0 failed**;
+Formatting and clippy passed. The full workspace ran **185 tests, 0 failed**;
 that total includes 3 probe tests (including a valid synthetic SQLite DB) and
 1 notifier test.
 

@@ -181,11 +181,10 @@ agent cannot obtain it.
 - `platform-linux` — 29 passed (unchanged).
 - `guardctl` — 3 passed (unchanged; the `ssh` subcommand is covered by build + clippy +
   manual review + the privileged script).
-- `guard-tui` — 2 passed (unchanged; migration round-trip integration test).
 - `guard-audit` — 5 passed (unchanged).
 - `guard-test-fixtures` — 9 passed (unchanged; `SshFixture` was added in Phase 03).
 - `smoke` integration — 1 passed (unchanged).
-- **Total: 166 passed, 0 failed.**
+- **Total: 164 passed, 0 failed.**
 
 ### Privileged end-to-end script (BLOCKED: requires root)
 

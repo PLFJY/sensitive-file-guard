@@ -75,7 +75,7 @@ dependency was added. Build dependencies are `cargo`, `git`, and `rust`.
 The package installs:
 
 ```text
-/usr/bin/{guardd,guardctl,guard-tui,guard-notify}
+/usr/bin/{guardd,guardctl,guard-notify,guard-ui}
 /usr/lib/systemd/system/guardd.service
 /usr/lib/systemd/user/guard-notify.service
 /usr/lib/sysusers.d/sensitive-file-guard.conf

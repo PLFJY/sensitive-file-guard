@@ -49,7 +49,7 @@ the one-request/one-response invariant visible at the seam.
 
 ## Why UI/client code must not import platform-linux
 
-The GTK/client/TUI code is reusable product code. It needs typed state and
+The GTK/client code is reusable product code. It needs typed state and
 semantic actions, not Linux peer credentials, service commands, filesystem
 layouts, or kernel event handles. Linux-specific work is now selected behind
 the CLI/adapter boundary.
@@ -79,4 +79,3 @@ Implement the contracts in a new backend for the macOS authorization facility,
 process identity/lifecycle APIs, network containment mechanism, privileged
 local transport, service health, artifact containment, and browser layouts.
 No such implementation is part of this ADR's change.
-

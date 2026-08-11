@@ -50,7 +50,6 @@ echo "==> Checking unprivileged pre-built release binaries"
 # root-only integration script: `cargo build --release` as the desktop user.
 test -x "$REPO/target/release/guardd" || { echo "guardd build failed"; exit 1; }
 test -x "$REPO/target/release/guardctl" || { echo "guardctl build failed"; exit 1; }
-test -x "$REPO/target/release/guard-tui" || { echo "guard-tui build failed"; exit 1; }
 test -x "$REPO/target/release/guard-notify" || { echo "guard-notify build failed"; exit 1; }
 test -x "$PROBE" || { echo "guard-test-probe build failed"; exit 1; }
 

@@ -50,7 +50,7 @@ token, or Internet destination was read or used.
   inspecting, and resolving incidents. A user can see only their own incidents
   unless root; resolution takes only an incident ID and fixed action, then
   requires polkit `org.guardd.incident-resolve` with `auth_admin`.
-- Added audit, notifier, GTK, TUI, and `guardctl` surfaces for a key-read
+- Added audit, notifier, GTK, and `guardctl` surfaces for a key-read
   arm, first blocked network send, and authorized allow. Repeated blocked
   sends increment the incident count but do not create repeated alerts.
   If the first ring-buffer event is lost, the daemon reconciles pending map

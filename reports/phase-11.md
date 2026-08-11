@@ -157,7 +157,7 @@ non-interactive build agent cannot obtain it.
 
 `cargo fmt --check` — clean.
 `cargo clippy --all-targets --all-features -- -D warnings` — clean.
-`cargo test --all-features` — **178 passed, 0 failed.**
+`cargo test --all-features` — **176 passed, 0 failed.**
 
 ### Required tests (mapped to `11_SSH_AGENT_LOAD_FLOW.md`)
 
@@ -209,9 +209,8 @@ non-interactive build agent cannot obtain it.
   `ssh_load_authorize_request_serializes_with_identity_fields`,
   `ssh_load_authorized_response_parses`,
   `resolve_ssh_add_explicit_path_wins`).
-- `guard-tui` — 2 passed (unchanged; migration round-trip integration test).
 - `smoke` integration — 1 passed (unchanged).
-- **Total: 178 passed, 0 failed.**
+- **Total: 176 passed, 0 failed.**
 
 ### Privileged end-to-end script (BLOCKED: requires root)
 

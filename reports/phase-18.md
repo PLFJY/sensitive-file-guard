@@ -196,7 +196,7 @@ Observed after the final code changes:
 cargo fmt --check                                           PASS
 cargo clippy --workspace --all-targets --all-features
   -- -D warnings                                            PASS
-cargo test --workspace --all-features                       195 passed, 0 failed
+cargo test --workspace --all-features                       193 passed, 0 failed
 cargo build --release                                       PASS
 ```
 

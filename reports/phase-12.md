@@ -139,7 +139,7 @@ to run; the non-interactive build agent cannot obtain it.
 
 `cargo fmt --check` — clean.
 `cargo clippy --all-targets --all-features -- -D warnings` — clean.
-`cargo test --all-features` — **181 passed, 0 failed.**
+`cargo test --all-features` — **179 passed, 0 failed.**
 
 ### Required tests (mapped to `12_AI_AGENT_COMPATIBILITY.md`)
 
@@ -178,9 +178,8 @@ to run; the non-interactive build agent cannot obtain it.
   `reason_code` assertions — no new test function, same count).
 - `guardctl` — 6 passed (unchanged; the existing `explain_event_from_json_body`
   test was updated with the new fields — no new test function, same count).
-- `guard-tui` — 2 passed (unchanged).
 - `smoke` integration — 1 passed (unchanged).
-- **Total: 181 passed, 0 failed.**
+- **Total: 179 passed, 0 failed.**
 
 ### Privileged end-to-end script (BLOCKED: requires root)
 

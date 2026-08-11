@@ -1,4 +1,4 @@
-//! Versioned JSON IPC protocol between `guardd` and `guardctl`/`guard-tui`.
+//! Versioned JSON IPC protocol between `guardd` and its local clients.
 //!
 //! The protocol is a single `Request` -> single `Response` exchange over a
 //! length-prefixed local frame supplied by the selected transport. It is deliberately tiny:

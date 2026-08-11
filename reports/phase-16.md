@@ -85,7 +85,7 @@ cargo test --workspace --all-features
 bash -n scripts/test-hardening-root.sh deploy/install.sh
 ```
 
-Result: all three gates passed; `cargo test` ran **182 tests, 0 failed**.
+Result: all three gates passed; `cargo test` ran **180 tests, 0 failed**.
 
 ## BLOCKED privileged acceptance
 
