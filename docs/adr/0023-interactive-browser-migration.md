@@ -18,7 +18,8 @@ profile and exact target process instance.
 guard-ui resolves only a daemon-issued pending ID and fixed allow/block enum.
 Allow requires a non-cached `org.guardd.migration-resolve` polkit action. The
 daemon revalidates target PID/start time/executable identity/UID/BrowserId and
-creates a lease immediately bound to that exact tree, with the existing
+creates a lease immediately bound to the top-most same-executable browser root
+of that exact tree, with the existing
 10-minute duration. Block, close, timeout, target exit and revalidation failure
 deny all queued fds. A short process-scoped negative cache suppresses retries.
 

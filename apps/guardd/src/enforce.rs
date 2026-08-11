@@ -78,7 +78,13 @@ pub type InodeIndex = Arc<RwLock<HashMap<(u64, u64), ProtectedResource>>>;
 pub struct MigrationPendingDetails {
     pub candidate: MigrationCandidate,
     pub resource: ProtectedResource,
+    /// The actual trusted browser process that opened the source resource.
     pub target: ProcessIdentity,
+    /// Top-most same-executable browser ancestor. Chromium-family import work
+    /// runs in short-lived utility processes; binding/deduplicating at this
+    /// root gives one prompt for the browser instance without trusting an
+    /// arbitrary descendant with a different executable identity.
+    pub target_root: guard_core::ProcessStableId,
 }
 
 /// The enforcement engine. Owns the registry, identity cache, enrollment store,
@@ -325,10 +331,12 @@ impl EnforcementEngine {
         {
             return None;
         }
+        let target_root = target_browser_root(&target);
         Some(MigrationPendingDetails {
             candidate: candidate.clone(),
             resource,
             target,
+            target_root,
         })
     }
 
@@ -350,6 +358,11 @@ impl EnforcementEngine {
         {
             return Err("target browser identity changed before confirmation".to_string());
         }
+        if linux_identity::read_start_time(pending.target_root.pid as i32).ok()
+            != Some(pending.target_root.start_time)
+        {
+            return Err("target browser root exited before confirmation".to_string());
+        }
         self.next_lease_id = self.next_lease_id.saturating_add(1);
         let id = LeaseId(self.next_lease_id);
         let expires_at = now_secs().saturating_add(DEFAULT_MIGRATION_DURATION_SECS);
@@ -360,7 +373,7 @@ impl EnforcementEngine {
             target_browser: pending.candidate.target_browser.clone(),
             uid: pending.target.uid,
             state: MigrationLeaseState::Bound {
-                root: pending.target.stable.clone(),
+                root: pending.target_root.clone(),
             },
             expires_at,
             revoked: false,
@@ -977,6 +990,23 @@ fn extend_fd_index(
     }
 }
 
+fn target_browser_root(target: &ProcessIdentity) -> guard_core::ProcessStableId {
+    let target_exe = target.stable.exe_identity();
+    target
+        .ancestors
+        .iter()
+        .rev()
+        .find(|ancestor| ancestor.exe_identity() == target_exe)
+        .map(|ancestor| guard_core::ProcessStableId {
+            pid: ancestor.pid,
+            start_time: ancestor.start_time,
+            exe: ancestor.exe.clone(),
+            exe_dev: ancestor.exe_dev,
+            exe_ino: ancestor.exe_ino,
+        })
+        .unwrap_or_else(|| target.stable.clone())
+}
+
 /// Recursively mark `dir` and all its subdirectories with the tree mask.
 fn mark_dir_recursive(
     group: &fanotify::FanotifyGroup,
@@ -1145,7 +1175,7 @@ mod tests {
     //! `scripts/test-browser-enforcement-root.sh`.
 
     use super::*;
-    use guard_core::identity::TrustTier;
+    use guard_core::identity::{AncestorSummary, TrustTier};
     use guard_core::policy::DenyReason;
     use guard_core::resource::{ProtectedResourceId, ProtectedResourceKind};
     use guard_test_fixtures::chromium::ChromiumProfile;
@@ -2440,6 +2470,33 @@ mod tests {
             evaluate(&event, &LeaseSet::default(), 0),
             Decision::Deny(DenyReason::UnknownProcess)
         );
+    }
+
+    #[test]
+    fn import_helpers_share_the_topmost_same_executable_browser_root() {
+        let mut helper = trusted_browser_process(1000, "microsoft-edge");
+        helper.stable.pid = 300;
+        helper.stable.start_time = 3000;
+        helper.ancestors = vec![
+            AncestorSummary {
+                pid: 200,
+                start_time: 2000,
+                exe: helper.stable.exe.clone(),
+                exe_dev: helper.stable.exe_dev,
+                exe_ino: helper.stable.exe_ino,
+            },
+            AncestorSummary {
+                pid: 100,
+                start_time: 1000,
+                exe: helper.stable.exe.clone(),
+                exe_dev: helper.stable.exe_dev,
+                exe_ino: helper.stable.exe_ino,
+            },
+        ];
+        let root = target_browser_root(&helper);
+        assert_eq!(root.pid, 100);
+        assert_eq!(root.start_time, 1000);
+        assert_eq!(root.exe, helper.stable.exe);
     }
 
     // Helpers for policy-level multi-uid / child tests.

@@ -66,7 +66,7 @@ impl PendingKey {
     fn from_details(details: &MigrationPendingDetails) -> Self {
         Self {
             uid: details.target.uid,
-            target: details.target.stable.clone(),
+            target: details.target_root.clone(),
             source_browser: details.candidate.source_browser.0.clone(),
             source_profile: details.candidate.source_profile.0.clone(),
         }
@@ -116,13 +116,12 @@ impl From<&PendingMigrationRequest> for PendingMigrationInfo {
             target_browser: request.details.candidate.target_browser.0.clone(),
             target_exe: request
                 .details
-                .target
-                .stable
+                .target_root
                 .exe
                 .to_string_lossy()
                 .into_owned(),
-            target_pid: request.details.target.stable.pid,
-            target_start_time: request.details.target.stable.start_time,
+            target_pid: request.details.target_root.pid,
+            target_start_time: request.details.target_root.start_time,
             requested_data: request.details.resource.kind.kind_code().to_owned(),
             created_at: request.created_at,
             expires_at: request.expires_at,
@@ -229,10 +228,10 @@ impl PendingMigrationStore {
             .iter()
             .filter_map(|(id, request)| {
                 let alive = platform_linux::identity::read_start_time(
-                    request.details.target.stable.pid as i32,
+                    request.details.target_root.pid as i32,
                 )
                 .ok()
-                    == Some(request.details.target.stable.start_time);
+                    == Some(request.details.target_root.start_time);
                 (!alive || now >= request.expires_at).then_some(*id)
             })
             .collect();

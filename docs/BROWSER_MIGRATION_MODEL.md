@@ -33,7 +33,11 @@ When an enrolled trusted Browser B accesses Browser A's profile for the same
 UID without a valid lease, guardd keeps the triggering `FAN_OPEN_PERM` pending.
 It emits one confirmation event and guard-notify activates guard-ui. Matching
 opens from the same Browser B process instance into the same source profile
-join that one bounded pending request; unrelated fanotify traffic keeps moving.
+join that one bounded pending request. Chromium-family import utility processes
+are grouped under their top-most ancestor with the same trusted browser
+executable identity, so one Edge import does not create a popup per helper
+process. Arbitrary descendants with another executable remain ineligible.
+Unrelated fanotify traffic keeps moving.
 
 The dialog identifies source browser/profile, target browser/executable/PID,
 and the first requested resource. Selecting **Yes, allow this import** requires
@@ -44,8 +48,9 @@ target process exit, or the 60-second timeout denies every queued operation.
 
 After approval guardd revalidates the PID, start time, canonical executable
 path, executable device/inode, UID, trust tier, and BrowserId mapping. It then
-creates a 10-minute `MigrationAccessLease` already bound to the exact target
-browser process tree. Subsequent matching reads for that source browser and
+creates a 10-minute `MigrationAccessLease` already bound to the top-most
+same-executable browser root of the exact target process tree. Subsequent
+matching reads for that source browser and
 profile use `AllowByLease`; another profile needs another confirmation. The
 lease dies when its root browser exits, expires, or is revoked.
 

@@ -27,10 +27,17 @@ ancestor-name heuristic was introduced.
 
 `PendingPermission` owns each event fd and fails closed in `Drop`; terminal
 handling makes one response attempt and closes it. Requests deduplicate on UID,
-exact stable target process, source browser and source profile. The store limits
+stable target browser root, source browser and source profile. The store limits
 requests to 8 and fds per request to 32. It expires after 60 seconds or target
 process exit; limit and suppressed retries are denied and audited. The main
 loop keeps polling/draining normal fanotify events while pending requests exist.
+
+Observed Edge topology during a live import attempt: the trusted
+`/opt/microsoft/msedge/msedge` executable launches
+`--type=utility --utility-sub-type=chrome.mojom.ProfileImport` children beneath
+the top-level Edge process. Pending requests use that top-most same-executable
+ancestor as their target root, deduplicating importer children without trusting
+arbitrary descendants with another executable.
 
 ## IPC
 
@@ -68,7 +75,7 @@ cargo test -p guard-core -p guardd -p guard-ipc -p guard-client -p guard-ui -p g
 Coverage includes own profile allow, Edge→Chrome / Zen→Firefox /
 Chromium→Chrome confirmation candidates, fake/untrusted identity and unknown
 process denial, wrong UID denial, existing lease allow, and a pending approval
-test proving the new lease binds to the exact triggering process instance.
+test proving the new lease binds to the verified browser root process instance.
 
 ## REAL BROWSER TESTS
 
