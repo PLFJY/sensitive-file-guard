@@ -135,10 +135,16 @@ and privileged Linux scripts remain in place; fake tests supplement them.
 `tests/check_platform_boundaries.sh` checks direct dependency and import
 direction with a small repository-readable rule.
 
-## Future macOS mapping (planned, not implemented)
+## macOS mapping
 
-A future `platform-macos` adapter can implement Endpoint Security protected-file
-authorization for both browser and SSH resources, process identity/lifecycle,
-authenticated XPC, service health, and browser discovery behind these seams.
+`platform-macos` implements deadline-safe Endpoint Security permission owners,
+process identity/lifecycle, signer-aware browser discovery, and authenticated
+XPC. The XPC adapter carries the same `guard-ipc` JSON bytes used by the Unix
+transport and authenticates exact signed Guard client identities plus the
+transport EUID. `guard-client::macos::MacGuardClient` performs
+LocalAuthentication before any Allow and sends Block directly. Product policy
+and pending/lease transitions remain in `guard-core` and `guard-runtime`.
+
 No Network Extension or SSH network containment is required by the current
-model. Entitled Endpoint Security execution is not claimed in this phase.
+model. Live entitled Endpoint Security execution remains a separate acceptance
+gate from compile-time and synthetic adapter coverage.

@@ -12,4 +12,6 @@ es-poc = []
 guard-core.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
+guard-ipc.workspace = true
 platform-macos.workspace = true
+serde_json.workspace = true

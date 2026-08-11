@@ -17,7 +17,6 @@ mod platform_service;
 use pending_dialog::{PendingDialogController, PendingPrompt, PromptKey, PromptKind, PromptState};
 
 const APP_ID: &str = "io.github.plfjy.SensitiveFileGuard";
-const SOCKET: &str = "/run/guardd/guardd.sock";
 const PENDING_ONLY_ARG: &str = "--pending-only";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -371,17 +370,15 @@ fn log_page(state: &UiState) -> gtk::Box {
         detail.present();
     });
     let older = gtk::Button::with_label("Load older");
-    let socket = PathBuf::from(SOCKET);
     let events = state.events.clone();
     let data = state.event_data.clone();
     older.connect_clicked(move |_| {
         let before = data.borrow().last().map(|event| event.id);
         let data = data.clone();
         let events = events.clone();
-        let socket = socket.clone();
         glib::MainContext::default().spawn_local(async move {
             let page = gio::spawn_blocking(move || {
-                guard_client::events_cursor(&socket, Some(100), before, None)
+                platform_service::events_cursor(Some(100), before, None)
             })
             .await
             .ok()
@@ -993,7 +990,6 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
     if state.poll_in_flight.replace(true) {
         return;
     }
-    let socket = PathBuf::from(SOCKET);
     let status = state.status.clone();
     let detail = state.detail.clone();
     let events = state.events.clone();
@@ -1007,21 +1003,21 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
     let after_id = event_data.borrow().first().map(|event| event.id);
     glib::MainContext::default().spawn_local(async move {
         let result = gio::spawn_blocking(move || {
-            let daemon = guard_client::status(&socket).ok();
-            let configuration = guard_client::configuration(&socket).ok();
-            let active_ssh_keys = guard_client::resources(&socket)
+            let daemon = platform_service::daemon_status().ok();
+            let configuration = platform_service::configuration().ok();
+            let active_ssh_keys = platform_service::resources()
                 .unwrap_or_default()
                 .into_iter()
                 .filter(|resource| resource.kind == "SshPrivateKey" && !resource.tree)
                 .map(|resource| PathBuf::from(resource.path))
                 .collect::<Vec<_>>();
-            let recent_events = guard_client::events_cursor(&socket, Some(100), None, after_id)
+            let recent_events = platform_service::events_cursor(Some(100), None, after_id)
                 .unwrap_or_default()
                 .into_iter()
                 .filter(is_visible_event)
                 .collect::<Vec<_>>();
-            let pending_ssh_reads = guard_client::ssh_pending(&socket);
-            let pending_migrations = guard_client::migration_pending(&socket);
+            let pending_ssh_reads = platform_service::ssh_pending();
+            let pending_migrations = platform_service::migration_pending();
             let service_status = platform_service::status().ok();
             let service_active = service_status
                 .as_ref()
@@ -1201,7 +1197,7 @@ fn present_migration_dialog(
             if response_state.get() != MigrationDialogState::AwaitingChoice {
                 return;
             }
-            // Keep the dialog visible while pkcheck presents its own desktop
+            // Keep the dialog visible while the platform presents its trusted
             // authentication prompt. Closing now would look like a denial and
             // previously hid the in-progress authorization from the user.
             response_state.set(MigrationDialogState::Authorizing);
@@ -1433,6 +1429,7 @@ fn migration_prompt(migration: guard_ipc::MigrationPendingInfo) -> PendingPrompt
         request_id: migration.id,
         title: "Browser data import detected".into(),
         details,
+        expires_at: migration.expires_at,
         allow_label: "Yes, allow this import".into(),
         block_label: "No, block".into(),
     }
@@ -1454,6 +1451,7 @@ fn ssh_read_prompt(pending: guard_ipc::SshPendingInfo) -> PendingPrompt {
             "Program: {process}\nExecutable: {}\nPID: {}\nSSH private key: {}\n\nAllow this verified process tree to read this key for 10 seconds?",
             pending.process_exe, pending.pid, pending.key_path
         ),
+        expires_at: pending.expires_at,
         allow_label: "Allow".into(),
         block_label: "Block".into(),
     }
@@ -1546,7 +1544,7 @@ fn present_pending_dialog(
     dialog.connect_close_request(move |dialog| {
         let state = close_controller.borrow().active().map(|(_, state)| state);
         if state == Some(PromptState::Authorizing) {
-            // Keep the dialog alive while Polkit is asking for the password.
+            // Keep the dialog alive while the platform authenticates the user.
             return glib::Propagation::Stop;
         }
         if state != Some(PromptState::AwaitingChoice)
@@ -1592,31 +1590,13 @@ fn resolve_pending_in_background(
     ui: PendingDialogUi,
 ) {
     glib::MainContext::default().spawn_local(async move {
-        let result = gio::spawn_blocking(move || match (prompt.key.kind, allow) {
-            (PromptKind::Migration, true) => guard_client::resolve_migration(
-                &PathBuf::from(SOCKET),
+        let result = gio::spawn_blocking(move || {
+            platform_service::resolve_pending(
+                prompt.key.kind,
                 &prompt.request_id,
-                guard_ipc::MigrationResolutionAction::AllowImport,
+                allow,
+                prompt.expires_at,
             )
-            .map(|_| ()),
-            (PromptKind::Migration, false) => guard_client::resolve_migration(
-                &PathBuf::from(SOCKET),
-                &prompt.request_id,
-                guard_ipc::MigrationResolutionAction::Block,
-            )
-            .map(|_| ()),
-            (PromptKind::SshRead, true) => guard_client::resolve_ssh_read(
-                &PathBuf::from(SOCKET),
-                &prompt.request_id,
-                guard_ipc::SshReadResolutionAction::Allow,
-            )
-            .map(|_| ()),
-            (PromptKind::SshRead, false) => guard_client::resolve_ssh_read(
-                &PathBuf::from(SOCKET),
-                &prompt.request_id,
-                guard_ipc::SshReadResolutionAction::Block,
-            )
-            .map(|_| ()),
         })
         .await;
         if allow {

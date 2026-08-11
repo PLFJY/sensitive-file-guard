@@ -635,6 +635,7 @@ dependencies = [
  "anyhow",
  "guard-ipc",
  "guard-platform",
+ "platform-macos",
  "serde_json",
 ]
 
@@ -653,7 +654,9 @@ name = "guard-es"
 version = "0.1.0"
 dependencies = [
  "guard-core",
+ "guard-ipc",
  "platform-macos",
+ "serde_json",
 ]
 
 [[package]]
@@ -749,6 +752,7 @@ dependencies = [
  "guard-ssh",
  "libc",
  "platform-linux",
+ "platform-macos",
  "serde",
  "serde_json",
  "tempfile",
@@ -999,7 +1003,9 @@ dependencies = [
  "cc",
  "guard-browser",
  "guard-core",
+ "guard-ipc",
  "guard-platform",
+ "libc",
  "serde",
  "serde_json",
  "sha2",

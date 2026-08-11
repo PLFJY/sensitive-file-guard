@@ -3,6 +3,8 @@
 
 use guard_platform::{ServiceOperation, ServiceStatus};
 
+use crate::pending_dialog::PromptKind;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum LinuxEnforcementMode {
@@ -37,6 +39,9 @@ pub fn handle_system_extension_command() -> Option<i32> {
         .any(|argument| argument == "--discover-macos-browsers")
     {
         return Some(discover_macos_browsers(&arguments));
+    }
+    if arguments.iter().any(|argument| argument == "--xpc-status") {
+        return Some(xpc_status());
     }
     let action = std::env::args().find(|argument| {
         matches!(
@@ -96,6 +101,28 @@ pub fn handle_system_extension_command() -> Option<i32> {
 }
 
 #[cfg(target_os = "macos")]
+fn xpc_status() -> i32 {
+    match guard_client::macos::MacGuardClient::for_current_process()
+        .and_then(|client| client.status())
+    {
+        Ok(status) => match serde_json::to_string_pretty(&status) {
+            Ok(status) => {
+                println!("{status}");
+                0
+            }
+            Err(error) => {
+                eprintln!("guard-ui: could not encode XPC status: {error}");
+                1
+            }
+        },
+        Err(error) => {
+            eprintln!("guard-ui: authenticated XPC status failed: {error:#}");
+            1
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn discover_macos_browsers(arguments: &[String]) -> i32 {
     use std::sync::Arc;
 
@@ -145,6 +172,7 @@ pub fn handle_system_extension_command() -> Option<i32> {
                 | "--deactivate-system-extension"
                 | "--system-extension-status"
                 | "--discover-macos-browsers"
+                | "--xpc-status"
         )
     });
     if requested {
@@ -224,7 +252,159 @@ pub fn apply_config(bytes: &[u8]) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+pub fn apply_config(bytes: &[u8]) -> anyhow::Result<()> {
+    let config: platform_macos::config::MacBackendConfig = serde_json::from_slice(bytes)?;
+    config.validate()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    guard_client::macos::MacGuardClient::for_current_process()?
+        .apply_configuration(&config, deadline)
+        .map(|_| ())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn apply_config(_bytes: &[u8]) -> anyhow::Result<()> {
     anyhow::bail!("configuration apply is not implemented for this target")
+}
+
+#[cfg(target_os = "linux")]
+pub fn resolve_pending(
+    kind: PromptKind,
+    id: &str,
+    allow: bool,
+    _expires_at: u64,
+) -> anyhow::Result<()> {
+    let socket = std::path::Path::new("/run/guardd/guardd.sock");
+    match (kind, allow) {
+        (PromptKind::Migration, true) => guard_client::resolve_migration(
+            socket,
+            id,
+            guard_ipc::MigrationResolutionAction::AllowImport,
+        )
+        .map(|_| ()),
+        (PromptKind::Migration, false) => {
+            guard_client::resolve_migration(socket, id, guard_ipc::MigrationResolutionAction::Block)
+                .map(|_| ())
+        }
+        (PromptKind::SshRead, true) => {
+            guard_client::resolve_ssh_read(socket, id, guard_ipc::SshReadResolutionAction::Allow)
+                .map(|_| ())
+        }
+        (PromptKind::SshRead, false) => {
+            guard_client::resolve_ssh_read(socket, id, guard_ipc::SshReadResolutionAction::Block)
+                .map(|_| ())
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn resolve_pending(
+    kind: PromptKind,
+    id: &str,
+    allow: bool,
+    expires_at: u64,
+) -> anyhow::Result<()> {
+    let client = guard_client::macos::MacGuardClient::for_current_process()?;
+    if allow {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        anyhow::ensure!(expires_at > now, "pending request already timed out");
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(expires_at.saturating_sub(now));
+        match kind {
+            PromptKind::Migration => client.allow_migration(id, deadline).map(|_| ()),
+            PromptKind::SshRead => client.allow_ssh_read(id, deadline).map(|_| ()),
+        }
+    } else {
+        match kind {
+            PromptKind::Migration => client.block_migration(id).map(|_| ()),
+            PromptKind::SshRead => client.block_ssh_read(id).map(|_| ()),
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn resolve_pending(
+    _kind: PromptKind,
+    _id: &str,
+    _allow: bool,
+    _expires_at: u64,
+) -> anyhow::Result<()> {
+    anyhow::bail!("pending authorization is unavailable for this target")
+}
+
+#[cfg(target_os = "linux")]
+pub fn daemon_status() -> anyhow::Result<guard_ipc::StatusInfo> {
+    guard_client::status(std::path::Path::new("/run/guardd/guardd.sock"))
+}
+
+#[cfg(target_os = "macos")]
+pub fn daemon_status() -> anyhow::Result<guard_ipc::StatusInfo> {
+    guard_client::macos::MacGuardClient::for_current_process()?.status()
+}
+
+#[cfg(target_os = "linux")]
+pub fn configuration() -> anyhow::Result<guard_ipc::ConfigurationInfo> {
+    guard_client::configuration(std::path::Path::new("/run/guardd/guardd.sock"))
+}
+
+#[cfg(target_os = "macos")]
+pub fn configuration() -> anyhow::Result<guard_ipc::ConfigurationInfo> {
+    guard_client::macos::MacGuardClient::for_current_process()?.configuration()
+}
+
+#[cfg(target_os = "linux")]
+pub fn resources() -> anyhow::Result<Vec<guard_ipc::ResourceInfo>> {
+    guard_client::resources(std::path::Path::new("/run/guardd/guardd.sock"))
+}
+
+#[cfg(target_os = "macos")]
+pub fn resources() -> anyhow::Result<Vec<guard_ipc::ResourceInfo>> {
+    guard_client::macos::MacGuardClient::for_current_process()?.resources()
+}
+
+#[cfg(target_os = "linux")]
+pub fn events_cursor(
+    limit: Option<u32>,
+    before_id: Option<i64>,
+    after_id: Option<i64>,
+) -> anyhow::Result<Vec<guard_ipc::EventInfo>> {
+    guard_client::events_cursor(
+        std::path::Path::new("/run/guardd/guardd.sock"),
+        limit,
+        before_id,
+        after_id,
+    )
+}
+
+#[cfg(target_os = "macos")]
+pub fn events_cursor(
+    limit: Option<u32>,
+    before_id: Option<i64>,
+    after_id: Option<i64>,
+) -> anyhow::Result<Vec<guard_ipc::EventInfo>> {
+    guard_client::macos::MacGuardClient::for_current_process()?
+        .events_cursor(limit, before_id, after_id)
+}
+
+#[cfg(target_os = "linux")]
+pub fn ssh_pending() -> anyhow::Result<Vec<guard_ipc::SshPendingInfo>> {
+    guard_client::ssh_pending(std::path::Path::new("/run/guardd/guardd.sock"))
+}
+
+#[cfg(target_os = "macos")]
+pub fn ssh_pending() -> anyhow::Result<Vec<guard_ipc::SshPendingInfo>> {
+    guard_client::macos::MacGuardClient::for_current_process()?.ssh_pending()
+}
+
+#[cfg(target_os = "linux")]
+pub fn migration_pending() -> anyhow::Result<Vec<guard_ipc::MigrationPendingInfo>> {
+    guard_client::migration_pending(std::path::Path::new("/run/guardd/guardd.sock"))
+}
+
+#[cfg(target_os = "macos")]
+pub fn migration_pending() -> anyhow::Result<Vec<guard_ipc::MigrationPendingInfo>> {
+    guard_client::macos::MacGuardClient::for_current_process()?.migration_pending()
 }

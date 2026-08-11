@@ -233,6 +233,26 @@ pub enum MigrationEnqueueResult {
     DenyLimit,
 }
 
+pub enum PendingTakeResult<T> {
+    Ready(T),
+    TimedOut(T),
+    InvalidId,
+    NotFoundOrResolved,
+    WrongOwner,
+}
+
+impl<T> PendingTakeResult<T> {
+    pub const fn error_code(&self) -> Option<&'static str> {
+        match self {
+            Self::Ready(_) => None,
+            Self::TimedOut(_) => Some("timed_out"),
+            Self::InvalidId => Some("invalid_pending_id"),
+            Self::NotFoundOrResolved => Some("already_resolved"),
+            Self::WrongOwner => Some("pending_owner_mismatch"),
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct PendingMigrationStore {
     next_id: u64,
@@ -304,18 +324,52 @@ impl PendingMigrationStore {
         now: u64,
         block: bool,
     ) -> Option<PendingMigrationRequest> {
-        let id = id.parse().ok()?;
-        let request = self.requests.get(&id)?;
+        match self.take_for_resolution_result(id, uid, root, now, block) {
+            PendingTakeResult::Ready(request) => Some(request),
+            PendingTakeResult::TimedOut(request) => {
+                request.resolve(false);
+                None
+            }
+            PendingTakeResult::InvalidId
+            | PendingTakeResult::NotFoundOrResolved
+            | PendingTakeResult::WrongOwner => None,
+        }
+    }
+
+    pub fn take_for_resolution_result(
+        &mut self,
+        id: &str,
+        uid: u32,
+        root: bool,
+        now: u64,
+        block: bool,
+    ) -> PendingTakeResult<PendingMigrationRequest> {
+        let Ok(id) = id.parse() else {
+            return PendingTakeResult::InvalidId;
+        };
+        let Some(request) = self.requests.get(&id) else {
+            return PendingTakeResult::NotFoundOrResolved;
+        };
         if !root && request.details.target.uid != uid {
-            return None;
+            return PendingTakeResult::WrongOwner;
+        }
+        if now >= request.expires_at {
+            return PendingTakeResult::TimedOut(
+                self.requests
+                    .remove(&id)
+                    .expect("pending request existed above"),
+            );
         }
         let key = MigrationPendingKey::from_details(&request.details);
-        let request = self.requests.remove(&id)?;
+        let request = self
+            .requests
+            .remove(&id)
+            .expect("pending request existed above");
         if block {
             self.blocked
                 .insert(key, now.saturating_add(BLOCK_SUPPRESSION_SECS));
         }
-        Some(request)
+        PendingTakeResult::Ready(request)
     }
 
     pub fn expire(
@@ -523,18 +577,51 @@ impl PendingSshReadStore {
         now: u64,
         block: bool,
     ) -> Option<PendingSshReadRequest> {
-        let id = id.parse().ok()?;
-        let request = self.requests.get(&id)?;
+        match self.take_for_resolution_result(id, uid, root, now, block) {
+            PendingTakeResult::Ready(request) => Some(request),
+            PendingTakeResult::TimedOut(request) => {
+                request.resolve(false);
+                None
+            }
+            PendingTakeResult::InvalidId
+            | PendingTakeResult::NotFoundOrResolved
+            | PendingTakeResult::WrongOwner => None,
+        }
+    }
+    pub fn take_for_resolution_result(
+        &mut self,
+        id: &str,
+        uid: u32,
+        root: bool,
+        now: u64,
+        block: bool,
+    ) -> PendingTakeResult<PendingSshReadRequest> {
+        let Ok(id) = id.parse() else {
+            return PendingTakeResult::InvalidId;
+        };
+        let Some(request) = self.requests.get(&id) else {
+            return PendingTakeResult::NotFoundOrResolved;
+        };
         if !root && request.details.target.uid != uid {
-            return None;
+            return PendingTakeResult::WrongOwner;
+        }
+        if now >= request.expires_at {
+            return PendingTakeResult::TimedOut(
+                self.requests
+                    .remove(&id)
+                    .expect("pending request existed above"),
+            );
         }
         let key = SshPendingKey::from_details(&request.details);
-        let request = self.requests.remove(&id)?;
+        let request = self
+            .requests
+            .remove(&id)
+            .expect("pending request existed above");
         if block {
             self.blocked
                 .insert(key, now.saturating_add(BLOCK_SUPPRESSION_SECS));
         }
-        Some(request)
+        PendingTakeResult::Ready(request)
     }
     pub fn expire(
         &mut self,
@@ -684,6 +771,10 @@ mod tests {
         let request = pending
             .take_for_resolution(&id, 1000, false, 101, false)
             .unwrap();
+        assert!(matches!(
+            pending.take_for_resolution_result(&id, 1000, false, 101, false),
+            PendingTakeResult::NotFoundOrResolved
+        ));
         let resolver = FakeResolver {
             current: details.target.clone(),
             live: true,
@@ -730,6 +821,21 @@ mod tests {
             request.resolve(false);
         }
         assert_eq!(*timed_out.lock().unwrap(), Terminal::Denied);
+
+        let (permission, late) = fake_permission();
+        let mut store = PendingMigrationStore::default();
+        let id = match store.enqueue(browser_details(), permission, 50) {
+            MigrationEnqueueResult::Created(info) => info.id,
+            _ => unreachable!(),
+        };
+        let result =
+            store.take_for_resolution_result(&id, 1000, false, 50 + PENDING_TIMEOUT_SECS, false);
+        assert_eq!(result.error_code(), Some("timed_out"));
+        let PendingTakeResult::TimedOut(request) = result else {
+            panic!("late resolution must return the expired permission");
+        };
+        request.resolve(false);
+        assert_eq!(*late.lock().unwrap(), Terminal::Denied);
     }
 
     #[test]
@@ -754,6 +860,10 @@ mod tests {
         let request = store
             .take_for_resolution(&id, 1000, false, 21, false)
             .unwrap();
+        assert!(matches!(
+            store.take_for_resolution_result(&id, 1000, false, 21, false),
+            PendingTakeResult::NotFoundOrResolved
+        ));
         let resolver = FakeResolver {
             current: details.target.clone(),
             live: true,
@@ -791,5 +901,20 @@ mod tests {
             request.resolve(false);
         }
         assert_eq!(*timed_out.lock().unwrap(), Terminal::Denied);
+
+        let (permission, late) = fake_permission();
+        let mut store = PendingSshReadStore::default();
+        let id = match store.enqueue(ssh_details(), permission, 50) {
+            SshEnqueueResult::Created(info) => info.id,
+            _ => unreachable!(),
+        };
+        let result =
+            store.take_for_resolution_result(&id, 1000, false, 50 + PENDING_TIMEOUT_SECS, false);
+        assert_eq!(result.error_code(), Some("timed_out"));
+        let PendingTakeResult::TimedOut(request) = result else {
+            panic!("late SSH resolution must return the expired permission");
+        };
+        request.resolve(false);
+        assert_eq!(*late.lock().unwrap(), Terminal::Denied);
     }
 }

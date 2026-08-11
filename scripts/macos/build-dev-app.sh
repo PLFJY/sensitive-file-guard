@@ -12,6 +12,7 @@ build_root=${MACOS_BUILD_ROOT:-"$repo_dir/build/macos"}
 app_bundle="$build_root/Guard.app"
 app_bundle_id=${APP_BUNDLE_ID:-io.github.plfjy.SensitiveFileGuard}
 extension_bundle_id=${SYSTEM_EXTENSION_BUNDLE_ID:-"$app_bundle_id.guard-es"}
+guard_xpc_service_name=${GUARD_XPC_SERVICE_NAME:-"$extension_bundle_id.control"}
 version=${GUARD_VERSION:-0.1.0}
 build_number=${GUARD_BUILD_NUMBER:-1}
 build_profile=${BUILD_PROFILE:-debug}
@@ -27,6 +28,7 @@ validate_bundle_id() {
 }
 validate_bundle_id "$app_bundle_id"
 validate_bundle_id "$extension_bundle_id"
+validate_bundle_id "$guard_xpc_service_name"
 case "$version:$build_number" in
     *[!0-9.:+-]*)
         echo "GUARD_VERSION/GUARD_BUILD_NUMBER contain unsupported characters" >&2
@@ -64,8 +66,10 @@ pkg-config --exists 'gtk4 >= 4.14' 'libadwaita-1 >= 1.4' || {
 xcrun --sdk macosx --show-sdk-path >/dev/null
 
 cd "$repo_dir"
+GUARD_APP_BUNDLE_ID="$app_bundle_id" \
 GUARD_SYSTEM_EXTENSION_BUNDLE_ID="$extension_bundle_id" \
-    cargo build -p guard-ui -p guard-es $cargo_flags $feature_flags
+GUARD_XPC_SERVICE_NAME="$guard_xpc_service_name" \
+    cargo build -p guard-ui -p guard-es -p guardctl -p guard-notify $cargo_flags $feature_flags
 
 if [ -e "$app_bundle" ]; then
     rm -rf -- "$app_bundle"
@@ -73,6 +77,8 @@ fi
 extension_bundle="$app_bundle/Contents/Library/SystemExtensions/$extension_bundle_id.systemextension"
 mkdir -p "$app_bundle/Contents/MacOS" "$extension_bundle/Contents/MacOS"
 cp "target/$cargo_profile/guard-ui" "$app_bundle/Contents/MacOS/Guard"
+cp "target/$cargo_profile/guardctl" "$app_bundle/Contents/MacOS/guardctl"
+cp "target/$cargo_profile/guard-notify" "$app_bundle/Contents/MacOS/guard-notify"
 cp "target/$cargo_profile/guard-es" "$extension_bundle/Contents/MacOS/guard-es"
 
 render_plist() {
@@ -81,6 +87,7 @@ render_plist() {
     sed \
         -e "s|@APP_BUNDLE_ID@|$app_bundle_id|g" \
         -e "s|@EXTENSION_BUNDLE_ID@|$extension_bundle_id|g" \
+        -e "s|@XPC_SERVICE_NAME@|$guard_xpc_service_name|g" \
         -e "s|@VERSION@|$version|g" \
         -e "s|@BUILD_NUMBER@|$build_number|g" \
         "$input" >"$output"
@@ -107,6 +114,12 @@ fi
 
 if [ "${SKIP_SIGNING:-0}" != "1" ]; then
     codesign --force --sign "$signing_identity" \
+        --identifier "$app_bundle_id.guardctl" \
+        "$app_bundle/Contents/MacOS/guardctl"
+    codesign --force --sign "$signing_identity" \
+        --identifier "$app_bundle_id.guard-notify" \
+        "$app_bundle/Contents/MacOS/guard-notify"
+    codesign --force --sign "$signing_identity" \
         --entitlements packaging/macos/GuardES.entitlements \
         "$extension_bundle"
     codesign --force --sign "$signing_identity" \
@@ -127,6 +140,7 @@ fi
 echo "assembled development bundle: $app_bundle"
 echo "app bundle id: $app_bundle_id"
 echo "system extension bundle id: $extension_bundle_id"
+echo "Endpoint Security Mach service: $guard_xpc_service_name"
 echo "signing identity: $signing_identity"
 if [ "${SKIP_SIGNING:-0}" = "1" ]; then
     echo "signing skipped"

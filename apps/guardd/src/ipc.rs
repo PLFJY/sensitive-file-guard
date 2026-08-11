@@ -125,6 +125,9 @@ fn handle_request_with_connection(
         RequestOp::ResourcesList => handle_resources_list(state, creds),
         RequestOp::BrowsersList => handle_browsers_list(state, creds),
         RequestOp::ConfigurationGet => handle_configuration_get(state, creds),
+        RequestOp::ConfigurationApply { .. } => {
+            Response::err("configuration_apply is unavailable on the Linux transport")
+        }
         RequestOp::ConfigCheck => handle_config_check(state, creds),
         RequestOp::Events {
             limit,

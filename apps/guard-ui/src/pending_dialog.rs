@@ -1,8 +1,8 @@
 //! Shared, GTK-free lifecycle for interactive daemon authorizations.
 //!
 //! The daemon's pending list is a discovery stream, not the lifecycle of a
-//! desktop dialog. In particular, a request can disappear while a Polkit
-//! authorization is still in flight. This controller deliberately keeps the
+//! desktop dialog. In particular, a request can disappear while platform user
+//! authentication is still in flight. This controller deliberately keeps the
 //! active request until the UI reports a terminal result.
 
 use std::collections::{HashSet, VecDeque};
@@ -33,6 +33,8 @@ pub struct PendingPrompt {
     pub request_id: String,
     pub title: String,
     pub details: String,
+    /// Absolute Unix-seconds deadline reported by the enforcement backend.
+    pub expires_at: u64,
     pub allow_label: String,
     pub block_label: String,
 }
@@ -179,6 +181,7 @@ mod tests {
             request_id: id.into(),
             title: "title".into(),
             details: "details".into(),
+            expires_at: u64::MAX,
             allow_label: "Allow".into(),
             block_label: "Block".into(),
         }

@@ -22,5 +22,7 @@
     <string>13.0</string>
     <key>NSSystemExtensionUsageDescription</key>
     <string>Guard uses Endpoint Security to authorize access to explicitly protected local browser and SSH resources before data is disclosed.</string>
+    <key>NSEndpointSecurityMachServiceName</key>
+    <string>@XPC_SERVICE_NAME@</string>
 </dict>
 </plist>

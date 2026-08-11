@@ -27,5 +27,11 @@ codesign -d --verbose=4 "$app_bundle" 2>&1
 codesign -d --entitlements :- "$app_bundle" 2>/dev/null
 codesign -d --verbose=4 "$extension_bundle" 2>&1
 codesign -d --entitlements :- "$extension_bundle" 2>/dev/null
+codesign --verify --strict --verbose=2 "$app_bundle/Contents/MacOS/guardctl"
+codesign -d --verbose=4 "$app_bundle/Contents/MacOS/guardctl" 2>&1
+codesign --verify --strict --verbose=2 "$app_bundle/Contents/MacOS/guard-notify"
+codesign -d --verbose=4 "$app_bundle/Contents/MacOS/guard-notify" 2>&1
 otool -L "$app_bundle/Contents/MacOS/Guard"
+otool -L "$app_bundle/Contents/MacOS/guardctl"
+otool -L "$app_bundle/Contents/MacOS/guard-notify"
 otool -L "$extension_bundle/Contents/MacOS/guard-es"

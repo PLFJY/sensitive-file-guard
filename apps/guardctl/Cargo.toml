@@ -10,7 +10,6 @@ guard-client.workspace = true
 guard-platform.workspace = true
 guard-core.workspace = true
 guard-ssh.workspace = true
-platform-linux.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 libc.workspace = true
@@ -19,3 +18,9 @@ serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+platform-linux.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+platform-macos.workspace = true

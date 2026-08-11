@@ -6,6 +6,9 @@ use anyhow::Context;
 use guard_ipc::{Request, RequestOp, Response, ResponseBody, MAX_REQUEST_BYTES, PROTOCOL_VERSION};
 use guard_platform::{LocalTransport, RequestTimeout};
 
+#[cfg(target_os = "macos")]
+pub mod macos;
+
 /// Client-side local transport.  It only connects and exchanges framed
 /// payloads; server-side peer authentication remains in the selected
 /// platform adapter.
@@ -47,9 +50,15 @@ pub mod transport {
     pub struct IpcClient;
 
     impl IpcClient {
+        #[cfg(not(target_os = "macos"))]
         pub fn request(path: &Path, payload: &[u8]) -> anyhow::Result<Vec<u8>> {
             UnixSocketTransport::new(path)
                 .request(payload, RequestTimeout::Bounded(Duration::from_secs(2)))
+        }
+
+        #[cfg(target_os = "macos")]
+        pub fn request(_path: &Path, payload: &[u8]) -> anyhow::Result<Vec<u8>> {
+            crate::macos::request_from_signed_cli(payload)
         }
     }
 

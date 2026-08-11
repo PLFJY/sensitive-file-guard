@@ -8,6 +8,7 @@
 //! All authorization is enforced by the daemon using kernel-verified peer
 //! credentials (`SO_PEERCRED`); the CLI never sends a UID.
 
+#[cfg(any(target_os = "linux", test))]
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -17,7 +18,9 @@ use guard_client::transport::IpcClient;
 use guard_ipc::{
     Request, RequestOp, Response, ResponseBody, StatusInfo, MAX_REQUEST_BYTES, PROTOCOL_VERSION,
 };
+#[cfg(target_os = "linux")]
 use guard_platform::{ServiceController, ServiceOperation};
+#[cfg(any(target_os = "linux", test))]
 use serde::Serialize;
 
 #[derive(Parser, Debug)]
@@ -387,6 +390,7 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn run_privileged(action: &PrivilegedAction) -> anyhow::Result<()> {
     // This command is intentionally useful only as pkexec's narrowly scoped
     // root helper.  It has no arbitrary command, unit, or destination input.
@@ -412,6 +416,12 @@ fn run_privileged(action: &PrivilegedAction) -> anyhow::Result<()> {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
+fn run_privileged(_action: &PrivilegedAction) -> anyhow::Result<()> {
+    anyhow::bail!("Linux pkexec/systemd helper operations are unavailable on macOS")
+}
+
+#[cfg(target_os = "linux")]
 fn run_service_status() -> anyhow::Result<()> {
     let controller = platform_linux::service::LinuxServiceController;
     let status = controller.status()?;
@@ -419,6 +429,19 @@ fn run_service_status() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn run_service_status() -> anyhow::Result<()> {
+    let status = guard_client::macos::MacGuardClient::for_current_process()?.status()?;
+    let status = guard_platform::ServiceStatus {
+        protection_active: status.enforcement_active,
+        notification_active: None,
+        diagnostic: status.backend_diagnostic,
+    };
+    println!("{}", serde_json::to_string(&status)?);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 fn run_notification_service(action: &ServiceAction) -> anyhow::Result<()> {
     let operation = match action {
         ServiceAction::Start => ServiceOperation::Start,
@@ -428,9 +451,17 @@ fn run_notification_service(action: &ServiceAction) -> anyhow::Result<()> {
     platform_linux::service::LinuxServiceController::apply_notifications(operation)
 }
 
+#[cfg(not(target_os = "linux"))]
+fn run_notification_service(_action: &ServiceAction) -> anyhow::Result<()> {
+    anyhow::bail!("macOS user-agent lifecycle is implemented by the app bundle")
+}
+
+#[cfg(target_os = "linux")]
 const MAX_CONFIG_STDIN: usize = 256 * 1024;
+#[cfg(target_os = "linux")]
 const ACTIVE_CONFIG: &str = "/etc/guardd/config.json";
 
+#[cfg(target_os = "linux")]
 fn apply_config_transactionally() -> anyhow::Result<()> {
     use std::io::Read;
     let mut bytes = Vec::new();
@@ -475,6 +506,7 @@ fn apply_config_transactionally() -> anyhow::Result<()> {
     anyhow::bail!("new configuration failed health check; previous configuration restored")
 }
 
+#[cfg(target_os = "linux")]
 fn validate_candidate_bytes(
     bytes: &[u8],
 ) -> anyhow::Result<platform_linux::config::EnforcementConfig> {
@@ -489,6 +521,7 @@ fn validate_candidate_bytes(
     Ok(cfg)
 }
 
+#[cfg(target_os = "linux")]
 fn write_root_config(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let mut file = std::fs::OpenOptions::new()
@@ -580,6 +613,7 @@ const NATIVE_BROWSER_LAYOUTS: &[NativeBrowserLayout] = &[
 ];
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
+#[cfg(any(target_os = "linux", test))]
 struct BrowserSuggestion {
     id: String,
     family: String,
@@ -588,6 +622,7 @@ struct BrowserSuggestion {
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
+#[cfg(any(target_os = "linux", test))]
 struct UnsupportedSandboxedBrowser {
     kind: String,
     profile_root: String,
@@ -595,6 +630,7 @@ struct UnsupportedSandboxedBrowser {
 }
 
 #[derive(Debug, Serialize)]
+#[cfg(any(target_os = "linux", test))]
 struct BrowserDiscovery {
     browsers: Vec<BrowserSuggestion>,
     unsupported_sandboxed: Vec<UnsupportedSandboxedBrowser>,
@@ -604,6 +640,7 @@ struct BrowserDiscovery {
 /// client binary and writes the public JSON contract rather than linking the
 /// daemon implementation into an installation helper.
 #[derive(Debug, Serialize, PartialEq, Eq)]
+#[cfg(any(target_os = "linux", test))]
 struct SetupBrowserConfig {
     id: String,
     family: &'static str,
@@ -612,6 +649,7 @@ struct SetupBrowserConfig {
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
+#[cfg(any(target_os = "linux", test))]
 struct SetupConfig {
     enforcement_mode: &'static str,
     browsers: Vec<SetupBrowserConfig>,
@@ -619,6 +657,7 @@ struct SetupConfig {
     ssh_keys: Vec<String>,
 }
 
+#[cfg(target_os = "linux")]
 fn run_browser_discover(home: Option<&Path>) -> anyhow::Result<()> {
     let home = match home {
         Some(home) => home.to_path_buf(),
@@ -641,6 +680,29 @@ fn run_browser_discover(home: Option<&Path>) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn run_browser_discover(home: Option<&Path>) -> anyhow::Result<()> {
+    use std::sync::Arc;
+
+    let home = match home {
+        Some(home) => home.to_path_buf(),
+        None => std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow::anyhow!("HOME is unset; pass --home PATH"))?,
+    };
+    anyhow::ensure!(home.is_dir(), "home directory does not exist");
+    let discovery = platform_macos::discovery::MacBrowserDiscovery::system(Arc::new(
+        platform_macos::code_signature::NativeCodeSignatureInspector,
+    ))
+    .discover_verified(&home);
+    println!("{}", serde_json::to_string_pretty(&discovery.review)?);
+    eprintln!(
+        "guardctl: review signer and profile metadata; discovery never grants trust by name alone"
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 fn run_setup(home: Option<&Path>, config_path: &Path, assume_yes: bool) -> anyhow::Result<()> {
     reject_existing_config(config_path)?;
     let home = resolve_setup_home(home)?;
@@ -682,6 +744,14 @@ fn run_setup(home: Option<&Path>, config_path: &Path, assume_yes: bool) -> anyho
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn run_setup(_home: Option<&Path>, _config_path: &Path, _assume_yes: bool) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "macOS configuration is applied through authenticated XPC; the Linux --yes setup path is unavailable"
+    )
+}
+
+#[cfg(target_os = "linux")]
 fn resolve_setup_home(home: Option<&Path>) -> anyhow::Result<PathBuf> {
     let is_root = {
         // SAFETY: `geteuid` has no preconditions and reads only this process's
@@ -708,6 +778,7 @@ fn resolve_setup_home(home: Option<&Path>) -> anyhow::Result<PathBuf> {
     })
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn setup_config(discovery: &BrowserDiscovery) -> anyhow::Result<SetupConfig> {
     if discovery.browsers.is_empty() {
         anyhow::bail!(
@@ -737,6 +808,7 @@ fn setup_config(discovery: &BrowserDiscovery) -> anyhow::Result<SetupConfig> {
 /// Convert the shared Linux discovery model into the setup renderer's stable
 /// JSON shape.  Discovery itself is shared with guard-ui and never authorizes
 /// a browser.
+#[cfg(target_os = "linux")]
 fn shared_discovery(home: &Path) -> BrowserDiscovery {
     let shared = platform_linux::config::discover_native_browsers(home);
     BrowserDiscovery {
@@ -766,6 +838,7 @@ fn shared_discovery(home: &Path) -> BrowserDiscovery {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn config_family(family: &str) -> anyhow::Result<&'static str> {
     match family {
         "Firefox" => Ok("firefox"),
@@ -778,6 +851,7 @@ fn config_family(family: &str) -> anyhow::Result<&'static str> {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn reject_existing_config(config_path: &Path) -> anyhow::Result<()> {
     match std::fs::symlink_metadata(config_path) {
         Ok(_) => anyhow::bail!(
@@ -792,6 +866,7 @@ fn reject_existing_config(config_path: &Path) -> anyhow::Result<()> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn confirm_setup() -> anyhow::Result<bool> {
     eprint!("Write this configuration? Type yes to continue: ");
     io::stderr().flush()?;
@@ -800,6 +875,7 @@ fn confirm_setup() -> anyhow::Result<bool> {
     Ok(response.trim() == "yes")
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn write_new_config(config_path: &Path, contents: &str) -> anyhow::Result<()> {
     use std::fs::OpenOptions;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -943,6 +1019,9 @@ fn print_human(resp: &Response) {
             );
             println!("  browsers : {}", configuration.browsers.len());
             println!("  SSH keys : {}", configuration.ssh_keys.len());
+        }
+        Some(ResponseBody::ConfigurationApplied { version }) => {
+            println!("Applied macOS configuration version {version}.");
         }
         Some(ResponseBody::Events(es)) => print_events(es),
         Some(ResponseBody::Explain(e)) => print_explain(e),
@@ -1356,6 +1435,7 @@ fn ipc_request(socket: &Path, op: RequestOp) -> anyhow::Result<Response> {
 /// Resolve the same root-owned system `ssh-add` selected by the daemon. A
 /// caller-supplied path is accepted only when it canonicalizes to that exact
 /// executable; user-selected binaries cannot receive an SSH-load lease.
+#[cfg(target_os = "linux")]
 fn resolve_ssh_add(ssh_add: Option<&Path>) -> anyhow::Result<PathBuf> {
     let trusted = platform_linux::identity::trusted_ssh_add_path().map_err(anyhow::Error::msg)?;
     if let Some(p) = ssh_add {
@@ -1368,6 +1448,19 @@ fn resolve_ssh_add(ssh_add: Option<&Path>) -> anyhow::Result<PathBuf> {
                 trusted.display()
             );
         }
+    }
+    Ok(trusted)
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_ssh_add(ssh_add: Option<&Path>) -> anyhow::Result<PathBuf> {
+    let trusted = std::fs::canonicalize("/usr/bin/ssh-add")?;
+    if let Some(path) = ssh_add {
+        let requested = std::fs::canonicalize(path)?;
+        anyhow::ensure!(
+            requested == trusted,
+            "--ssh-add must select the system /usr/bin/ssh-add"
+        );
     }
     Ok(trusted)
 }
@@ -1398,8 +1491,21 @@ fn spawn_stopped_ssh_add(ssh_add: &Path, key: &Path) -> std::io::Result<StoppedS
     let lc_all = std::ffi::CString::new(SSH_ADD_LOCALE_ENV).expect("static CString");
     let mut pipe_fds = [-1; 2];
     // SAFETY: pipe_fds points to two writable integers.
-    if unsafe { libc::pipe2(pipe_fds.as_mut_ptr(), libc::O_CLOEXEC) } < 0 {
+    if unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } < 0 {
         return Err(std::io::Error::last_os_error());
+    }
+    // Keep the private path handoff pipe out of the exec'd ssh-add image.
+    for descriptor in pipe_fds {
+        // SAFETY: both descriptors were returned by pipe and remain live.
+        if unsafe { libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            let error = std::io::Error::last_os_error();
+            // SAFETY: both descriptors are still owned by this function.
+            unsafe {
+                libc::close(pipe_fds[0]);
+                libc::close(pipe_fds[1]);
+            }
+            return Err(error);
+        }
     }
     let pid = unsafe { libc::fork() };
     if pid < 0 {
@@ -1441,7 +1547,7 @@ fn spawn_stopped_ssh_add(ssh_add: &Path, key: &Path) -> std::io::Result<StoppedS
                     break;
                 }
                 if count < 0 {
-                    if *libc::__errno_location() == libc::EINTR {
+                    if current_errno() == libc::EINTR {
                         continue;
                     }
                     libc::_exit(126);
@@ -1477,6 +1583,18 @@ fn spawn_stopped_ssh_add(ssh_add: &Path, key: &Path) -> std::io::Result<StoppedS
         pid,
         agent_path_writer: Some(writer),
     })
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn current_errno() -> libc::c_int {
+    // SAFETY: libc exposes the calling thread's errno slot.
+    unsafe { *libc::__errno_location() }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn current_errno() -> libc::c_int {
+    // SAFETY: libc exposes the calling thread's errno slot.
+    unsafe { *libc::__error() }
 }
 
 #[cfg(test)]
@@ -1742,6 +1860,7 @@ mod tests {
 
     use super::*;
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn privileged_candidate_validation_rejects_malformed_oversized_and_empty() {
         assert!(validate_candidate_bytes(b"not-json").is_err());
@@ -1752,6 +1871,7 @@ mod tests {
         .is_err());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn privileged_candidate_validation_rejects_relative_and_unsupported_modes() {
         assert!(validate_candidate_bytes(
@@ -1994,6 +2114,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn resolve_ssh_add_accepts_only_daemon_trusted_binary() {
         let trusted = platform_linux::identity::trusted_ssh_add_path().unwrap();

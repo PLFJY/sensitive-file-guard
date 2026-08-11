@@ -67,3 +67,6 @@ data.
 
 Process identity, verified browser discovery, and the distinct macOS config
 format are described in [the macOS identity/config guide](MACOS_IDENTITY_AND_CONFIG.md).
+Authenticated XPC, its explicit Endpoint Security Mach service, exact signing
+requirements, and the LocalAuthentication Allow gate are described in
+[the macOS XPC/authorization guide](MACOS_XPC_AND_AUTHORIZATION.md).

@@ -41,6 +41,30 @@ if ! rg -q 'CARGO_CFG_TARGET_OS.*macos' "$repo_dir/crates/platform-macos/build.r
     echo "macOS boundary violation: native bridge build lacks target guard" >&2
     failed=1
 fi
+if ! rg -q '<key>NSEndpointSecurityMachServiceName</key>' \
+    "$repo_dir/packaging/macos/GuardES.Info.plist.in"; then
+    echo "macOS boundary violation: Endpoint Security extension lacks an explicit Mach service" >&2
+    failed=1
+fi
+if ! rg -q 'setCodeSigningRequirement' "$repo_dir/native/macos/xpc_bridge.m"; then
+    echo "macOS boundary violation: XPC peer code-signing requirement is absent" >&2
+    failed=1
+fi
+if ! rg -q 'effectiveUserIdentifier' "$repo_dir/native/macos/xpc_bridge.m"; then
+    echo "macOS boundary violation: XPC peer EUID is not taken from the connection" >&2
+    failed=1
+fi
+if ! rg -q 'LAPolicyDeviceOwnerAuthentication' \
+    "$repo_dir/native/macos/local_auth_bridge.m"; then
+    echo "macOS boundary violation: Allow gate is not device-owner authentication" >&2
+    failed=1
+fi
+if rg -n 'authenticated[[:space:]_-]*=[[:space:]]*true|GUARD_.*AUTH.*BYPASS' \
+    "$repo_dir/crates/platform-macos" "$repo_dir/crates/guard-client" \
+    "$repo_dir/apps/guard-ui" "$repo_dir/apps/guardctl"; then
+    echo "macOS boundary violation: reusable/bypass authentication state found" >&2
+    failed=1
+fi
 if [ "$failed" -ne 0 ]; then
     exit 1
 fi

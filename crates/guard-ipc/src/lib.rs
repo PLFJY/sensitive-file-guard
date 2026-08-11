@@ -48,6 +48,12 @@ pub enum RequestOp {
     /// daemon. This lets an unprivileged UI render the active policy without
     /// reading the root-owned configuration file directly.
     ConfigurationGet,
+    /// Apply a platform backend configuration through the authoritative local
+    /// service. The platform adapter validates the opaque JSON object against
+    /// its own versioned schema; clients cannot choose a destination path.
+    ConfigurationApply {
+        config: serde_json::Value,
+    },
     Events {
         limit: Option<u32>,
         #[serde(default)]
@@ -119,6 +125,58 @@ pub enum RequestOp {
     },
 }
 
+/// Transport-level authorization class. This is shared by Unix and XPC
+/// callers so the product protocol does not drift between platforms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestAuthorization {
+    /// Read-only metadata scoped by the kernel-authenticated peer UID.
+    Metadata,
+    /// A denial/revocation that cannot expand access.
+    RestrictiveMutation,
+    /// A request capable of creating or changing an access capability.
+    SensitiveAllow,
+}
+
+impl RequestOp {
+    pub const fn authorization(&self) -> RequestAuthorization {
+        match self {
+            Self::Status
+            | Self::ResourcesList
+            | Self::BrowsersList
+            | Self::ConfigurationGet
+            | Self::Events { .. }
+            | Self::Explain { .. }
+            | Self::LeasesList
+            | Self::ConfigCheck
+            | Self::MigrationPendingList
+            | Self::MigrationPendingGet { .. }
+            | Self::SshPendingList
+            | Self::SshPendingGet { .. } => RequestAuthorization::Metadata,
+            Self::LeasesRevoke { .. }
+            | Self::MigrationResolve {
+                action: MigrationResolutionAction::Block,
+                ..
+            }
+            | Self::SshReadResolve {
+                action: SshReadResolutionAction::Block,
+                ..
+            } => RequestAuthorization::RestrictiveMutation,
+            Self::MigrationAuthorize { .. }
+            | Self::ConfigurationApply { .. }
+            | Self::MigrationResolve {
+                action: MigrationResolutionAction::AllowImport,
+                ..
+            }
+            | Self::SshReadResolve {
+                action: SshReadResolutionAction::Allow,
+                ..
+            }
+            | Self::SshProtect { .. }
+            | Self::SshLoadAuthorize { .. } => RequestAuthorization::SensitiveAllow,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Response {
     pub version: u32,
@@ -158,6 +216,9 @@ pub enum ResponseBody {
     Resources(Vec<ResourceInfo>),
     Browsers(Vec<BrowserInfo>),
     Configuration(ConfigurationInfo),
+    ConfigurationApplied {
+        version: u32,
+    },
     Events(Vec<EventInfo>),
     // Boxed: `EventInfo` is ~328 bytes; boxing keeps the enum small on the
     // hot path (status/events queries) where this variant is never used.
@@ -459,6 +520,9 @@ mod tests {
             RequestOp::ResourcesList,
             RequestOp::BrowsersList,
             RequestOp::ConfigurationGet,
+            RequestOp::ConfigurationApply {
+                config: serde_json::json!({"version": 1}),
+            },
             RequestOp::Events {
                 limit: Some(50),
                 before_id: None,
@@ -519,6 +583,45 @@ mod tests {
             assert_eq!(back.version, PROTOCOL_VERSION);
             assert_eq!(back.op, op);
         }
+    }
+
+    #[test]
+    fn request_authorization_distinguishes_allow_from_block() {
+        assert_eq!(
+            RequestOp::Status.authorization(),
+            RequestAuthorization::Metadata
+        );
+        assert_eq!(
+            RequestOp::MigrationResolve {
+                id: "1".into(),
+                action: MigrationResolutionAction::Block,
+            }
+            .authorization(),
+            RequestAuthorization::RestrictiveMutation
+        );
+        assert_eq!(
+            RequestOp::MigrationResolve {
+                id: "1".into(),
+                action: MigrationResolutionAction::AllowImport,
+            }
+            .authorization(),
+            RequestAuthorization::SensitiveAllow
+        );
+        assert_eq!(
+            RequestOp::SshReadResolve {
+                id: "1".into(),
+                action: SshReadResolutionAction::Allow,
+            }
+            .authorization(),
+            RequestAuthorization::SensitiveAllow
+        );
+        assert_eq!(
+            RequestOp::ConfigurationApply {
+                config: serde_json::json!({"version": 1}),
+            }
+            .authorization(),
+            RequestAuthorization::SensitiveAllow
+        );
     }
 
     #[test]
