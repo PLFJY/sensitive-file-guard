@@ -27,6 +27,85 @@ pub struct LinuxConfiguration {
     pub ssh_keys: Vec<std::path::PathBuf>,
 }
 
+#[cfg(target_os = "macos")]
+pub fn handle_system_extension_command() -> Option<i32> {
+    use platform_macos::system_extension::LifecycleState;
+
+    let action = std::env::args().find(|argument| {
+        matches!(
+            argument.as_str(),
+            "--activate-system-extension"
+                | "--deactivate-system-extension"
+                | "--system-extension-status"
+        )
+    });
+    let action = action?;
+    let identifier = option_env!("GUARD_SYSTEM_EXTENSION_BUNDLE_ID")
+        .unwrap_or(platform_macos::DEFAULT_EXTENSION_BUNDLE_ID);
+    let controller =
+        match platform_macos::system_extension::SystemExtensionController::new(identifier) {
+            Ok(controller) => controller,
+            Err(error) => {
+                eprintln!("guard-ui: {error}");
+                return Some(1);
+            }
+        };
+    let submitted = match action.as_str() {
+        "--activate-system-extension" => controller.activate(),
+        "--deactivate-system-extension" => controller.deactivate(),
+        "--system-extension-status" => controller.refresh(),
+        _ => unreachable!(),
+    };
+    if let Err(error) = submitted {
+        eprintln!("guard-ui: {error}");
+        return Some(1);
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        match controller.status() {
+            Ok(status) if status.state != LifecycleState::Submitted => {
+                println!(
+                    "system-extension state={:?} diagnostic={}",
+                    status.state, status.diagnostic
+                );
+                return Some(i32::from(status.state == LifecycleState::Failed));
+            }
+            Ok(_) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Ok(status) => {
+                println!(
+                    "system-extension state={:?} diagnostic=request still pending after 30 seconds",
+                    status.state
+                );
+                return Some(1);
+            }
+            Err(error) => {
+                eprintln!("guard-ui: status query failed: {error}");
+                return Some(1);
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn handle_system_extension_command() -> Option<i32> {
+    let requested = std::env::args().any(|argument| {
+        matches!(
+            argument.as_str(),
+            "--activate-system-extension"
+                | "--deactivate-system-extension"
+                | "--system-extension-status"
+        )
+    });
+    if requested {
+        eprintln!("guard-ui: SystemExtensions lifecycle commands are available only on macOS");
+        Some(1)
+    } else {
+        None
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn verb(operation: ServiceOperation) -> &'static str {
     match operation {

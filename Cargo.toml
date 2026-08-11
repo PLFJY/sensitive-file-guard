@@ -9,6 +9,7 @@ members = [
     "crates/guard-audit",
     "crates/guard-platform",
     "crates/guard-runtime",
+    "crates/platform-macos",
     "crates/platform-linux",
     "crates/guard-test-fixtures",
     "apps/guardd",
@@ -16,6 +17,7 @@ members = [
     "apps/guard-test-probe",
     "apps/guard-notify",
     "apps/guard-ui",
+    "apps/guard-es",
 ]
 
 [workspace.package]
@@ -32,6 +34,7 @@ guard-client = { path = "crates/guard-client" }
 guard-audit = { path = "crates/guard-audit" }
 guard-platform = { path = "crates/guard-platform" }
 guard-runtime = { path = "crates/guard-runtime" }
+platform-macos = { path = "crates/platform-macos" }
 platform-linux = { path = "crates/platform-linux" }
 guard-test-fixtures = { path = "crates/guard-test-fixtures" }
 
@@ -50,6 +53,7 @@ gtk4 = "0.9"
 libadwaita = "0.7"
 glib = "0.20"
 gio = "0.20"
+cc = "1"
 
 [profile.release]
 lto = "thin"

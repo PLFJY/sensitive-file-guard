@@ -649,6 +649,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "guard-es"
+version = "0.1.0"
+dependencies = [
+ "guard-core",
+ "platform-macos",
+]
+
+[[package]]
 name = "guard-ipc"
 version = "0.1.0"
 dependencies = [
@@ -723,6 +731,7 @@ dependencies = [
  "guard-platform",
  "guard-ssh",
  "libadwaita",
+ "platform-macos",
  "serde",
  "serde_json",
 ]
@@ -980,6 +989,14 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tracing",
+]
+
+[[package]]
+name = "platform-macos"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cc",
 ]
 
 [[package]]

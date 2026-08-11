@@ -1,0 +1,180 @@
+use std::ffi::CString;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LifecycleState {
+    Unknown,
+    Submitted,
+    UserApprovalRequired,
+    Active,
+    RestartRequired,
+    Deactivated,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LifecycleStatus {
+    pub state: LifecycleState,
+    pub diagnostic: String,
+}
+
+pub struct SystemExtensionController {
+    identifier: CString,
+}
+
+impl SystemExtensionController {
+    pub fn new(identifier: &str) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            crate::bundle::valid_bundle_identifier(identifier),
+            "invalid system extension bundle identifier"
+        );
+        Ok(Self {
+            identifier: CString::new(identifier)?,
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn activate(&self) -> anyhow::Result<()> {
+        self.submit(guard_system_extension_activate)
+    }
+    #[cfg(not(target_os = "macos"))]
+    pub fn activate(&self) -> anyhow::Result<()> {
+        anyhow::bail!("SystemExtensions is available only on macOS")
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn deactivate(&self) -> anyhow::Result<()> {
+        self.submit(guard_system_extension_deactivate)
+    }
+    #[cfg(not(target_os = "macos"))]
+    pub fn deactivate(&self) -> anyhow::Result<()> {
+        anyhow::bail!("SystemExtensions is available only on macOS")
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn refresh(&self) -> anyhow::Result<()> {
+        self.submit(guard_system_extension_refresh)
+    }
+    #[cfg(not(target_os = "macos"))]
+    pub fn refresh(&self) -> anyhow::Result<()> {
+        anyhow::bail!("SystemExtensions is available only on macOS")
+    }
+
+    #[cfg(target_os = "macos")]
+    fn submit(
+        &self,
+        function: unsafe extern "C" fn(
+            *const std::ffi::c_char,
+            *mut std::ffi::c_char,
+            usize,
+        ) -> i32,
+    ) -> anyhow::Result<()> {
+        let mut error = vec![0_i8; 1024];
+        // SAFETY: identifier is a live NUL-terminated CString; `error` is a
+        // writable buffer of the supplied length for the duration of the call.
+        let result = unsafe { function(self.identifier.as_ptr(), error.as_mut_ptr(), error.len()) };
+        if result == 0 {
+            return Ok(());
+        }
+        anyhow::bail!(
+            buffer_string(&error).unwrap_or_else(|| "SystemExtensions request failed".to_owned())
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn status(&self) -> anyhow::Result<LifecycleStatus> {
+        let mut diagnostic = vec![0_i8; 1024];
+        // SAFETY: identifier and output buffer satisfy the bridge contract and
+        // remain live for the complete synchronous status-copy call.
+        let raw = unsafe {
+            guard_system_extension_status(
+                self.identifier.as_ptr(),
+                diagnostic.as_mut_ptr(),
+                diagnostic.len(),
+            )
+        };
+        let state = match raw {
+            0 => LifecycleState::Unknown,
+            1 => LifecycleState::Submitted,
+            2 => LifecycleState::UserApprovalRequired,
+            3 => LifecycleState::Active,
+            4 => LifecycleState::RestartRequired,
+            5 => LifecycleState::Deactivated,
+            6 => LifecycleState::Failed,
+            _ => anyhow::bail!("SystemExtensions bridge returned invalid state {raw}"),
+        };
+        Ok(LifecycleStatus {
+            state,
+            diagnostic: buffer_string(&diagnostic).unwrap_or_default(),
+        })
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn status(&self) -> anyhow::Result<LifecycleStatus> {
+        anyhow::bail!("SystemExtensions is available only on macOS")
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn endpoint_security_entitlement_present() -> anyhow::Result<bool> {
+    let mut error = vec![0_i8; 1024];
+    // SAFETY: the bridge receives only a writable diagnostic buffer and does
+    // not retain it after returning.
+    let result =
+        unsafe { guard_has_endpoint_security_entitlement(error.as_mut_ptr(), error.len()) };
+    match result {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => anyhow::bail!(
+            buffer_string(&error).unwrap_or_else(|| "entitlement inspection failed".to_owned())
+        ),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn endpoint_security_entitlement_present() -> anyhow::Result<bool> {
+    anyhow::bail!("Endpoint Security entitlement inspection is available only on macOS")
+}
+
+#[cfg(target_os = "macos")]
+fn buffer_string(buffer: &[std::ffi::c_char]) -> Option<String> {
+    let end = buffer
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(buffer.len());
+    if end == 0 {
+        return None;
+    }
+    let bytes = buffer[..end]
+        .iter()
+        .map(|byte| *byte as u8)
+        .collect::<Vec<_>>();
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn guard_system_extension_activate(
+        identifier: *const std::ffi::c_char,
+        error: *mut std::ffi::c_char,
+        error_len: usize,
+    ) -> i32;
+    fn guard_system_extension_deactivate(
+        identifier: *const std::ffi::c_char,
+        error: *mut std::ffi::c_char,
+        error_len: usize,
+    ) -> i32;
+    fn guard_system_extension_refresh(
+        identifier: *const std::ffi::c_char,
+        error: *mut std::ffi::c_char,
+        error_len: usize,
+    ) -> i32;
+    fn guard_system_extension_status(
+        identifier: *const std::ffi::c_char,
+        diagnostic: *mut std::ffi::c_char,
+        diagnostic_len: usize,
+    ) -> i32;
+    fn guard_has_endpoint_security_entitlement(
+        error: *mut std::ffi::c_char,
+        error_len: usize,
+    ) -> i32;
+}

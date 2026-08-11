@@ -1,5 +1,10 @@
 # Sensitive Data Firewall (Linux V1)
 
+> **macOS development status:** the native app and Endpoint Security system
+> extension skeleton are documented in
+> [the macOS development guide](docs/INSTALL_MACOS_DEV.md). Phase 02 provides
+> bundle/signing/lifecycle plumbing only; it does not yet enforce file access.
+
 > **Current status: SECURITY-ACCEPTED ALPHA ON TESTED ARCH HOST when configured
 > with `strict-filesystem`.** Conservative mode remains available and retains
 > its measured replacement-inode race; it is not the security-accepted backend.

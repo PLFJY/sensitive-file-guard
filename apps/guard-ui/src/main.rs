@@ -108,6 +108,9 @@ struct UiState {
 }
 
 fn main() {
+    if let Some(exit_code) = platform_service::handle_system_extension_command() {
+        std::process::exit(exit_code);
+    }
     let pending_only = std::env::args().any(|arg| arg == PENDING_ONLY_ARG);
     adw::init().expect("libadwaita initialization");
     // Let libadwaita own the color preference instead of inheriting the

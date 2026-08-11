@@ -18,6 +18,9 @@ libadwaita = { workspace = true, features = ["v1_4"] }
 glib.workspace = true
 gio.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+platform-macos.workspace = true
+
 [[bin]]
 name = "guard-ui"
 path = "src/main.rs"
