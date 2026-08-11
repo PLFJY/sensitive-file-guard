@@ -11,6 +11,10 @@ use adw::prelude::*;
 use gtk4 as gtk;
 use libadwaita as adw;
 
+mod pending_dialog;
+
+use pending_dialog::{PendingDialogController, PendingPrompt, PromptKey, PromptKind, PromptState};
+
 const APP_ID: &str = "io.github.plfjy.SensitiveFileGuard";
 const SOCKET: &str = "/run/guardd/guardd.sock";
 
@@ -98,15 +102,7 @@ struct UiState {
     poll_in_flight: Rc<Cell<bool>>,
     protection: Rc<RefCell<Option<adw::SwitchRow>>>,
     protection_syncing: Rc<Cell<bool>>,
-    shown_ssh_reads: Rc<RefCell<HashSet<String>>>,
-    shown_migrations: Rc<RefCell<HashSet<String>>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MigrationDialogState {
-    AwaitingChoice,
-    Authorizing,
-    Terminal,
+    pending_dialogs: Rc<RefCell<PendingDialogController>>,
 }
 
 fn main() {
@@ -165,8 +161,7 @@ fn build_ui(app: &adw::Application) {
         poll_in_flight: Rc::new(Cell::new(false)),
         protection: Rc::new(RefCell::new(None)),
         protection_syncing: Rc::new(Cell::new(false)),
-        shown_ssh_reads: Rc::new(RefCell::new(HashSet::new())),
-        shown_migrations: Rc::new(RefCell::new(HashSet::new())),
+        pending_dialogs: Rc::new(RefCell::new(PendingDialogController::default())),
     };
     let overview = scroll_page(overview_page(&state));
     let protection = scroll_page(protection_page(&state));
@@ -1000,8 +995,7 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow) {
     let poll_in_flight = state.poll_in_flight.clone();
     let protection = state.protection.clone();
     let protection_syncing = state.protection_syncing.clone();
-    let shown_ssh_reads = state.shown_ssh_reads.clone();
-    let shown_migrations = state.shown_migrations.clone();
+    let pending_dialogs = state.pending_dialogs.clone();
     let config_state = state.clone();
     let window = window.clone();
     let after_id = event_data.borrow().first().map(|event| event.id);
@@ -1020,8 +1014,8 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow) {
                 .into_iter()
                 .filter(is_visible_event)
                 .collect::<Vec<_>>();
-            let pending_ssh_reads = guard_client::ssh_pending(&socket).unwrap_or_default();
-            let pending_migrations = guard_client::migration_pending(&socket).unwrap_or_default();
+            let pending_ssh_reads = guard_client::ssh_pending(&socket);
+            let pending_migrations = guard_client::migration_pending(&socket);
             let service_status = guard_client::service::status().ok();
             let service_active = service_status
                 .as_ref()
@@ -1092,28 +1086,31 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow) {
                 box_.append(&title); box_.append(&subtitle); row.set_child(Some(&box_));
                 if after_id.is_some() { events.insert(&row, 0); } else { events.append(&row); }
             }
-            shown_ssh_reads.borrow_mut().retain(|id| {
-                pending_ssh_reads.iter().any(|pending| pending.id == *id)
-            });
-            for pending in pending_ssh_reads {
-                if shown_ssh_reads.borrow_mut().insert(pending.id.clone()) {
-                    present_ssh_read_dialog(&window, pending);
+            let next_prompt = {
+                let mut controller = pending_dialogs.borrow_mut();
+                match (pending_migrations, pending_ssh_reads) {
+                    (Ok(migrations), Ok(ssh_reads)) => controller.reconcile_snapshot(
+                        migrations
+                            .into_iter()
+                            .map(migration_prompt)
+                            .chain(ssh_reads.into_iter().map(ssh_read_prompt)),
+                    ),
+                    (Ok(migrations), Err(_)) => controller.reconcile(
+                        migrations.into_iter().map(migration_prompt),
+                    ),
+                    (Err(_), Ok(ssh_reads)) => {
+                        controller.reconcile(ssh_reads.into_iter().map(ssh_read_prompt))
+                    }
+                    (Err(_), Err(_)) => {}
                 }
-            }
-            let pending_migration_sessions = pending_migrations
-                .iter()
-                .map(migration_session_key)
-                .collect::<HashSet<_>>();
-            shown_migrations
-                .borrow_mut()
-                .retain(|session| pending_migration_sessions.contains(session));
-            for migration in pending_migrations {
-                if shown_migrations
-                    .borrow_mut()
-                    .insert(migration_session_key(&migration))
-                {
-                    present_migration_dialog(&window, migration);
-                }
+                controller
+                    .active()
+                    .is_none()
+                    .then(|| controller.activate_next())
+                    .flatten()
+            };
+            if let Some(prompt) = next_prompt {
+                present_pending_dialog(&window, pending_dialogs.clone(), prompt);
             }
         }
         poll_in_flight.set(false);
@@ -1149,6 +1146,7 @@ fn migration_session_key(migration: &guard_ipc::MigrationPendingInfo) -> String 
     )
 }
 
+#[cfg(any())]
 fn present_migration_dialog(
     window: &adw::ApplicationWindow,
     migration: guard_ipc::MigrationPendingInfo,
@@ -1269,6 +1267,7 @@ fn present_migration_dialog(
     dialog.present();
 }
 
+#[cfg(any())]
 fn resolve_migration_in_background(id: String, action: guard_ipc::MigrationResolutionAction) {
     let socket = PathBuf::from(SOCKET);
     glib::MainContext::default().spawn_local(async move {
@@ -1282,6 +1281,7 @@ fn resolve_migration_in_background(id: String, action: guard_ipc::MigrationResol
     });
 }
 
+#[cfg(any())]
 fn present_ssh_read_dialog(window: &adw::ApplicationWindow, pending: guard_ipc::SshPendingInfo) {
     let process = PathBuf::from(&pending.process_exe)
         .file_name()
@@ -1383,6 +1383,7 @@ fn present_ssh_read_dialog(window: &adw::ApplicationWindow, pending: guard_ipc::
     dialog.present();
 }
 
+#[cfg(any())]
 fn resolve_ssh_read_in_background(id: String, action: guard_ipc::SshReadResolutionAction) {
     let socket = PathBuf::from(SOCKET);
     glib::MainContext::default().spawn_local(async move {
@@ -1394,6 +1395,258 @@ fn resolve_ssh_read_in_background(id: String, action: guard_ipc::SshReadResoluti
             Err(error) => eprintln!("guard-ui: SSH read resolution task failed: {error:?}"),
         }
     });
+}
+
+fn migration_prompt(migration: guard_ipc::MigrationPendingInfo) -> PendingPrompt {
+    let source = browser_label(&migration.source_browser);
+    let target = browser_label(&migration.target_browser);
+    let details = format!(
+        "{target} is trying to access protected {source} data.\n\nAre you importing data from {source} into {target}?\n\nSource browser: {source}\nSource profile: {}\nTarget browser: {target}\nTarget process: {}\nPID: {}\nRequested data: {}",
+        migration.source_profile,
+        migration.target_exe,
+        migration.target_pid,
+        migration.requested_data,
+    );
+    PendingPrompt {
+        key: PromptKey {
+            kind: PromptKind::Migration,
+            value: migration_session_key(&migration),
+        },
+        request_id: migration.id,
+        title: "Browser data import detected".into(),
+        details,
+        allow_label: "Yes, allow this import".into(),
+        block_label: "No, block".into(),
+    }
+}
+
+fn ssh_read_prompt(pending: guard_ipc::SshPendingInfo) -> PendingPrompt {
+    let process = PathBuf::from(&pending.process_exe)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| pending.process_exe.clone());
+    PendingPrompt {
+        key: PromptKey {
+            kind: PromptKind::SshRead,
+            value: pending.id.clone(),
+        },
+        request_id: pending.id,
+        title: "SSH private-key access detected".into(),
+        details: format!(
+            "Program: {process}\nExecutable: {}\nPID: {}\nSSH private key: {}\n\nAllow this verified process tree to read this key for 10 minutes?",
+            pending.process_exe, pending.pid, pending.key_path
+        ),
+        allow_label: "Allow".into(),
+        block_label: "Block".into(),
+    }
+}
+
+fn present_next_pending_dialog(
+    window: &adw::ApplicationWindow,
+    controller: Rc<RefCell<PendingDialogController>>,
+) {
+    let next = {
+        let mut controller_ref = controller.borrow_mut();
+        if controller_ref.active().is_none() {
+            controller_ref.activate_next()
+        } else {
+            None
+        }
+    };
+    if let Some(prompt) = next {
+        present_pending_dialog(window, controller, prompt);
+    }
+}
+
+fn present_pending_dialog(
+    window: &adw::ApplicationWindow,
+    controller: Rc<RefCell<PendingDialogController>>,
+    prompt: PendingPrompt,
+) {
+    let dialog = gtk::MessageDialog::builder()
+        .transient_for(window)
+        .modal(true)
+        .message_type(gtk::MessageType::Warning)
+        .text(&prompt.title)
+        .secondary_text(&prompt.details)
+        .build();
+    let block = dialog.add_button(&prompt.block_label, gtk::ResponseType::Reject);
+    block.add_css_class("destructive-action");
+    let allow = dialog.add_button(&prompt.allow_label, gtk::ResponseType::Accept);
+    allow.add_css_class("suggested-action");
+
+    let response_controller = controller.clone();
+    let response_window = window.clone();
+    let response_prompt = prompt.clone();
+    let response_allow = allow.clone();
+    let response_block = block.clone();
+    let response_details = prompt.details.clone();
+    dialog.connect_response(move |dialog, response| {
+        let is_allow = response == gtk::ResponseType::Accept;
+        let is_block = response == gtk::ResponseType::Reject;
+        if !is_allow && !is_block {
+            return;
+        }
+        if !response_controller.borrow_mut().begin_authorization() {
+            return;
+        }
+        response_allow.set_sensitive(false);
+        response_block.set_sensitive(false);
+        dialog.set_secondary_text(Some(&format!(
+            "{response_details}\n\n{}",
+            if is_allow {
+                "Waiting for system authentication…"
+            } else {
+                "Blocking this request…"
+            }
+        )));
+        resolve_pending_in_background(
+            response_window.clone(),
+            response_controller.clone(),
+            response_prompt.clone(),
+            is_allow,
+            PendingDialogUi {
+                dialog: dialog.clone(),
+                allow_button: response_allow.clone(),
+                block_button: response_block.clone(),
+                details: response_details.clone(),
+            },
+        );
+    });
+
+    let close_controller = controller.clone();
+    let close_window = window.clone();
+    let close_prompt = prompt;
+    let close_allow = allow.clone();
+    let close_block = block.clone();
+    let close_details = close_prompt.details.clone();
+    dialog.connect_close_request(move |dialog| {
+        let state = close_controller.borrow().active().map(|(_, state)| state);
+        if state == Some(PromptState::Authorizing) {
+            // Keep the dialog alive while Polkit is asking for the password.
+            return glib::Propagation::Stop;
+        }
+        if state != Some(PromptState::AwaitingChoice)
+            || !close_controller.borrow_mut().begin_authorization()
+        {
+            return glib::Propagation::Proceed;
+        }
+        close_allow.set_sensitive(false);
+        close_block.set_sensitive(false);
+        dialog.set_secondary_text(Some(&format!("{close_details}\n\nBlocking this request…")));
+        resolve_pending_in_background(
+            close_window.clone(),
+            close_controller.clone(),
+            close_prompt.clone(),
+            false,
+            PendingDialogUi {
+                dialog: dialog.clone(),
+                allow_button: close_allow.clone(),
+                block_button: close_block.clone(),
+                details: close_details.clone(),
+            },
+        );
+        glib::Propagation::Stop
+    });
+    dialog.present();
+}
+
+#[derive(Clone)]
+struct PendingDialogUi {
+    dialog: gtk::MessageDialog,
+    allow_button: gtk::Widget,
+    block_button: gtk::Widget,
+    details: String,
+}
+
+fn resolve_pending_in_background(
+    window: adw::ApplicationWindow,
+    controller: Rc<RefCell<PendingDialogController>>,
+    prompt: PendingPrompt,
+    allow: bool,
+    ui: PendingDialogUi,
+) {
+    glib::MainContext::default().spawn_local(async move {
+        let result = gio::spawn_blocking(move || match (prompt.key.kind, allow) {
+            (PromptKind::Migration, true) => guard_client::resolve_migration(
+                &PathBuf::from(SOCKET),
+                &prompt.request_id,
+                guard_ipc::MigrationResolutionAction::AllowImport,
+            )
+            .map(|_| ()),
+            (PromptKind::Migration, false) => guard_client::resolve_migration(
+                &PathBuf::from(SOCKET),
+                &prompt.request_id,
+                guard_ipc::MigrationResolutionAction::Block,
+            )
+            .map(|_| ()),
+            (PromptKind::SshRead, true) => guard_client::resolve_ssh_read(
+                &PathBuf::from(SOCKET),
+                &prompt.request_id,
+                guard_ipc::SshReadResolutionAction::Allow,
+            )
+            .map(|_| ()),
+            (PromptKind::SshRead, false) => guard_client::resolve_ssh_read(
+                &PathBuf::from(SOCKET),
+                &prompt.request_id,
+                guard_ipc::SshReadResolutionAction::Block,
+            )
+            .map(|_| ()),
+        })
+        .await;
+        if allow {
+            match result {
+                Ok(Ok(())) => complete_pending_dialog(&window, &controller, &ui.dialog),
+                Ok(Err(error)) => retry_pending_dialog(
+                    &controller,
+                    &ui.allow_button,
+                    &ui.block_button,
+                    &ui.dialog,
+                    &ui.details,
+                    format!("Authentication was not completed: {error}"),
+                ),
+                Err(error) => retry_pending_dialog(
+                    &controller,
+                    &ui.allow_button,
+                    &ui.block_button,
+                    &ui.dialog,
+                    &ui.details,
+                    format!("Authorization could not be completed: {error:?}"),
+                ),
+            }
+        } else {
+            complete_pending_dialog(&window, &controller, &ui.dialog);
+        }
+    });
+}
+
+fn retry_pending_dialog(
+    controller: &Rc<RefCell<PendingDialogController>>,
+    allow_button: &gtk::Widget,
+    block_button: &gtk::Widget,
+    dialog: &gtk::MessageDialog,
+    details: &str,
+    error: String,
+) {
+    if controller.borrow_mut().retry() {
+        allow_button.set_sensitive(true);
+        block_button.set_sensitive(true);
+        dialog.set_secondary_text(Some(&format!(
+            "{details}\n\n{error} You can try again or block this request."
+        )));
+    }
+}
+
+fn complete_pending_dialog(
+    window: &adw::ApplicationWindow,
+    controller: &Rc<RefCell<PendingDialogController>>,
+    dialog: &gtk::MessageDialog,
+) {
+    if controller.borrow_mut().finish() {
+        dialog.close();
+        controller.borrow_mut().release_terminal();
+        present_next_pending_dialog(window, controller.clone());
+    }
 }
 
 #[cfg(any())]
