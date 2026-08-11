@@ -14,6 +14,11 @@ replies to the held fanotify read. A successful answer creates a ten-minute
 only, expires naturally, is revoked if the root exits, and can be revoked via
 the existing lease interface.
 
+The resolving client keeps its authenticated IPC connection open while Polkit
+is displayed; it does not apply the short status-poll timeout to a password
+prompt. Guardd remains responsible for the 120-second authorization deadline
+and cancels if that authenticated peer actually disconnects.
+
 **Block**, dialog close, a full queue, repeated blocked requests during the
 short suppression interval, identity change, reader exit, and the 60-second
 pending timeout all answer `FAN_DENY`. Authentication failures leave the

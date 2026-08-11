@@ -18,9 +18,21 @@ pub mod transport {
 
     impl IpcClient {
         pub fn request(path: &Path, payload: &[u8]) -> io::Result<Vec<u8>> {
+            Self::request_with_read_timeout(path, payload, Some(Duration::from_secs(2)))
+        }
+
+        /// Send one request with a caller-selected response deadline. Sensitive
+        /// resolution requests keep the socket open while Polkit waits for a
+        /// human; guardd owns the authorization deadline and cancels when the
+        /// peer actually disconnects.
+        pub fn request_with_read_timeout(
+            path: &Path,
+            payload: &[u8],
+            read_timeout: Option<Duration>,
+        ) -> io::Result<Vec<u8>> {
             let mut stream = UnixStream::connect(path)?;
             stream.set_write_timeout(Some(Duration::from_secs(2)))?;
-            stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+            stream.set_read_timeout(read_timeout)?;
             write_frame(&mut stream, payload)?;
             read_frame(&mut stream, 16 * 1024 * 1024)
         }
@@ -110,7 +122,35 @@ fn exchange<T>(
         bytes.len() <= MAX_REQUEST_BYTES,
         "request exceeds MAX_REQUEST_BYTES"
     );
-    let response = IpcClient::request(socket, &bytes)
+    exchange_bytes(socket, bytes, take, Some(std::time::Duration::from_secs(2)))
+}
+
+fn exchange_waiting_for_authorization<T>(
+    socket: &Path,
+    op: RequestOp,
+    take: fn(ResponseBody) -> Option<T>,
+) -> anyhow::Result<T> {
+    let bytes = serde_json::to_vec(&Request {
+        version: PROTOCOL_VERSION,
+        op,
+    })?;
+    anyhow::ensure!(
+        bytes.len() <= MAX_REQUEST_BYTES,
+        "request exceeds MAX_REQUEST_BYTES"
+    );
+    // `authorize_sensitive` has its own server-side deadline. A client read
+    // timeout would close the peer socket and make guardd cancel Polkit while
+    // the user is still typing the password.
+    exchange_bytes(socket, bytes, take, None)
+}
+
+fn exchange_bytes<T>(
+    socket: &Path,
+    bytes: Vec<u8>,
+    take: fn(ResponseBody) -> Option<T>,
+    read_timeout: Option<std::time::Duration>,
+) -> anyhow::Result<T> {
+    let response = IpcClient::request_with_read_timeout(socket, &bytes, read_timeout)
         .map_err(|e| anyhow::anyhow!("IPC request to {}: {e}", socket.display()))?;
     let response: Response =
         serde_json::from_slice(&response).context("decoding daemon response")?;
@@ -168,7 +208,7 @@ pub fn resolve_ssh_read(
     id: &str,
     action: guard_ipc::SshReadResolutionAction,
 ) -> anyhow::Result<guard_ipc::SshReadResolutionInfo> {
-    exchange(
+    exchange_waiting_for_authorization(
         socket,
         RequestOp::SshReadResolve {
             id: id.to_owned(),
@@ -227,7 +267,7 @@ pub fn migration_authorize(
     target_browser: &str,
     duration_secs: Option<u64>,
 ) -> anyhow::Result<guard_ipc::MigrationAuthorizedInfo> {
-    exchange(
+    exchange_waiting_for_authorization(
         socket,
         RequestOp::MigrationAuthorize {
             source_browser: source_browser.to_owned(),
@@ -254,7 +294,7 @@ pub fn resolve_migration(
     id: &str,
     action: guard_ipc::MigrationResolutionAction,
 ) -> anyhow::Result<guard_ipc::MigrationResolutionInfo> {
-    exchange(
+    exchange_waiting_for_authorization(
         socket,
         RequestOp::MigrationResolve {
             id: id.to_owned(),

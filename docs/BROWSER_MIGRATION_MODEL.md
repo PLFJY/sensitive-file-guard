@@ -50,6 +50,10 @@ disables both choices while the system polkit prompt is active; only a confirmed
 allow closes it. If authentication is cancelled or fails, the request remains
 pending and the user can retry or block it.
 
+The resolving IPC client keeps the authenticated connection open while Polkit
+is displayed. Its normal short polling timeout never cancels a password prompt;
+guardd instead applies the authorization deadline and peer-disconnect checks.
+
 ## Approved import
 
 After approval guardd revalidates the PID, start time, canonical executable
