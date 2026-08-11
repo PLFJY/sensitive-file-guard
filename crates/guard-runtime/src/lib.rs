@@ -174,6 +174,13 @@ pub struct PendingMigrationRequest {
 
 impl PendingMigrationRequest {
     pub fn resolve(self, allow: bool) {
+        if let Err(error) = self.try_resolve(allow) {
+            tracing::error!(%error, "failed to resolve pending browser migration permission");
+        }
+    }
+
+    pub fn try_resolve(self, allow: bool) -> anyhow::Result<()> {
+        let mut first_error = None;
         for permission in self.permissions {
             let result = if allow {
                 permission.allow()
@@ -181,8 +188,12 @@ impl PendingMigrationRequest {
                 permission.deny()
             };
             if let Err(error) = result {
-                tracing::error!(%error, "failed to resolve pending browser migration permission");
+                first_error.get_or_insert(error);
             }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
         }
     }
 }
@@ -268,6 +279,19 @@ impl PendingMigrationStore {
         permission: Box<dyn PendingPermission>,
         now: u64,
     ) -> MigrationEnqueueResult {
+        self.enqueue_with_timeout(details, permission, now, PENDING_TIMEOUT_SECS)
+    }
+
+    /// Enqueue with a platform-derived prompt lifetime. macOS uses the usable
+    /// Endpoint Security deadline (minus its response safety margin) instead
+    /// of imposing the portable default on a retained AUTH_OPEN message.
+    pub fn enqueue_with_timeout(
+        &mut self,
+        details: MigrationPendingDetails,
+        permission: Box<dyn PendingPermission>,
+        now: u64,
+        timeout_secs: u64,
+    ) -> MigrationEnqueueResult {
         self.cleanup(now);
         let key = MigrationPendingKey::from_details(&details);
         if self.blocked.contains_key(&key) {
@@ -295,7 +319,7 @@ impl PendingMigrationStore {
             id: self.next_id,
             details,
             created_at: now,
-            expires_at: now.saturating_add(PENDING_TIMEOUT_SECS),
+            expires_at: now.saturating_add(timeout_secs),
             permissions: vec![permission],
         };
         let info = PendingMigrationInfo::from(&request);

@@ -34,9 +34,10 @@ pub enum MigrationLeaseState {
 
 /// Time-limited, process-tree-bound cross-browser migration access grant.
 ///
-/// This is intentionally not called "read-only": the access mediator
-/// events do not expose the triggering process's original open flags, so V1
-/// cannot enforce a read-only invariant at this boundary.
+/// The portable lease itself is intentionally not called "read-only": some
+/// access mediators (notably Linux fanotify) do not expose the opener's flag
+/// mask. The macOS adapter separately narrows every migration AUTH_OPEN
+/// response to Darwin FREAD and reports that platform guarantee in status.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MigrationAccessLease {
     pub id: LeaseId,

@@ -22,8 +22,19 @@ if rg -n 'es_respond_auth_result|es_copy_message|es_free_message' \
     failed=1
 fi
 if rg -n 'O_RDONLY|O_RDWR|O_WRONLY' \
-    "$repo_dir/native/macos/endpoint_security_bridge.c"; then
+    "$repo_dir/native/macos/endpoint_security_bridge.c" \
+    "$repo_dir/crates/platform-macos/src/pending.rs" \
+    "$repo_dir/apps/guard-es/src/policy.rs"; then
     echo "macOS boundary violation: AUTH_OPEN must use kernel FFLAGS, not open(2) O_* flags" >&2
+    failed=1
+fi
+if ! rg -q 'into_read_only' "$repo_dir/apps/guard-es/src/policy.rs"; then
+    echo "macOS boundary violation: migration pending path lacks its FREAD-only permission facade" >&2
+    failed=1
+fi
+if ! rg -q 'read_only_guaranteed:[[:space:]]*Some\(true\)' \
+    "$repo_dir/apps/guard-es/src/service.rs"; then
+    echo "macOS boundary violation: ES status does not expose the read-only migration guarantee" >&2
     failed=1
 fi
 if ! rg -U -q 'es_respond_flags_result\([^;]*false' \

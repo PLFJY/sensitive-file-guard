@@ -5,6 +5,11 @@ use std::time::{Duration, Instant};
 
 use guard_platform::PendingPermission;
 
+/// Endpoint Security AUTH_OPEN FFLAGS from Darwin `<sys/fcntl.h>`. These are
+/// kernel FFLAGS, deliberately not userspace `O_*` values.
+pub const ES_FFLAG_READ: u32 = 0x0000_0001;
+pub const ES_FFLAG_WRITE: u32 = 0x0000_0002;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResponseCode {
     Success,
@@ -103,6 +108,29 @@ impl MacPendingPermission {
     pub fn deny(self) -> anyhow::Result<()> {
         self.inner.resolve(false)
     }
+
+    pub fn requested_fflags(&self) -> u32 {
+        self.inner.requested_flags
+    }
+
+    /// Consume this permission through a facade whose Allow result authorizes
+    /// only FREAD. This keeps portable pending stores binary while macOS
+    /// migration leases retain a stronger read-only response guarantee.
+    pub fn into_read_only(self) -> ReadOnlyMacPendingPermission {
+        ReadOnlyMacPendingPermission(self)
+    }
+}
+
+pub struct ReadOnlyMacPendingPermission(MacPendingPermission);
+
+impl PendingPermission for ReadOnlyMacPendingPermission {
+    fn allow(self: Box<Self>) -> anyhow::Result<()> {
+        self.0.inner.resolve_flags(ES_FFLAG_READ)
+    }
+
+    fn deny(self: Box<Self>) -> anyhow::Result<()> {
+        self.0.inner.resolve(false)
+    }
 }
 
 impl PendingPermission for MacPendingPermission {
@@ -125,7 +153,16 @@ impl Drop for MacPendingPermission {
 
 impl PendingInner {
     pub(crate) fn resolve(&self, allow: bool) -> anyhow::Result<()> {
-        let terminal = if allow { 1 } else { 2 };
+        let authorized_flags = if allow { self.requested_flags } else { 0 };
+        self.resolve_flags(authorized_flags)
+    }
+
+    fn resolve_flags(&self, authorized_flags: u32) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            authorized_flags & !self.requested_flags == 0,
+            "Endpoint Security response attempted to authorize unrequested FFLAGS"
+        );
+        let terminal = if authorized_flags == 0 { 2 } else { 1 };
         if self
             .terminal
             .compare_exchange(0, terminal, Ordering::AcqRel, Ordering::Acquire)
@@ -139,7 +176,6 @@ impl PendingInner {
             .expect("pending responder lock")
             .take()
             .expect("unresolved permission must own a responder");
-        let authorized_flags = if allow { self.requested_flags } else { 0 };
         let result = responder.respond(authorized_flags);
         responder.release();
         if result == ResponseCode::Success {
@@ -377,5 +413,18 @@ mod tests {
         let (active, diagnostic) = health.snapshot();
         assert!(!active);
         assert!(diagnostic.unwrap().contains("Duplicate"));
+    }
+
+    #[test]
+    fn read_only_permission_strips_fwrite_from_migration_response() {
+        let state = Arc::new(FakeState::default());
+        let (permission, _) = MacPendingPermission::new(
+            ES_FFLAG_READ | ES_FFLAG_WRITE,
+            Box::new(FakeSink(Arc::clone(&state))),
+            Arc::new(HealthTracker::active("test")),
+        );
+        Box::new(permission.into_read_only()).allow().unwrap();
+        assert_eq!(*state.flags.lock().unwrap(), vec![ES_FFLAG_READ]);
+        assert_eq!(state.releases.load(Ordering::Acquire), 1);
     }
 }

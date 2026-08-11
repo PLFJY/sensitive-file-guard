@@ -653,10 +653,18 @@ dependencies = [
 name = "guard-es"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "guard-audit",
+ "guard-browser",
  "guard-core",
  "guard-ipc",
+ "guard-platform",
+ "guard-runtime",
+ "guard-test-fixtures",
+ "libc",
  "platform-macos",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

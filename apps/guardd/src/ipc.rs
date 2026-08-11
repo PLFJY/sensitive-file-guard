@@ -213,6 +213,7 @@ fn handle_status(state: &IpcState, creds: PeerCreds) -> Response {
         backend_kind: "linux-fanotify".to_owned(),
         backend_diagnostic: Some("fanotify protected-file authorization".to_owned()),
         enforcement_active: state.group.is_some(),
+        read_only_guaranteed: None,
         status: status.to_string(),
         mode: Some(state.backend_metrics.mode.as_str().to_owned()),
         marked_filesystems: Some(marked_filesystems),

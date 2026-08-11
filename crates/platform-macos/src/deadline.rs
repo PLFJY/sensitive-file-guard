@@ -49,6 +49,25 @@ pub fn interactive_budget(
     Ok(effective)
 }
 
+/// Latest safe time for any deferred response, including decisions that do not
+/// require a human. Unlike `interactive_budget`, this does not impose the
+/// product prompt cap or reject a short-but-still-usable immediate window.
+pub fn response_budget(
+    clock: &impl DeadlineClock,
+    deadline_ticks: u64,
+) -> Result<Duration, InsufficientDeadline> {
+    let remaining_ticks = deadline_ticks.saturating_sub(clock.now_ticks());
+    let remaining = clock.ticks_to_duration(remaining_ticks);
+    let effective = remaining.saturating_sub(SAFETY_MARGIN);
+    if effective.is_zero() {
+        return Err(InsufficientDeadline {
+            remaining,
+            effective,
+        });
+    }
+    Ok(effective)
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) struct DarwinClock;
 
@@ -106,5 +125,14 @@ mod tests {
         let error = interactive_budget(&FakeClock { now: 10 }, 13).unwrap_err();
         assert_eq!(error.remaining, Duration::from_secs(3));
         assert_eq!(error.effective, MIN_INTERACTIVE_BUDGET);
+    }
+
+    #[test]
+    fn immediate_response_budget_is_not_limited_by_prompt_rules() {
+        assert_eq!(
+            response_budget(&FakeClock { now: 10 }, 13).unwrap(),
+            Duration::from_secs(2)
+        );
+        assert!(response_budget(&FakeClock { now: 10 }, 11).is_err());
     }
 }

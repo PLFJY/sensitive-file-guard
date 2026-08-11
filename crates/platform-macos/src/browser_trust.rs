@@ -78,15 +78,26 @@ pub struct MacBrowserTrustStore {
 
 pub struct MacProcessIdentityResolver {
     graph: std::sync::Arc<std::sync::Mutex<MacProcessGraph>>,
-    trust: std::sync::Arc<MacBrowserTrustStore>,
+    trust: std::sync::RwLock<MacBrowserTrustStore>,
 }
 
 impl MacProcessIdentityResolver {
     pub fn new(
         graph: std::sync::Arc<std::sync::Mutex<MacProcessGraph>>,
-        trust: std::sync::Arc<MacBrowserTrustStore>,
+        trust: MacBrowserTrustStore,
     ) -> Self {
-        Self { graph, trust }
+        Self {
+            graph,
+            trust: std::sync::RwLock::new(trust),
+        }
+    }
+
+    pub fn replace_trust(&self, trust: MacBrowserTrustStore) -> anyhow::Result<()> {
+        *self
+            .trust
+            .write()
+            .map_err(|_| anyhow::anyhow!("macOS browser trust lock is poisoned"))? = trust;
+        Ok(())
     }
 }
 
@@ -100,8 +111,17 @@ impl guard_platform::ProcessIdentityResolver for MacProcessIdentityResolver {
             .current(pid)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("current process graph entry is missing"))?;
-        let ancestors = graph.ancestors(facts.key, std::time::Instant::now())?;
-        let trust = self.trust.classify(&facts, resource_owner_uid);
+        // A direct, fully signed browser identity does not depend on seeing
+        // its pre-extension parent. Missing ancestry simply leaves descendant
+        // lease matching unavailable; it never becomes permission to allow.
+        let ancestors = graph
+            .ancestors(facts.key, std::time::Instant::now())
+            .unwrap_or_default();
+        let trust = self
+            .trust
+            .read()
+            .map_err(|_| anyhow::anyhow!("macOS browser trust lock is poisoned"))?
+            .classify(&facts, resource_owner_uid);
         Ok(ProcessIdentity {
             stable: facts.stable_id(),
             uid: facts.uid,

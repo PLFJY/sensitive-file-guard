@@ -1,8 +1,9 @@
 # macOS development build
 
-Phase 02 provides a development `Guard.app` and Endpoint Security system
-extension skeleton. It is not distributable packaging and does not yet enforce
-file access.
+The development `Guard.app` contains the Endpoint Security extension, GTK
+control center, authenticated XPC clients, pending helper, and browser policy
+runtime. It is not distributable packaging. Live enforcement still requires
+Apple-approved Endpoint Security provisioning and Full Disk Access.
 
 Requirements:
 
@@ -73,3 +74,6 @@ requirements, and the LocalAuthentication Allow gate are described in
 The GTK status model, policy-switch semantics, SMAppService LaunchAgent, and
 pending-only lifecycle are described in
 [the macOS UI/user-agent guide](MACOS_UI_AND_USER_AGENT.md).
+The browser AUTH_OPEN classifier, interactive migration runtime, audit events,
+and FREAD-only lease behavior are described in
+[the macOS browser-protection guide](MACOS_BROWSER_PROTECTION.md).

@@ -61,11 +61,16 @@ pub fn overview_detail(
             },
             |status| {
                 format!(
-                    "Backend: {} · extension: {} · Full Disk Access: {} · policy: {} · pending helper: {} · allowed: {} · denied: {}",
+                    "Backend: {} · extension: {} · Full Disk Access: {} · policy: {} · migration read-only: {} · pending helper: {} · allowed: {} · denied: {}",
                     status.backend_kind,
                     overview.extension_state,
                     overview.full_disk_access,
                     if overview.policy_enabled { "enabled" } else { "disabled" },
+                    match status.read_only_guaranteed {
+                        Some(true) => "guaranteed",
+                        Some(false) => "not guaranteed",
+                        None => "unknown",
+                    },
                     overview.helper_state,
                     status.allowed,
                     status.denied

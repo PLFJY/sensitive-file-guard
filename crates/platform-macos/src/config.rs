@@ -79,6 +79,15 @@ impl MacBackendConfig {
                 "common browser policy has no macOS trust enrollment"
             );
         }
+        for (index, browser) in self.browser_trust.iter().enumerate() {
+            for other in self.browser_trust.iter().skip(index + 1) {
+                anyhow::ensure!(
+                    !browser.profile_root.starts_with(&other.profile_root)
+                        && !other.profile_root.starts_with(&browser.profile_root),
+                    "macOS browser profile roots must not overlap"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -373,6 +382,20 @@ mod tests {
     fn mismatched_owner_or_profile_is_rejected() {
         let mut config = config();
         config.browser_trust[0].owner_uid = 502;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn overlapping_browser_profile_roots_are_rejected() {
+        let mut config = config();
+        let mut nested = config.browser_trust[0].clone();
+        nested.browser_id = BrowserId("nested".into());
+        nested.profile_root = nested.profile_root.join("Default");
+        let mut common = config.common_policy.browsers[0].clone();
+        common.id = "nested".into();
+        common.profile_root = nested.profile_root.clone();
+        config.browser_trust.push(nested);
+        config.common_policy.browsers.push(common);
         assert!(config.validate().is_err());
     }
 

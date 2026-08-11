@@ -2063,6 +2063,7 @@ mod tests {
             backend_kind: "linux-fanotify".into(),
             backend_diagnostic: None,
             enforcement_active: true,
+            read_only_guaranteed: None,
             status: "ACTIVE".into(),
             mode: Some("strict-filesystem".into()),
             marked_filesystems: Some(1),

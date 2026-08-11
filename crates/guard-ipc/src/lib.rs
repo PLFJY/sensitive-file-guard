@@ -363,6 +363,10 @@ pub struct StatusInfo {
     #[serde(default)]
     pub backend_diagnostic: Option<String>,
     pub enforcement_active: bool,
+    /// Whether migration-lease AUTH_OPEN responses are restricted to FREAD.
+    /// `None` means the selected backend cannot make that guarantee.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only_guaranteed: Option<bool>,
     /// Human-readable enforcement state (Phase 14): `"ACTIVE"`,
     /// `"DEGRADED"`, or `"NOT_ENFORCING"`.
     /// - `ACTIVE`: access enforcement is running normally.
@@ -792,6 +796,7 @@ mod tests {
             backend_kind: "linux-fanotify".into(),
             backend_diagnostic: None,
             enforcement_active: true,
+            read_only_guaranteed: None,
             status: "ACTIVE".into(),
             mode: Some("strict-filesystem".into()),
             marked_filesystems: Some(1),

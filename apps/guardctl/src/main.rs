@@ -1111,6 +1111,9 @@ fn print_status(s: &StatusInfo) {
     if let Some(mode) = &s.mode {
         println!("  mode            : {mode}");
     }
+    if let Some(read_only) = s.read_only_guaranteed {
+        println!("  migration_read_only_guaranteed: {read_only}");
+    }
     if let (Some(marked), Some(required), Some(healthy)) = (
         s.marked_filesystems,
         s.required_filesystems,

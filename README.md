@@ -5,8 +5,10 @@
 > [the macOS development guide](docs/INSTALL_MACOS_DEV.md). Phase 02 provides
 > bundle/signing/lifecycle plumbing; Phases 03–06 add the deadline-safe ES
 > adapter, signer-aware identity, authenticated XPC/LocalAuthentication, and a
-> macOS-specific GTK status/pending-helper flow. Live protection is not claimed
-> until the entitled policy runtime and acceptance phases pass.
+> macOS-specific GTK status/pending-helper flow. Phase 07 connects browser
+> resource classification, fail-closed policy, interactive migration, and
+> root-bound read-only FFLAGS leases. Live entitled ES acceptance remains
+> externally blocked until an Apple-provisioned test host is available.
 
 > **Current status: SECURITY-ACCEPTED ALPHA ON TESTED ARCH HOST when configured
 > with `strict-filesystem`.** Conservative mode remains available and retains
@@ -59,6 +61,8 @@ for advanced pre-authorization; an
 explicit one-shot `SshLoadLease` for loading a private key into `ssh-agent`.
 The Linux fanotify backend does **not** claim that migration access is
 read-only because permission events do not reveal the opener's original flags.
+The macOS Endpoint Security backend responds to approved migration opens with
+`FREAD` only and reports `read_only_guaranteed = true` in backend status.
 
 **Explicit V1 non-goals:** root/SYSTEM compromise; kernel exploits; browser
 process injection; malicious browser extensions; browser remote-debugging

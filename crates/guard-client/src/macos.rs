@@ -453,6 +453,7 @@ mod tests {
             backend_kind: "macos-endpoint-security".into(),
             backend_diagnostic: None,
             enforcement_active: false,
+            read_only_guaranteed: Some(true),
             status: "NOT_ENFORCING".into(),
             mode: None,
             marked_filesystems: None,

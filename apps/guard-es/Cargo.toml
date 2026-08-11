@@ -12,6 +12,16 @@ es-poc = []
 guard-core.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
+anyhow.workspace = true
+guard-audit.workspace = true
+guard-browser.workspace = true
 guard-ipc.workspace = true
+guard-platform.workspace = true
+guard-runtime.workspace = true
+libc.workspace = true
 platform-macos.workspace = true
 serde_json.workspace = true
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+guard-test-fixtures.workspace = true
+tempfile.workspace = true

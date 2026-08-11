@@ -1,17 +1,23 @@
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Arc, Mutex, Weak};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex, RwLock, Weak};
 use std::time::Duration;
 
+use guard_core::resource::{
+    BrowserId, ProfileId, ProtectedResource, ProtectedResourceId, ProtectedResourceKind,
+};
 use guard_platform::BackendHealth;
 
 use crate::identity::{
     AuditProcessKey, ExecutableSnapshot, MacCodeIdentity, MacProcessFacts, MacProcessGraph,
 };
-pub use crate::pending::MacPendingPermission;
 use crate::pending::{
     DeadlineScheduler, DeadlineSchedulerHandle, HealthTracker, PendingInner, ResponseCode,
     ResponseSink,
+};
+pub use crate::pending::{
+    MacPendingPermission, ReadOnlyMacPendingPermission, ES_FFLAG_READ, ES_FFLAG_WRITE,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,12 +33,89 @@ pub struct AuthOpenFacts {
 
 pub struct MacAuthorizationEvent {
     pub facts: AuthOpenFacts,
+    pub resource: ProtectedResource,
+    /// Human-interaction lifetime after applying the ES safety margin and
+    /// product prompt cap. `None` means the event must not be prompted.
+    pub interactive_budget: Option<Duration>,
     pub permission: MacPendingPermission,
+}
+
+#[derive(Debug)]
+pub struct MacProtectedResources {
+    enabled: AtomicBool,
+    index: RwLock<crate::resource_index::MacResourceIndex>,
+}
+
+impl MacProtectedResources {
+    pub fn new(enabled: bool, index: crate::resource_index::MacResourceIndex) -> Self {
+        Self {
+            enabled: AtomicBool::new(enabled),
+            index: RwLock::new(index),
+        }
+    }
+
+    pub fn replace(
+        &self,
+        enabled: bool,
+        index: crate::resource_index::MacResourceIndex,
+    ) -> anyhow::Result<()> {
+        *self
+            .index
+            .write()
+            .map_err(|_| anyhow::anyhow!("macOS resource index lock is poisoned"))? = index;
+        self.enabled.store(enabled, Ordering::Release);
+        Ok(())
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled.load(Ordering::Acquire)
+    }
+
+    pub fn counts(&self) -> (usize, usize) {
+        let index = self
+            .index
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (index.concrete_count(), index.tree_root_count())
+    }
+
+    pub fn metadata_snapshot(&self) -> (Vec<ProtectedResource>, Vec<guard_browser::TreeRoot>) {
+        let index = self
+            .index
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (
+            index.resources().cloned().collect(),
+            index.trees().cloned().collect(),
+        )
+    }
+
+    fn classify(&self, facts: &AuthOpenFacts) -> Option<ProtectedResource> {
+        if !self.enabled() {
+            return None;
+        }
+        self.index
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .classify(
+                &facts.target,
+                crate::resource_index::FileIdentity {
+                    dev: facts.target_dev,
+                    ino: facts.target_ino,
+                },
+            )
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct EndpointSecurityConfig {
-    protected_exact_paths: HashSet<PathBuf>,
+    scope: ProtectionScope,
+}
+
+#[derive(Debug, Clone)]
+enum ProtectionScope {
+    Synthetic(HashSet<PathBuf>),
+    Browser(Arc<MacProtectedResources>),
 }
 
 impl EndpointSecurityConfig {
@@ -52,12 +135,31 @@ impl EndpointSecurityConfig {
             "at least one synthetic protected path is required"
         );
         Ok(Self {
-            protected_exact_paths,
+            scope: ProtectionScope::Synthetic(protected_exact_paths),
         })
     }
 
-    fn protects(&self, path: &Path) -> bool {
-        self.protected_exact_paths.contains(path)
+    pub fn browser(resources: Arc<MacProtectedResources>) -> Self {
+        Self {
+            scope: ProtectionScope::Browser(resources),
+        }
+    }
+
+    fn classify(&self, facts: &AuthOpenFacts) -> Option<ProtectedResource> {
+        match &self.scope {
+            ProtectionScope::Synthetic(paths) if paths.contains(&facts.target) => {
+                Some(ProtectedResource {
+                    id: ProtectedResourceId(facts.target.to_string_lossy().into_owned()),
+                    kind: ProtectedResourceKind::CookieStore,
+                    owner_uid: facts.process.uid,
+                    browser: Some(BrowserId("synthetic".into())),
+                    profile: Some(ProfileId("fixture".into())),
+                    path: facts.target.clone(),
+                })
+            }
+            ProtectionScope::Synthetic(_) => None,
+            ProtectionScope::Browser(resources) => resources.classify(facts),
+        }
     }
 }
 
@@ -240,22 +342,20 @@ impl CallbackContext {
             self.respond_immediate(client, message, 0);
             return;
         }
-        if !self.config.protects(&facts.target) {
+        let Some(resource) = self.config.classify(&facts) else {
             self.respond_immediate(client, message, facts.requested_fflags);
             return;
-        }
-        let budget = match crate::deadline::interactive_budget(
-            &crate::deadline::DarwinClock,
-            raw.deadline,
-        ) {
-            Ok(budget) => budget,
-            Err(error) => {
-                self.health
-                    .note(format!("protected AUTH_OPEN failed closed: {error}"));
-                self.respond_immediate(client, message, 0);
-                return;
-            }
         };
+        let response_budget =
+            match crate::deadline::response_budget(&crate::deadline::DarwinClock, raw.deadline) {
+                Ok(budget) => budget,
+                Err(error) => {
+                    self.health
+                        .note(format!("protected AUTH_OPEN failed closed: {error}"));
+                    self.respond_immediate(client, message, 0);
+                    return;
+                }
+            };
 
         // SAFETY: the ES message is live for this callback. Retaining it before
         // returning transfers one release obligation to RawResponseSink.
@@ -277,7 +377,7 @@ impl CallbackContext {
         });
         registry.push(weak.clone());
         drop(registry);
-        if let Err(error) = self.scheduler.schedule(weak, budget) {
+        if let Err(error) = self.scheduler.schedule(weak, response_budget) {
             self.health.degrade(format!(
                 "protected AUTH_OPEN failed closed because its timer could not be scheduled: {error}"
             ));
@@ -286,7 +386,16 @@ impl CallbackContext {
         }
         if self
             .sender
-            .send(MacAuthorizationEvent { facts, permission })
+            .send(MacAuthorizationEvent {
+                facts,
+                resource,
+                interactive_budget: crate::deadline::interactive_budget(
+                    &crate::deadline::DarwinClock,
+                    raw.deadline,
+                )
+                .ok(),
+                permission,
+            })
             .is_err()
         {
             self.health.degrade(
