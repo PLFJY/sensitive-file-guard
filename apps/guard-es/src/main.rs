@@ -78,9 +78,9 @@ fn run_poc() -> ExitCode {
     loop {
         match backend.recv_timeout(Duration::from_secs(1)) {
             Ok(event)
-                if event.facts.executable == allowed_executable
-                    && event.facts.executable_dev == allowed_metadata.dev()
-                    && event.facts.executable_ino == allowed_metadata.ino() =>
+                if event.facts.process.executable.path == allowed_executable
+                    && event.facts.process.executable.dev == allowed_metadata.dev()
+                    && event.facts.process.executable.ino == allowed_metadata.ino() =>
             {
                 if let Err(error) = event.permission.allow() {
                     eprintln!("guard-es: synthetic allow response failed: {error}");

@@ -5,6 +5,9 @@ use std::time::Duration;
 
 use guard_platform::BackendHealth;
 
+use crate::identity::{
+    AuditProcessKey, ExecutableSnapshot, MacCodeIdentity, MacProcessFacts, MacProcessGraph,
+};
 pub use crate::pending::MacPendingPermission;
 use crate::pending::{
     DeadlineScheduler, DeadlineSchedulerHandle, HealthTracker, PendingInner, ResponseCode,
@@ -16,15 +19,10 @@ pub struct AuthOpenFacts {
     /// Kernel FFLAGS requested by AUTH_OPEN. These are deliberately not POSIX
     /// `open(2)` O_* flags.
     pub requested_fflags: u32,
-    pub pid: u32,
-    pub uid: u32,
-    pub pidversion: u32,
+    pub process: MacProcessFacts,
     pub target: PathBuf,
     pub target_dev: u64,
     pub target_ino: u64,
-    pub executable: PathBuf,
-    pub executable_dev: u64,
-    pub executable_ino: u64,
 }
 
 pub struct MacAuthorizationEvent {
@@ -123,23 +121,25 @@ impl EndpointSecurityBackend {
         })?;
         let (sender, receiver) = mpsc::channel();
         let registry = Arc::new(Mutex::new(Vec::new()));
+        let process_graph = Arc::new(Mutex::new(MacProcessGraph::default()));
         let mut context = Box::new(CallbackContext {
             config,
             sender,
             scheduler: scheduler_handle,
             registry,
+            process_graph,
             health,
         });
         let client = NativeClient::create(context.as_mut() as *mut CallbackContext)?;
-        if client.subscribe_auth_open().is_err() {
+        if client.subscribe_required().is_err() {
             context
                 .health
-                .degrade("Endpoint Security AUTH_OPEN subscription failed");
+                .degrade("Endpoint Security AUTH_OPEN/process subscription failed");
             return Err(ClientCreateError::Internal);
         }
         context
             .health
-            .note("Endpoint Security AUTH_OPEN subscription is active");
+            .note("Endpoint Security AUTH_OPEN and bounded process graph subscriptions are active");
         Ok(Self {
             scheduler,
             client: Some(client),
@@ -163,6 +163,10 @@ impl EndpointSecurityBackend {
             diagnostic,
         }
     }
+
+    pub fn process_graph(&self) -> Arc<Mutex<MacProcessGraph>> {
+        Arc::clone(&self.context.process_graph)
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -182,8 +186,11 @@ impl Drop for EndpointSecurityBackend {
 #[cfg(target_os = "macos")]
 pub fn diagnose_client_creation() -> Result<(), ClientCreateError> {
     let mut marker = ();
-    let client =
-        NativeClient::create_with_callback(diagnostic_callback, (&mut marker as *mut ()).cast())?;
+    let client = NativeClient::create_with_callback(
+        diagnostic_callback,
+        diagnostic_process_callback,
+        (&mut marker as *mut ()).cast(),
+    )?;
     drop(client);
     Ok(())
 }
@@ -199,6 +206,7 @@ struct CallbackContext {
     sender: mpsc::Sender<MacAuthorizationEvent>,
     scheduler: DeadlineSchedulerHandle,
     registry: Arc<Mutex<Vec<Weak<PendingInner>>>>,
+    process_graph: Arc<Mutex<MacProcessGraph>>,
     health: Arc<HealthTracker>,
 }
 
@@ -220,6 +228,18 @@ impl CallbackContext {
                 return;
             }
         };
+        if let Err(error) = self
+            .process_graph
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .observe(facts.process.clone(), std::time::Instant::now())
+        {
+            self.health.note(format!(
+                "AUTH_OPEN failed closed because process identity could not be graphed: {error}"
+            ));
+            self.respond_immediate(client, message, 0);
+            return;
+        }
         if !self.config.protects(&facts.target) {
             self.respond_immediate(client, message, facts.requested_fflags);
             return;
@@ -272,6 +292,46 @@ impl CallbackContext {
             self.health.degrade(
                 "protected AUTH_OPEN failed closed because the authorization queue is unavailable",
             );
+        }
+    }
+
+    fn handle_process_event(
+        &self,
+        event_kind: u32,
+        process: &RawProcessFacts,
+        related: Option<&RawProcessFacts>,
+    ) {
+        let process = match process.to_facts() {
+            Ok(process) => process,
+            Err(error) => {
+                self.health
+                    .degrade(format!("process graph event was invalid: {error}"));
+                return;
+            }
+        };
+        let now = std::time::Instant::now();
+        let mut graph = self
+            .process_graph
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let result = match event_kind {
+            1 => {
+                let parent_result = related
+                    .ok_or_else(|| anyhow::anyhow!("fork event omitted parent process"))
+                    .and_then(RawProcessFacts::to_facts)
+                    .and_then(|parent| graph.observe(parent, now));
+                parent_result.and_then(|()| graph.observe(process, now))
+            }
+            2 => graph.observe(process, now),
+            3 => {
+                graph.remove_terminal(process.key);
+                Ok(())
+            }
+            _ => Err(anyhow::anyhow!("unknown process event kind {event_kind}")),
+        };
+        if let Err(error) = result {
+            self.health
+                .degrade(format!("process graph update failed: {error}"));
         }
     }
 
@@ -359,17 +419,19 @@ struct NativeClient {
 #[cfg(target_os = "macos")]
 impl NativeClient {
     fn create(context: *mut CallbackContext) -> Result<Self, ClientCreateError> {
-        Self::create_with_callback(auth_open_callback, context.cast())
+        Self::create_with_callback(auth_open_callback, process_callback, context.cast())
     }
 
     fn create_with_callback(
         callback: RawCallback,
+        process_callback: RawProcessCallback,
         context: *mut std::ffi::c_void,
     ) -> Result<Self, ClientCreateError> {
         let mut raw = std::ptr::null_mut();
         // SAFETY: context remains live in EndpointSecurityBackend for the
         // complete client lifetime; the C wrapper copies the callback block.
-        let result = unsafe { guard_es_client_create(&mut raw, callback, context) };
+        let result =
+            unsafe { guard_es_client_create(&mut raw, callback, process_callback, context) };
         match result {
             0 => Ok(Self {
                 raw,
@@ -385,11 +447,11 @@ impl NativeClient {
         }
     }
 
-    fn subscribe_auth_open(&self) -> anyhow::Result<()> {
+    fn subscribe_required(&self) -> anyhow::Result<()> {
         // SAFETY: raw is a live guard_es_client_t owned by self.
         anyhow::ensure!(
-            unsafe { guard_es_client_subscribe_auth_open(self.raw) } == 0,
-            "es_subscribe(AUTH_OPEN) failed"
+            unsafe { guard_es_client_subscribe_required(self.raw) } == 0,
+            "es_subscribe(AUTH_OPEN/FORK/EXEC/EXIT) failed"
         );
         Ok(())
     }
@@ -409,50 +471,150 @@ impl Drop for NativeClient {
 struct RawAuthOpenEvent {
     requested_flags: u32,
     deadline: u64,
-    pid: i32,
-    uid: u32,
-    pidversion: i32,
     target_dev: u64,
     target_ino: u64,
     target_path: *const u8,
     target_path_len: usize,
     target_path_truncated: bool,
+    process: RawProcessFacts,
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct RawProcessFacts {
+    pid: i32,
+    uid: u32,
+    gid: u32,
+    pidversion: i32,
+    parent_pid: i32,
+    parent_pidversion: i32,
+    parent_identity_available: bool,
+    responsible_pid: i32,
+    responsible_pidversion: i32,
+    responsible_identity_available: bool,
+    start_time_us: u64,
     executable_dev: u64,
     executable_ino: u64,
+    executable_mode: u32,
+    executable_owner_uid: u32,
+    executable_size: u64,
+    executable_mtime_ns: i64,
+    executable_ctime_ns: i64,
     executable_path: *const u8,
     executable_path_len: usize,
     executable_path_truncated: bool,
+    code_signing_flags: u32,
+    code_signing_valid: bool,
+    platform_binary: bool,
+    team_id: *const u8,
+    team_id_len: usize,
+    signing_id: *const u8,
+    signing_id_len: usize,
+    cdhash: [u8; 20],
 }
 
 #[cfg(target_os = "macos")]
 impl RawAuthOpenEvent {
     fn to_facts(&self) -> anyhow::Result<AuthOpenFacts> {
-        anyhow::ensure!(self.pid > 0, "invalid or missing process PID");
-        anyhow::ensure!(self.pidversion >= 0, "invalid process PID version");
         anyhow::ensure!(
-            !self.target_path_truncated && !self.executable_path_truncated,
-            "Endpoint Security supplied a truncated path"
+            !self.target_path_truncated,
+            "Endpoint Security supplied a truncated target path"
         );
         anyhow::ensure!(
-            self.target_dev != 0
-                && self.target_ino != 0
-                && self.executable_dev != 0
-                && self.executable_ino != 0,
-            "Endpoint Security supplied incomplete file identity"
+            self.target_dev != 0 && self.target_ino != 0,
+            "Endpoint Security supplied incomplete target file identity"
         );
         Ok(AuthOpenFacts {
             requested_fflags: self.requested_flags,
-            pid: self.pid as u32,
-            uid: self.uid,
-            pidversion: self.pidversion as u32,
+            process: self.process.to_facts()?,
             target: token_path(self.target_path, self.target_path_len)?,
             target_dev: self.target_dev,
             target_ino: self.target_ino,
-            executable: token_path(self.executable_path, self.executable_path_len)?,
-            executable_dev: self.executable_dev,
-            executable_ino: self.executable_ino,
         })
     }
+}
+
+#[cfg(target_os = "macos")]
+impl RawProcessFacts {
+    fn to_facts(&self) -> anyhow::Result<MacProcessFacts> {
+        anyhow::ensure!(self.pid > 0, "invalid or missing process PID");
+        anyhow::ensure!(self.pidversion >= 0, "invalid process PID version");
+        anyhow::ensure!(self.start_time_us > 0, "missing ES process start time");
+        anyhow::ensure!(
+            !self.executable_path_truncated,
+            "Endpoint Security supplied a truncated executable path"
+        );
+        anyhow::ensure!(
+            self.executable_dev != 0 && self.executable_ino != 0,
+            "Endpoint Security supplied incomplete executable identity"
+        );
+        let facts = MacProcessFacts {
+            key: AuditProcessKey {
+                pid: self.pid as u32,
+                pidversion: self.pidversion as u32,
+            },
+            uid: self.uid,
+            gid: self.gid,
+            start_time_us: self.start_time_us,
+            executable: ExecutableSnapshot {
+                path: token_path(self.executable_path, self.executable_path_len)?,
+                dev: self.executable_dev,
+                ino: self.executable_ino,
+                owner_uid: self.executable_owner_uid,
+                mode: self.executable_mode,
+                size: self.executable_size,
+                mtime_ns: self.executable_mtime_ns,
+                ctime_ns: self.executable_ctime_ns,
+            },
+            code: MacCodeIdentity {
+                valid: self.code_signing_valid,
+                platform_binary: self.platform_binary,
+                flags: self.code_signing_flags,
+                team_id: token_optional_string(self.team_id, self.team_id_len)?,
+                signing_id: token_optional_string(self.signing_id, self.signing_id_len)?,
+                cdhash: self.cdhash,
+            },
+            parent: audit_key(
+                self.parent_identity_available,
+                self.parent_pid,
+                self.parent_pidversion,
+            )?,
+            responsible: audit_key(
+                self.responsible_identity_available,
+                self.responsible_pid,
+                self.responsible_pidversion,
+            )?,
+        };
+        facts.validate()?;
+        Ok(facts)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn audit_key(
+    available: bool,
+    pid: i32,
+    pidversion: i32,
+) -> anyhow::Result<Option<AuditProcessKey>> {
+    if !available || pid <= 1 {
+        return Ok(None);
+    }
+    anyhow::ensure!(pidversion >= 0, "invalid parent/responsible PID version");
+    Ok(Some(AuditProcessKey {
+        pid: pid as u32,
+        pidversion: pidversion as u32,
+    }))
+}
+
+#[cfg(target_os = "macos")]
+fn token_optional_string(pointer: *const u8, length: usize) -> anyhow::Result<Option<String>> {
+    if length == 0 {
+        return Ok(None);
+    }
+    anyhow::ensure!(!pointer.is_null(), "missing signing token");
+    // SAFETY: the token is copied synchronously while the ES message is live.
+    let bytes = unsafe { std::slice::from_raw_parts(pointer, length) };
+    Ok(Some(std::str::from_utf8(bytes)?.to_owned()))
 }
 
 #[cfg(target_os = "macos")]
@@ -473,6 +635,14 @@ type RawCallback = unsafe extern "C" fn(
     *const std::ffi::c_void,
     *const std::ffi::c_void,
     *const RawAuthOpenEvent,
+);
+
+#[cfg(target_os = "macos")]
+type RawProcessCallback = unsafe extern "C" fn(
+    *mut std::ffi::c_void,
+    u32,
+    *const RawProcessFacts,
+    *const RawProcessFacts,
 );
 
 #[cfg(target_os = "macos")]
@@ -506,6 +676,38 @@ unsafe extern "C" fn auth_open_callback(
 }
 
 #[cfg(target_os = "macos")]
+unsafe extern "C" fn process_callback(
+    context: *mut std::ffi::c_void,
+    event_kind: u32,
+    process: *const RawProcessFacts,
+    related: *const RawProcessFacts,
+) {
+    // SAFETY: callback pointers and context are owned by the live C shim call.
+    let context = unsafe { &*context.cast::<CallbackContext>() };
+    if process.is_null() {
+        context
+            .health
+            .degrade("process callback omitted process facts");
+        return;
+    }
+    // SAFETY: non-null normalized structs live for this callback only.
+    let process = unsafe { &*process };
+    let related = if related.is_null() {
+        None
+    } else {
+        // SAFETY: checked non-null and copied only during this callback.
+        Some(unsafe { &*related })
+    };
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        context.handle_process_event(event_kind, process, related);
+    }))
+    .is_err()
+    {
+        std::process::abort();
+    }
+}
+
+#[cfg(target_os = "macos")]
 unsafe extern "C" fn diagnostic_callback(
     _context: *mut std::ffi::c_void,
     client: *const std::ffi::c_void,
@@ -520,13 +722,23 @@ unsafe extern "C" fn diagnostic_callback(
 }
 
 #[cfg(target_os = "macos")]
+unsafe extern "C" fn diagnostic_process_callback(
+    _context: *mut std::ffi::c_void,
+    _event_kind: u32,
+    _process: *const RawProcessFacts,
+    _related: *const RawProcessFacts,
+) {
+}
+
+#[cfg(target_os = "macos")]
 extern "C" {
     fn guard_es_client_create(
         client: *mut *mut std::ffi::c_void,
         callback: RawCallback,
+        process_callback: RawProcessCallback,
         context: *mut std::ffi::c_void,
     ) -> i32;
-    fn guard_es_client_subscribe_auth_open(client: *mut std::ffi::c_void) -> i32;
+    fn guard_es_client_subscribe_required(client: *mut std::ffi::c_void) -> i32;
     fn guard_es_client_delete(client: *mut std::ffi::c_void) -> i32;
     fn guard_es_message_retain(message: *const std::ffi::c_void);
     fn guard_es_message_release(message: *const std::ffi::c_void);

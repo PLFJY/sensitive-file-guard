@@ -12,8 +12,8 @@ if rg -n 'NetworkExtension|NEFilter|systemextensionsctl' \
 fi
 if rg -n 'ES_EVENT_TYPE_(AUTH|NOTIFY)_[A-Z_]+' \
     "$repo_dir/native/macos/endpoint_security_bridge.c" \
-    | rg -v 'ES_EVENT_TYPE_AUTH_OPEN'; then
-    echo "macOS boundary violation: Phase 03 subscribes to an ES event other than AUTH_OPEN" >&2
+    | rg -v 'ES_EVENT_TYPE_(AUTH_OPEN|NOTIFY_FORK|NOTIFY_EXEC|NOTIFY_EXIT)'; then
+    echo "macOS boundary violation: unsupported Endpoint Security event subscription" >&2
     failed=1
 fi
 if rg -n 'es_respond_auth_result|es_copy_message|es_free_message' \

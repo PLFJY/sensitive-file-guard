@@ -1,10 +1,13 @@
 # macOS Endpoint Security authorization backend
 
-Phase 03 implements the narrow `ES_EVENT_TYPE_AUTH_OPEN` primitive. It is not
-yet wired to browser or SSH enrollment policy.
+Phase 03 implements the narrow `ES_EVENT_TYPE_AUTH_OPEN` authorization
+primitive. Phase 04 additionally subscribes to `NOTIFY_FORK`, `NOTIFY_EXEC`,
+and `NOTIFY_EXIT` solely to maintain a bounded, stable-instance process graph.
+There are no other authorization event subscriptions, and the backend is not
+yet wired to browser or SSH product policy.
 
 The C shim includes Apple's current SDK headers and exposes only client
-lifecycle, the single AUTH_OPEN subscription, normalized event facts,
+lifecycle, AUTH_OPEN plus the three process-graph notifications, normalized facts,
 retain/release, flags response, and Mach time conversion. Rust owns all state,
 classification, deadlines, pending permissions, and health reporting. The shim
 hardcodes `cache=false` and cannot make a product policy decision.

@@ -64,3 +64,6 @@ Phase 03's real synthetic AUTH_OPEN allow/deny acceptance script is
 and Endpoint Security provisioning profiles, and an explicit signing identity.
 It creates only a temporary synthetic canary and never accesses browser or SSH
 data.
+
+Process identity, verified browser discovery, and the distinct macOS config
+format are described in [the macOS identity/config guide](MACOS_IDENTITY_AND_CONFIG.md).

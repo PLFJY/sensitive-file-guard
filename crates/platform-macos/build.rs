@@ -3,6 +3,8 @@ fn main() {
     println!("cargo:rerun-if-changed=../../native/macos/system_extension_bridge.h");
     println!("cargo:rerun-if-changed=../../native/macos/endpoint_security_bridge.c");
     println!("cargo:rerun-if-changed=../../native/macos/endpoint_security_bridge.h");
+    println!("cargo:rerun-if-changed=../../native/macos/code_signature_bridge.m");
+    println!("cargo:rerun-if-changed=../../native/macos/code_signature_bridge.h");
 
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
         return;
@@ -10,6 +12,7 @@ fn main() {
 
     cc::Build::new()
         .file("../../native/macos/system_extension_bridge.m")
+        .file("../../native/macos/code_signature_bridge.m")
         .flag("-fobjc-arc")
         .flag("-fblocks")
         .flag("-fmodules")

@@ -997,7 +997,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cc",
+ "guard-browser",
+ "guard-core",
  "guard-platform",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
 ]
 
 [[package]]
