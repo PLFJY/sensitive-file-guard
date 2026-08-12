@@ -81,6 +81,12 @@ mkdir -p "$test_app/Contents/MacOS" "$test_app/Contents/Library/LaunchAgents"
 cp "$app_bundle/Contents/Info.plist" "$test_app/Contents/Info.plist"
 cp "$app_bundle/Contents/Library/LaunchAgents/$app_identifier.guard-notify.plist" \
     "$test_app/Contents/Library/LaunchAgents/$app_identifier.guard-notify.plist"
+if [ -d "$app_bundle/Contents/Frameworks" ]; then
+    cp -R "$app_bundle/Contents/Frameworks" "$test_app/Contents/Frameworks"
+fi
+if [ -d "$app_bundle/Contents/Resources" ]; then
+    cp -R "$app_bundle/Contents/Resources" "$test_app/Contents/Resources"
+fi
 cp "$guard_ui" "$test_ui"
 cp "$guard_notify" "$test_app/Contents/MacOS/guard-notify"
 codesign --force --sign "$signing_authority" \

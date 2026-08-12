@@ -1,5 +1,36 @@
 # SSH private-key access model
 
+Both backends mediate an enrolled SSH private key before a new reader receives
+file data. Policy uses exact key identity, owner UID, reader PID/start token,
+canonical executable path/device/inode, and verified ancestry. A successful
+manual approval creates a ten-second in-memory `SshReadAccessLease` bound to
+that exact key and reader tree. Another root, expiry, root exit, identity
+change, cross UID, timeout, or restart cannot reuse it.
+
+## macOS
+
+The Endpoint Security system extension retains the specific `AUTH_OPEN`
+operation within its bounded kernel deadline. The GTK prompt is metadata-only.
+Allow requires device-owner LocalAuthentication in a correctly signed Guard
+client; after authentication the extension revalidates the current reader and
+key identity before responding. Block, close, insufficient deadline, queue
+pressure, disconnect, reader exit, timeout, response error, or late
+authentication fails closed and creates no lease.
+
+The pending helper only observes metadata and opens the signed Guard UI. It
+cannot resolve a request. XPC accepts only exact Team/signing identifiers and
+the connection EUID; an ad-hoc or same-Team unlisted same-UID helper cannot
+self-approve, and no hidden noninteractive client flag skips
+LocalAuthentication.
+
+The specialized `guardctl ssh load` broker is intentionally unsupported on the
+macOS Alpha and says so explicitly. Ordinary `ssh-add` is an ordinary reader
+and uses the same manual approval/process-tree lease path. SSH-agent signing
+authority after a key is loaded remains outside this file-read firewall's V1
+scope.
+
+## Linux
+
 Guardd mediates an enrolled SSH private key at `FAN_ACCESS_PERM`, before a
 reader receives file data. A normal read enters a bounded daemon-memory queue
 keyed by the key, UID, and stable reader root. Repeated reads from that root

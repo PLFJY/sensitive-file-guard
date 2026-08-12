@@ -362,12 +362,8 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
     };
     let req_bytes = serde_json::to_vec(&req)?;
 
-    let resp_bytes = IpcClient::request(&cli.socket, &req_bytes).map_err(|e| {
-        anyhow::anyhow!(
-            "connecting to guardd IPC socket {}: {e}",
-            cli.socket.display()
-        )
-    })?;
+    let resp_bytes = IpcClient::request(&cli.socket, &req_bytes)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", ipc_connection_context(&cli.socket)))?;
     let resp: Response = serde_json::from_slice(&resp_bytes)?;
 
     if !resp.ok {
@@ -390,6 +386,18 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
         print_human(&resp);
     }
     Ok(())
+}
+
+fn ipc_connection_context(socket: &std::path::Path) -> String {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = socket;
+        "connecting to the authenticated Endpoint Security XPC service".into()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        format!("connecting to guardd IPC socket {}", socket.display())
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1894,6 +1902,14 @@ mod tests {
     //! integration script.
 
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_connection_error_names_xpc_not_linux_socket() {
+        let context = ipc_connection_context(Path::new("/run/guardd/guardd.sock"));
+        assert!(context.contains("Endpoint Security XPC"));
+        assert!(!context.contains("socket"));
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

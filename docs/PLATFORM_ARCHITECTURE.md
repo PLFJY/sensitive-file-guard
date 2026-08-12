@@ -3,8 +3,10 @@
 ## Purpose
 
 This document defines the production boundary shared by the Linux reference
-implementation and macOS backend work. It does not yet claim a working macOS
-enforcement backend.
+implementation and the functionally complete macOS backend. Platform security
+acceptance is recorded separately: macOS still requires a normal-SIP,
+Apple-provisioned Endpoint Security/FDA run before it can be called
+security-accepted.
 
 ## Portable layers
 
@@ -22,10 +24,12 @@ The reusable direction is:
 guard-core / guard-browser / guard-ssh / guard-ipc / guard-audit
                               ↑
              guard-platform / guard-runtime
-                              ↑
-                       platform-linux
-                              ↑
-                  guardd / guardctl composition
+                    ↑                    ↑
+             platform-linux       platform-macos
+                    ↑                    ↑
+                 guardd          guard-es system extension
+                         ↑      ↑
+                  guardctl / Guard / guard-notify
 ```
 
 `guard-ui` and `guard-notify` consume `guard-client`, IPC DTOs, and portable
@@ -138,13 +142,24 @@ direction with a small repository-readable rule.
 ## macOS mapping
 
 `platform-macos` implements deadline-safe Endpoint Security permission owners,
-process identity/lifecycle, signer-aware browser discovery, and authenticated
-XPC. The XPC adapter carries the same `guard-ipc` JSON bytes used by the Unix
-transport and authenticates exact signed Guard client identities plus the
+process identity/lifecycle, signer-aware browser discovery, bounded namespace
+alias tracking, SystemExtensions/SMAppService adapters, and authenticated XPC.
+The XPC adapter carries the same versioned `guard-ipc` JSON bytes used by the
+Unix transport and authenticates exact signed Guard client identities plus the
 transport EUID. `guard-client::macos::MacGuardClient` performs
-LocalAuthentication before any Allow and sends Block directly. Product policy
-and pending/lease transitions remain in `guard-core` and `guard-runtime`.
+LocalAuthentication before any Allow and sends Block directly. `guard-es` is
+the macOS composition root inside the Endpoint Security system extension;
+product policy and pending/lease transitions remain in `guard-core` and
+`guard-runtime`.
 
-No Network Extension or SSH network containment is required by the current
-model. Live entitled Endpoint Security execution remains a separate acceptance
-gate from compile-time and synthetic adapter coverage.
+macOS `AUTH_OPEN`, `AUTH_LINK`, and `AUTH_RENAME` responses remain at the OS
+boundary. Deterministic allow/deny and namespace decisions never wait for UI.
+Only typed browser-migration and SSH-read candidates retain an opaque
+authorization operation within its bounded kernel deadline. Unknown identity,
+deadline pressure, queue pressure, XPC disconnect, process exit, and response
+errors fail closed and degrade typed health.
+
+No Network Extension, BPF equivalent, second privileged daemon, or SSH network
+containment is required by the current model. Live entitled Endpoint Security
+execution with FDA and normal SIP remains a separate acceptance gate from
+compile-time, synthetic adapter, authenticated-XPC, and packaging coverage.

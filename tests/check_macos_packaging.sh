@@ -7,7 +7,7 @@ failed=0
 
 for name in bundle-gtk-runtime.sh build-release-app.sh verify-bundle.sh \
     notarize-release.sh diagnose.sh uninstall-recovery.sh \
-    test-release-update.sh; do
+    test-release-update.sh preflight-final-acceptance.sh; do
     if [ ! -x "$scripts/$name" ]; then
         echo "macOS packaging violation: missing executable script $name" >&2
         failed=1
@@ -43,7 +43,8 @@ fi
 if rg -n 'csrutil[[:space:]]+disable|spctl[[:space:]]+--master-disable|tccutil[[:space:]]+reset|docker' \
     "$scripts/bundle-gtk-runtime.sh" "$scripts/build-release-app.sh" \
     "$scripts/notarize-release.sh" "$scripts/diagnose.sh" \
-    "$scripts/uninstall-recovery.sh" "$scripts/test-release-update.sh"; then
+    "$scripts/uninstall-recovery.sh" "$scripts/test-release-update.sh" \
+    "$scripts/preflight-final-acceptance.sh"; then
     echo "macOS packaging violation: security relaxation or Docker command found" >&2
     failed=1
 fi

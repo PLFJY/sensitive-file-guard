@@ -14,6 +14,26 @@ line, window title, or desktop entry.
 | Fake `/tmp/chrome` | Chrome | Deny immediately |
 | Any other UID | Chrome | Deny immediately |
 
+## Platform authorization boundary
+
+The policy table and exact process-tree lease scope are shared, but the held OS
+operation differs:
+
+- Linux retains one fanotify permission event and uses non-cached Polkit for
+  Allow. The trigger's original access flags are unavailable, so Linux does not
+  claim a read-only import.
+- macOS retains one Endpoint Security `AUTH_OPEN` operation only within its
+  effective kernel deadline. Allow uses device-owner LocalAuthentication,
+  revalidates the exact signed importer and source root, and responds with
+  `FREAD` only. macOS reports `read_only_guaranteed=true` when that live backend
+  guarantee is active.
+
+On both platforms unknown/fake/cross-UID processes are denied immediately and
+never enter the human queue. Closing, blocking, timeout, process exit, identity
+change, queue pressure, disconnect, or a late authorization completion denies
+and creates no lease. Temporary migration leases and sibling grace are memory
+only and disappear on backend restart/update.
+
 ## Own browser
 
 An enrolled, trusted browser reading its own enrolled profile is allowed with
@@ -77,7 +97,10 @@ is never written to disk, and cannot be reused by another executable or after
 the short window expires.
 
 Linux fanotify does not expose the original open flags, so this is not a
-provable read-only grant. The UI correctly says “allow this import.”
+provable read-only grant. The UI correctly says “allow this import.” On macOS,
+the retained `AUTH_OPEN` response strips write flags and the UI/status may
+accurately describe the import as read-only only when the backend reports that
+live guarantee.
 
 ## Rejected import
 

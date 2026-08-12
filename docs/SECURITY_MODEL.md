@@ -1,15 +1,24 @@
-# Sensitive Data Firewall — Linux V1 Security Model
+# Sensitive Data Firewall — V1 Security Model
 
 This document defines the guarantees, non-goals, and known limitations of the
-Linux V1 implementation of the Sensitive Data Firewall (`guardd`). It is the
-authoritative reference for what the firewall does and does not protect against.
+Sensitive Data Firewall. Shared policy invariants apply to both platform
+backends; OS-specific guarantees and acceptance status are explicit below.
 
-**Acceptance state:** **SECURITY-ACCEPTED ALPHA ON TESTED ARCH HOST only in
+**Linux acceptance state:** **SECURITY-ACCEPTED ALPHA ON TESTED ARCH HOST only in
 `strict-filesystem` mode for browser protection.** Interactive SSH read
 authorization is implemented and covered by synthetic workspace tests; live
 fanotify/Polkit desktop acceptance remains environment-dependent.
 Conservative mode remains implementation-complete but is not promoted because
 its replacement race remained readable in 10,000/10,000 iterations.
+
+**macOS acceptance state:** **FUNCTIONALLY COMPLETE / SECURITY ACCEPTANCE
+BLOCKED** on the recorded macOS 26.6.1 arm64 host. The self-contained app,
+deadline-safe Endpoint Security adapter, signer-aware identity, authenticated
+XPC, LocalAuthentication gates, browser/SSH policy, namespace mediation,
+health, update, and recovery paths pass locally testable gates. The host lacks
+Apple-authorized provisioning/Developer ID/notary credentials and an active
+FDA-authorized extension, and SIP is disabled. Consequently no real entitled
+pre-open, browser, SSH, namespace, or performance result is claimed.
 
 ## Mission
 
@@ -23,6 +32,45 @@ requires a non-cached Polkit check and creates a ten-second in-memory lease
 bound to one key, UID, and verified process tree. Block, timeout, close, or
 identity change denies the request. The full flow is in
 [SSH_ACCESS_MODEL.md](SSH_ACCESS_MODEL.md).
+
+## Shared authorization invariants
+
+- Process name is never identity. Authorization requires PID plus start token,
+  canonical executable path, executable device/inode, UID, and—on macOS—exact
+  signing facts where the role is signed.
+- Deterministic allow/deny returns on the OS callback path. Only typed browser
+  migration and SSH read confirmations may retain the affected opaque OS
+  operation within a bounded deadline.
+- Missing identity, insufficient deadline, queue pressure, target exit,
+  identity change, transport disconnect, response error, timeout, and drop fail
+  closed. Allow revalidates current facts after human authentication.
+- Browser migration leases and SSH read leases are narrow, expiring,
+  process-tree-bound, memory-only capabilities. They do not survive backend
+  restart or update.
+- Audit is metadata-only and must never contain cookie/password/session values,
+  browser rows, private-key bytes, or LocalAuthentication/Polkit secrets.
+
+## macOS enforcement boundary
+
+The system extension subscribes only to Endpoint Security `AUTH_OPEN`,
+`AUTH_LINK`, `AUTH_RENAME`, and the process lifecycle events needed for exact
+identity/ancestry. `AUTH_OPEN` denies unknown protected reads before an fd is
+returned. Approved migration responses are limited to `FREAD`. Namespace
+events prevent untrusted hardlink/rename escape and sensitive-destination
+replacement while allowing the exact owning browser's narrow same-profile
+atomic update.
+
+Authenticated XPC checks exact signed client identifiers, Team ID, and
+transport EUID. An unlisted same-Team process is not a Guard client.
+LocalAuthentication is performed by the signed client before Allow; a raw XPC
+caller, pending helper, replay, or hidden noninteractive flag cannot grant
+itself access. Endpoint Security sequence gaps, response failures, and alias
+index saturation degrade typed product health rather than remaining invisible.
+
+These are implemented guarantees, but final security acceptance additionally
+requires the real Apple-authorized extension to be active with FDA while SIP is
+enabled. A `codesign` entitlement claim or local XPC test is not evidence of
+that platform authorization.
 
 ## Guarantees
 

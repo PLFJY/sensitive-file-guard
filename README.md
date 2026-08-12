@@ -1,4 +1,17 @@
-# Sensitive Data Firewall (Linux V1)
+# Sensitive Data Firewall
+
+Platform status:
+
+| Platform | Status |
+|---|---|
+| Linux | SECURITY-ACCEPTED ALPHA on the recorded Arch `strict-filesystem` host; not rerun during the macOS-only phases |
+| macOS | FUNCTIONALLY COMPLETE / SECURITY ACCEPTANCE BLOCKED on macOS 26.6.1 arm64 |
+
+The macOS blocker is platform acceptance, not an unreported pass: this host has
+no Apple-provisioned Endpoint Security profiles, no Developer ID identity or
+notary profile, no active/FDA-authorized extension, and SIP is currently
+disabled. See the [macOS install and status guide](docs/INSTALL_MACOS.md) and
+[Phase 11 report](reports/mac/macos-phase-11.md).
 
 > **macOS development status:** the native app and Endpoint Security system
 > extension and GTK control-plane work are documented in
@@ -21,7 +34,7 @@
 > Live entitled ES acceptance remains
 > externally blocked until an Apple-provisioned test host is available.
 
-> **Current status: SECURITY-ACCEPTED ALPHA ON TESTED ARCH HOST when configured
+> **Linux status: SECURITY-ACCEPTED ALPHA ON TESTED ARCH HOST when configured
 > with `strict-filesystem`.** Conservative mode remains available and retains
 > its measured replacement-inode race; it is not the security-accepted backend.
 > This is an Alpha with the explicit non-goals below, not a claim of protection
