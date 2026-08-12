@@ -1,6 +1,8 @@
 #import "system_extension_bridge.h"
 
 #import <Foundation/Foundation.h>
+#import <Security/SecCode.h>
+#import <Security/SecStaticCode.h>
 #import <Security/SecTask.h>
 #import <SystemExtensions/SystemExtensions.h>
 
@@ -230,5 +232,65 @@ int guard_has_entitlement(const char *entitlement, char *error, size_t error_len
     if (value != NULL) {
         CFRelease(value);
     }
+    return present ? 1 : 0;
+}
+
+static void GuardCopyOSStatus(OSStatus status, char *error, size_t error_len) {
+    CFStringRef message = SecCopyErrorMessageString(status, NULL);
+    if (message == NULL) {
+        GuardCopyCString([NSString stringWithFormat:@"Security.framework error %d", (int)status],
+                         error, error_len);
+        return;
+    }
+    GuardCopyCString((__bridge NSString *)message, error, error_len);
+    CFRelease(message);
+}
+
+int guard_path_has_entitlement(const char *path, const char *entitlement,
+                               char *error, size_t error_len) {
+    if (path == NULL || entitlement == NULL) {
+        GuardCopyCString(@"missing code path or entitlement name", error, error_len);
+        return -1;
+    }
+    NSString *codePath = [NSString stringWithUTF8String:path];
+    NSString *entitlementName = [NSString stringWithUTF8String:entitlement];
+    if (codePath.length == 0 || entitlementName.length == 0) {
+        GuardCopyCString(@"invalid code path or entitlement name", error, error_len);
+        return -1;
+    }
+
+    SecStaticCodeRef code = NULL;
+    NSURL *codeURL = [NSURL fileURLWithPath:codePath];
+    OSStatus status = SecStaticCodeCreateWithPath(
+        (__bridge CFURLRef)codeURL, kSecCSDefaultFlags, &code);
+    if (status != errSecSuccess) {
+        GuardCopyOSStatus(status, error, error_len);
+        return -1;
+    }
+    status = SecStaticCodeCheckValidity(code, kSecCSStrictValidate, NULL);
+    if (status != errSecSuccess) {
+        CFRelease(code);
+        GuardCopyOSStatus(status, error, error_len);
+        return -1;
+    }
+
+    CFDictionaryRef information = NULL;
+    status = SecCodeCopySigningInformation(
+        code, kSecCSSigningInformation, &information);
+    CFRelease(code);
+    if (status != errSecSuccess) {
+        GuardCopyOSStatus(status, error, error_len);
+        return -1;
+    }
+    CFTypeRef entitlementObject = CFDictionaryGetValue(
+        information, kSecCodeInfoEntitlementsDict);
+    CFDictionaryRef entitlements = entitlementObject != NULL
+        && CFGetTypeID(entitlementObject) == CFDictionaryGetTypeID()
+        ? (CFDictionaryRef)entitlementObject : NULL;
+    CFTypeRef value = entitlements == NULL ? NULL : CFDictionaryGetValue(
+        entitlements, (__bridge CFStringRef)entitlementName);
+    BOOL present = value != NULL && CFGetTypeID(value) == CFBooleanGetTypeID()
+                   && CFBooleanGetValue((CFBooleanRef)value);
+    CFRelease(information);
     return present ? 1 : 0;
 }

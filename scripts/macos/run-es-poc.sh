@@ -42,6 +42,7 @@ activated=0
 app_root=${MACOS_ES_POC_ROOT:-"$repo_dir/build/macos-es-poc"}
 app="$app_root/Guard.app"
 installed_app=${MACOS_ES_POC_INSTALLED_APP:-"/Applications/Guard ES PoC.app"}
+extension_bundle_id=${SYSTEM_EXTENSION_BUNDLE_ID:-io.github.plfjy.SensitiveFileGuard.guard-es}
 
 cleanup() {
     if [ "$activated" -eq 1 ]; then
@@ -102,6 +103,42 @@ if [ "$attempt" -eq 120 ]; then
     echo "BLOCKED: system extension did not become active within 120 seconds" >&2
     exit 1
 fi
+
+system_extension_evidence=$(systemextensionsctl list 2>&1)
+printf '%s\n' "$system_extension_evidence" | grep -F "$extension_bundle_id" || {
+    echo "FAIL: systemextensionsctl does not list $extension_bundle_id" >&2
+    exit 1
+}
+printf '%s\n' "$system_extension_evidence" | awk -v id="$extension_bundle_id" '
+    index($0, id) > 0 && $1 == "*" && $2 == "*" { active = 1 }
+    END { exit active ? 0 : 1 }
+' || {
+    echo "FAIL: lifecycle delegate completed but systemextensionsctl does not show the exact extension enabled and active" >&2
+    exit 1
+}
+
+extension_process=
+attempt=0
+while [ "$attempt" -lt 10 ] && [ -z "$extension_process" ]; do
+    for pid in $(pgrep -x guard-es 2>/dev/null || true); do
+        executable=$(ps -p "$pid" -o comm= 2>/dev/null | sed 's/^[[:space:]]*//')
+        test -x "$executable" || continue
+        signing_id=$(codesign -dvv "$executable" 2>&1 | sed -n 's/^Identifier=//p')
+        if [ "$signing_id" = "$extension_bundle_id" ]; then
+            extension_process="$pid:$executable"
+            break
+        fi
+    done
+    if [ -z "$extension_process" ]; then
+        attempt=$((attempt + 1))
+        sleep 1
+    fi
+done
+test -n "$extension_process" || {
+    echo "FAIL: the exact signed guard-es process is not running; do not touch the fixture" >&2
+    exit 1
+}
+echo "guard_es_process=$extension_process"
 
 if /usr/bin/cat "$fixture" >"$deny_output" 2>&1; then
     echo "FAIL: non-enrolled /usr/bin/cat read the protected synthetic fixture" >&2

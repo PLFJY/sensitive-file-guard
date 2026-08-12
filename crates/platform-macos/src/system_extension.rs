@@ -1,4 +1,5 @@
 use std::ffi::CString;
+use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LifecycleState {
@@ -130,6 +131,24 @@ pub fn endpoint_security_entitlement_present() -> anyhow::Result<bool> {
 }
 
 #[cfg(target_os = "macos")]
+pub fn bundled_endpoint_security_entitlement_present(
+    app: &Path,
+    extension_bundle_id: &str,
+) -> anyhow::Result<bool> {
+    let extension =
+        crate::bundle::DevelopmentBundleLayout::new(app, extension_bundle_id)?.extension();
+    path_entitlement_present(&extension, "com.apple.developer.endpoint-security.client")
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn bundled_endpoint_security_entitlement_present(
+    _app: &Path,
+    _extension_bundle_id: &str,
+) -> anyhow::Result<bool> {
+    anyhow::bail!("bundle entitlement inspection is available only on macOS")
+}
+
+#[cfg(target_os = "macos")]
 fn entitlement_present(entitlement: &str) -> anyhow::Result<bool> {
     let entitlement = CString::new(entitlement)?;
     let mut error = vec![0_i8; 1024];
@@ -143,6 +162,33 @@ fn entitlement_present(entitlement: &str) -> anyhow::Result<bool> {
         _ => anyhow::bail!(
             buffer_string(&error).unwrap_or_else(|| "entitlement inspection failed".to_owned())
         ),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn path_entitlement_present(path: &Path, entitlement: &str) -> anyhow::Result<bool> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = CString::new(path.as_os_str().as_bytes())?;
+    let entitlement = CString::new(entitlement)?;
+    let mut error = vec![0_i8; 1024];
+    // SAFETY: both input strings are live and NUL-terminated, and the writable
+    // diagnostic buffer remains valid for the synchronous bridge call.
+    let result = unsafe {
+        guard_path_has_entitlement(
+            path.as_ptr(),
+            entitlement.as_ptr(),
+            error.as_mut_ptr(),
+            error.len(),
+        )
+    };
+    match result {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => {
+            anyhow::bail!(buffer_string(&error)
+                .unwrap_or_else(|| "bundle entitlement inspection failed".into()))
+        }
     }
 }
 
@@ -194,4 +240,78 @@ extern "C" {
         error: *mut std::ffi::c_char,
         error_len: usize,
     ) -> i32;
+    fn guard_path_has_entitlement(
+        path: *const std::ffi::c_char,
+        entitlement: *const std::ffi::c_char,
+        error: *mut std::ffi::c_char,
+        error_len: usize,
+    ) -> i32;
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    #[test]
+    fn rejects_missing_nested_extension_without_activating_it() {
+        let temporary = tempfile::tempdir().unwrap();
+        let app = temporary.path().join("Guard Review With Spaces.app");
+        let error =
+            bundled_endpoint_security_entitlement_present(&app, crate::DEFAULT_EXTENSION_BUNDLE_ID)
+                .unwrap_err();
+        assert!(!error.to_string().is_empty());
+    }
+
+    #[test]
+    fn reads_entitlement_from_signed_nested_extension_at_path_with_spaces() {
+        let temporary = tempfile::tempdir().unwrap();
+        let app = temporary.path().join("Guard Review With Spaces.app");
+        let layout =
+            crate::bundle::DevelopmentBundleLayout::new(&app, crate::DEFAULT_EXTENSION_BUNDLE_ID)
+                .unwrap();
+        std::fs::create_dir_all(layout.extension().join("Contents/MacOS")).unwrap();
+        std::fs::copy("/usr/bin/true", layout.extension_executable()).unwrap();
+        std::fs::write(
+            layout.extension_info_plist(),
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>guard-es</string>
+<key>CFBundleIdentifier</key><string>{}</string>
+<key>CFBundlePackageType</key><string>SYSX</string>
+</dict></plist>"#,
+                crate::DEFAULT_EXTENSION_BUNDLE_ID
+            ),
+        )
+        .unwrap();
+        let entitlements = temporary.path().join("Guard ES Entitlements.plist");
+        std::fs::write(
+            &entitlements,
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>com.apple.developer.endpoint-security.client</key><true/>
+</dict></plist>"#,
+        )
+        .unwrap();
+        let output = Command::new("codesign")
+            .args(["--force", "--sign", "-", "--entitlements"])
+            .arg(&entitlements)
+            .arg(layout.extension())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "codesign failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        assert!(bundled_endpoint_security_entitlement_present(
+            &app,
+            crate::DEFAULT_EXTENSION_BUNDLE_ID
+        )
+        .unwrap());
+    }
 }

@@ -10,8 +10,9 @@ identity=${SELF_USE_SIGNING_IDENTITY:-Guard Local Development Certificate}
 keychain=${SELF_USE_SIGNING_KEYCHAIN:-"$HOME/Library/Keychains/GuardSelfUse.keychain-db"}
 password_service=io.github.plfjy.SensitiveFileGuard.self-use-keychain
 
-security find-identity -v -p codesigning "$keychain" | grep -F "\"$identity\"" >/dev/null 2>&1 && {
-    echo "existing self-use signing identity: $identity"
+resolved=$("$(dirname "$0")/resolve-self-use-signing-identity.sh" \
+    "$identity" "$keychain" 2>/dev/null) && {
+    echo "existing self-use signing identity: $identity ($resolved)"
     exit 0
 }
 

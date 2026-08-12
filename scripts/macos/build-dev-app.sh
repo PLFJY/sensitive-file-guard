@@ -53,6 +53,8 @@ if [ "$self_use" = 1 ]; then
         security unlock-keychain -p "$keychain_password" "$self_use_keychain"
         unset keychain_password
     fi
+    signing_identity=$("$script_dir/resolve-self-use-signing-identity.sh" \
+        "$signing_identity" "$self_use_keychain")
     "$script_dir/self-use-safety-gate.sh"
 fi
 case "$version:$build_number" in

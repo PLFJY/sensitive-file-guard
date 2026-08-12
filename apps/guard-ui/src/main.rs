@@ -110,6 +110,8 @@ struct UiState {
     fda_status: adw::ActionRow,
     sip_status: adw::ActionRow,
     developer_mode_status: adw::ActionRow,
+    host_entitlement_status: adw::ActionRow,
+    endpoint_security_entitlement_status: adw::ActionRow,
     mac_setup_message: gtk::Label,
     pending_dialogs: Rc<RefCell<PendingDialogController>>,
 }
@@ -181,6 +183,12 @@ fn build_ui(app: &adw::Application, pending_only: bool) {
     let developer_mode_status = adw::ActionRow::new();
     developer_mode_status.set_title("System Extension developer mode");
     developer_mode_status.set_subtitle("正在检查…");
+    let host_entitlement_status = adw::ActionRow::new();
+    host_entitlement_status.set_title("宿主安装 entitlement");
+    host_entitlement_status.set_subtitle("正在检查最终签名…");
+    let endpoint_security_entitlement_status = adw::ActionRow::new();
+    endpoint_security_entitlement_status.set_title("Endpoint Security entitlement");
+    endpoint_security_entitlement_status.set_subtitle("正在检查包内扩展的最终签名…");
     let mac_setup_message = gtk::Label::new(None);
     mac_setup_message.set_wrap(true);
     mac_setup_message.set_xalign(0.0);
@@ -207,6 +215,8 @@ fn build_ui(app: &adw::Application, pending_only: bool) {
         fda_status,
         sip_status,
         developer_mode_status,
+        host_entitlement_status,
+        endpoint_security_entitlement_status,
         mac_setup_message,
         pending_dialogs: Rc::new(RefCell::new(PendingDialogController::default())),
     };
@@ -337,6 +347,8 @@ fn protection_page(state: &UiState) -> gtk::Box {
         group.set_title("请按以下顺序完成");
         group.add(&state.sip_status);
         group.add(&state.developer_mode_status);
+        group.add(&state.host_entitlement_status);
+        group.add(&state.endpoint_security_entitlement_status);
         group.add(&state.extension_status);
         group.add(&state.fda_status);
         page.append(&group);
@@ -1063,6 +1075,8 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
     let fda_status = state.fda_status.clone();
     let sip_status = state.sip_status.clone();
     let developer_mode_status = state.developer_mode_status.clone();
+    let host_entitlement_status = state.host_entitlement_status.clone();
+    let endpoint_security_entitlement_status = state.endpoint_security_entitlement_status.clone();
     let pending_dialogs = state.pending_dialogs.clone();
     let config_state = state.clone();
     let window = window.clone();
@@ -1177,6 +1191,9 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
             fda_status.set_subtitle(&overview.full_disk_access);
             sip_status.set_subtitle(&overview.sip_state);
             developer_mode_status.set_subtitle(&overview.developer_mode_state);
+            host_entitlement_status.set_subtitle(&overview.host_entitlement_state);
+            endpoint_security_entitlement_status
+                .set_subtitle(&overview.endpoint_security_entitlement_state);
             detail.set_text(&platform_service::overview_detail(
                 daemon.as_ref(),
                 &overview,

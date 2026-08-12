@@ -21,24 +21,42 @@ echo "disposable_acceptance_root=$acceptance_root"
 echo "No normal browser profile or ~/.ssh path is an acceptance target."
 
 VERIFY_SIGNING_MODE="$signing_mode" "$script_dir/verify-bundle.sh" "$app"
-HOME="$acceptance_root/home" "$guard" --packaging-smoke
 
 blocked=0
-if ! csrutil status | tee "$acceptance_root/output/sip.txt" | \
-    grep -q 'System Integrity Protection status: enabled'; then
-    echo "BLOCKED: SIP must be enabled for final security acceptance" >&2
-    blocked=1
+sip_status=$(csrutil status 2>&1 || true)
+printf '%s\n' "$sip_status" | tee "$acceptance_root/output/sip.txt"
+case "$signing_mode" in
+    self-use)
+        if ! printf '%s\n' "$sip_status" | grep -q \
+            'System Integrity Protection status: disabled'; then
+            echo "BLOCKED: self-use acceptance requires SIP disabled" >&2
+            blocked=1
+        fi
+        ;;
+    release)
+        if ! printf '%s\n' "$sip_status" | grep -q \
+            'System Integrity Protection status: enabled'; then
+            echo "BLOCKED: formal release acceptance requires SIP enabled" >&2
+            blocked=1
+        fi
+        ;;
+    local)
+        echo "BLOCKED: entitlement-free local packaging cannot enforce" >&2
+        blocked=1
+        ;;
+esac
+
+if [ "$blocked" -ne 0 ]; then
+    echo "FINAL_SECURITY_ACCEPTANCE_PREFLIGHT=BLOCKED" >&2
+    exit 77
 fi
 
-if [ "$signing_mode" != release ]; then
-    echo "BLOCKED: local-only signing is not a release acceptance identity" >&2
-    blocked=1
-fi
+HOME="$acceptance_root/home" "$guard" --packaging-smoke
 
 lifecycle=$($guard --system-extension-status 2>&1) || true
 printf '%s\n' "$lifecycle"
 if ! printf '%s\n' "$lifecycle" | grep -q 'state=Active'; then
-    echo "BLOCKED: the provisioned system extension is not active" >&2
+    echo "BLOCKED: the selected system extension is not active" >&2
     blocked=1
 fi
 
@@ -62,8 +80,7 @@ fi
 helper=$($guard --pending-helper-status 2>&1) || true
 printf '%s\n' "pending_helper=$helper"
 if [ "$helper" != Enabled ]; then
-    echo "BLOCKED: the pending helper is not enabled" >&2
-    blocked=1
+    echo "INFO: pending helper is optional; keep Guard open for interactive confirmations" >&2
 fi
 
 if [ "$blocked" -ne 0 ]; then

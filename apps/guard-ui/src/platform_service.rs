@@ -113,6 +113,8 @@ pub struct PlatformOverview {
     pub helper_state: String,
     pub sip_state: String,
     pub developer_mode_state: String,
+    pub host_entitlement_state: String,
+    pub endpoint_security_entitlement_state: String,
 }
 
 #[cfg(target_os = "macos")]
@@ -150,6 +152,35 @@ fn current_app_bundle() -> Option<std::path::PathBuf> {
 fn self_use_app_is_in_applications() -> bool {
     current_app_bundle()
         .is_some_and(|app| app.parent() == Some(std::path::Path::new("/Applications")))
+}
+
+#[cfg(target_os = "macos")]
+fn bundled_endpoint_security_entitlement_present() -> anyhow::Result<bool> {
+    static RESULT: std::sync::OnceLock<Result<bool, String>> = std::sync::OnceLock::new();
+    RESULT
+        .get_or_init(|| {
+            let app = current_app_bundle()
+                .ok_or_else(|| String::from("无法定位当前 Guard.app bundle"))?;
+            platform_macos::system_extension::bundled_endpoint_security_entitlement_present(
+                &app,
+                platform_macos::DEFAULT_EXTENSION_BUNDLE_ID,
+            )
+            .map_err(|error| error.to_string())
+        })
+        .clone()
+        .map_err(anyhow::Error::msg)
+}
+
+#[cfg(target_os = "macos")]
+fn host_install_entitlement_present() -> anyhow::Result<bool> {
+    static RESULT: std::sync::OnceLock<Result<bool, String>> = std::sync::OnceLock::new();
+    RESULT
+        .get_or_init(|| {
+            platform_macos::system_extension::host_install_entitlement_present()
+                .map_err(|error| error.to_string())
+        })
+        .clone()
+        .map_err(anyhow::Error::msg)
 }
 
 #[cfg(target_os = "macos")]
@@ -271,22 +302,32 @@ pub fn mac_setup_readiness() -> MacSetupReadiness {
             explanation: "SIP-off 自用构建需要从 /Applications 启动，macOS 才会接受防护扩展安装。请把 Guard.app 复制到 /Applications 后重新打开；不要从 build/ 目录点击安装。".into(),
         };
     }
-    match platform_macos::system_extension::host_install_entitlement_present() {
-        Ok(true) => MacSetupReadiness {
+    let host_entitlement = host_install_entitlement_present();
+    let endpoint_security_entitlement = bundled_endpoint_security_entitlement_present();
+    match (host_entitlement, endpoint_security_entitlement) {
+        (Ok(true), Ok(true)) => MacSetupReadiness {
             can_request_extension_install: true,
             explanation: if self_use {
-                "SIP-off 自用模式已就绪：SIP 已关闭且防护扩展安装 entitlement 存在。点击“安装防护扩展”后，按 macOS 弹窗或系统设置提示批准。还需要手动运行一次：sudo systemextensionsctl developer on。".into()
+                "SIP-off 自用模式的静态检查已通过：SIP 已关闭，宿主安装 entitlement 与包内 Endpoint Security entitlement 均存在。确认已手动运行 sudo systemextensionsctl developer on 后，才能点击“安装防护扩展”。".into()
             } else {
-                "此应用已具备请求 macOS 安装防护扩展的签名权限。点击“安装防护扩展”后，按 macOS 弹窗或系统设置中的提示批准即可。".into()
+                "此应用的宿主安装 entitlement 与包内 Endpoint Security entitlement 均存在，可以请求安装防护扩展。".into()
             },
         },
-        Ok(false) => MacSetupReadiness {
+        (Ok(false), _) => MacSetupReadiness {
             can_request_extension_install: false,
-            explanation: "这是本地测试包：它只能打开 Guard 窗口，Apple 尚未授权它安装防护扩展。因此不能真正开启保护，也不是你的权限操作错误。请安装带有 Apple Endpoint Security 授权描述文件的正式包后再继续。".into(),
+            explanation: "最终签名的 Guard 宿主缺少 com.apple.developer.system-extension.install；安装按钮已禁用。请重新构建正确模式的包，不要尝试激活。".into(),
         },
-        Err(error) => MacSetupReadiness {
+        (_, Ok(false)) => MacSetupReadiness {
             can_request_extension_install: false,
-            explanation: format!("Guard 无法检查自身的安装授权：{error}"),
+            explanation: "最终签名的包内 guard-es.systemextension 缺少 com.apple.developer.endpoint-security.client；安装按钮已禁用。请重新构建正确模式的包，不要尝试激活。".into(),
+        },
+        (Err(error), _) => MacSetupReadiness {
+            can_request_extension_install: false,
+            explanation: format!("Guard 无法检查宿主安装 entitlement：{error}"),
+        },
+        (_, Err(error)) => MacSetupReadiness {
+            can_request_extension_install: false,
+            explanation: format!("Guard 无法检查包内 Endpoint Security entitlement：{error}"),
         },
     }
 }
@@ -364,6 +405,8 @@ pub fn platform_overview(
         .into(),
         sip_state: "Not applicable".into(),
         developer_mode_state: "Not applicable".into(),
+        host_entitlement_state: "Not applicable".into(),
+        endpoint_security_entitlement_state: "Not applicable".into(),
     }
 }
 
@@ -410,6 +453,16 @@ pub fn platform_overview(
         } else {
             "不适用".into()
         },
+        host_entitlement_state: match host_install_entitlement_present() {
+            Ok(true) => "存在".into(),
+            Ok(false) => "缺失（不能安装扩展）".into(),
+            Err(error) => format!("检查失败：{error}"),
+        },
+        endpoint_security_entitlement_state: match bundled_endpoint_security_entitlement_present() {
+            Ok(true) => "存在".into(),
+            Ok(false) => "缺失（不能启动 Endpoint Security）".into(),
+            Err(error) => format!("检查失败：{error}"),
+        },
     }
 }
 
@@ -427,6 +480,8 @@ pub fn platform_overview(
         helper_state: "Unsupported".into(),
         sip_state: "Unsupported".into(),
         developer_mode_state: "Unsupported".into(),
+        host_entitlement_state: "Unsupported".into(),
+        endpoint_security_entitlement_state: "Unsupported".into(),
     }
 }
 

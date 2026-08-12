@@ -33,6 +33,8 @@ if [ "$self_use" = 1 ]; then
         security unlock-keychain -p "$keychain_password" "$signing_keychain"
         unset keychain_password
     fi
+    identity=$("$script_dir/resolve-self-use-signing-identity.sh" \
+        "$identity" "$signing_keychain")
     signing_mode=self-use
 elif [ "$local_only" = 1 ]; then
     identity=${SIGNING_IDENTITY:?SIGNING_IDENTITY is required}
