@@ -227,7 +227,11 @@ impl MacEventObserver {
         self.last_seen = newest.map_or(Some(previous), |id| Some(id.max(previous)));
         events
             .into_iter()
-            .filter(|event| event.id > previous && event.decision.contains("Deny"))
+            .filter(|event| {
+                event.id > previous
+                    && event.decision.contains("Deny")
+                    && event.event_code != "system_process_access_suppressed"
+            })
             .collect()
     }
 }
@@ -617,6 +621,37 @@ mod tests {
         allowed.decision = "Allow".into();
         assert!(observer.observe(vec![allowed]).is_empty());
         assert_eq!(observer.last_seen(), Some(3));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_event_observer_suppresses_system_allowlist_noise() {
+        let mut observer = MacEventObserver::default();
+        let baseline = EventInfo {
+            id: 10,
+            event_code: "system_process_access_suppressed".into(),
+            ts_ms: 1,
+            uid: 501,
+            pid: 42,
+            start_time: 1,
+            decision: "Deny(UnknownProcess)".into(),
+            deny_reason: Some("UnknownProcess".into()),
+            reason_code: Some("browser_protected_resource".into()),
+            resource_kind: "History".into(),
+            resource_kind_code: "browser_history".into(),
+            resource_browser: Some("edge".into()),
+            resource_profile: Some("Default".into()),
+            path: "/synthetic/history".into(),
+            exe: "/System/mdworker_shared".into(),
+            exe_owner_uid: 0,
+            trust_tier: "Unknown".into(),
+            process_browser: None,
+            parent_pid: None,
+            parent_exe: None,
+            lease_id: None,
+            backend_diag: "system process".into(),
+        };
+        assert!(observer.observe(vec![baseline]).is_empty());
     }
 
     #[cfg(target_os = "macos")]

@@ -97,6 +97,8 @@ pub struct EditableConfiguration {
     pub browsers: Vec<guard_platform::config::BrowserEnrollmentConfig>,
     pub enrolled_exes: Vec<std::path::PathBuf>,
     pub ssh_keys: Vec<std::path::PathBuf>,
+    #[serde(default)]
+    pub mac_allowlist: platform_macos::config::MacAllowlistConfig,
 }
 
 pub const fn shows_linux_mode() -> bool {
@@ -372,6 +374,7 @@ pub fn initial_configuration_if_missing(backend_reachable: bool) -> Option<Edita
             browsers: Vec::new(),
             enrolled_exes: Vec::new(),
             ssh_keys: Vec::new(),
+            mac_allowlist: platform_macos::config::MacAllowlistConfig::default(),
         })
     } else {
         None
@@ -617,6 +620,39 @@ pub fn editable_from_metadata(info: guard_ipc::ConfigurationInfo) -> Option<Edit
         browsers,
         enrolled_exes: info.enrolled_exes.into_iter().map(Into::into).collect(),
         ssh_keys: info.ssh_keys.into_iter().map(Into::into).collect(),
+        mac_allowlist: platform_macos::config::MacAllowlistConfig {
+            system_processes: info
+                .mac_system_processes
+                .into_iter()
+                .map(|rule| platform_macos::config::MacSystemProcessRule {
+                    path: rule.path.into(),
+                    team_id: None,
+                    signing_id: rule.signing_id,
+                    platform_binary: true,
+                    owner_uid: 0,
+                    allow_kinds: rule
+                        .allow_kinds
+                        .into_iter()
+                        .filter_map(|kind| match kind.as_str() {
+                            "browser_history" => Some(guard_core::ProtectedResourceKind::History),
+                            _ => None,
+                        })
+                        .collect(),
+                })
+                .collect(),
+            trusted_tools: info
+                .mac_trusted_tools
+                .into_iter()
+                .map(|rule| platform_macos::config::MacTrustedToolRule {
+                    path: rule.path.into(),
+                    dev: rule.dev,
+                    ino: rule.ino,
+                    team_id: rule.team_id,
+                    signing_id: rule.signing_id,
+                    owner_uid: 501,
+                })
+                .collect(),
+        },
     })
 }
 
@@ -1218,7 +1254,9 @@ fn mac_config_from_editable(
             ssh_keys: editable.ssh_keys,
         },
         browser_trust,
-    };
+        mac_allowlist: editable.mac_allowlist,
+    }
+    .with_builtin_mac_allowlist();
     config.validate_for_peer(peer_uid)?;
     Ok(config)
 }

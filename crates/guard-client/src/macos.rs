@@ -583,6 +583,7 @@ mod tests {
                 ssh_keys: vec![std::path::PathBuf::from("/synthetic/id_ed25519")],
             },
             browser_trust: Vec::new(),
+            mac_allowlist: platform_macos::config::MacAllowlistConfig::default(),
         };
         assert!(client
             .apply_configuration(&config, Instant::now() + Duration::from_secs(1))

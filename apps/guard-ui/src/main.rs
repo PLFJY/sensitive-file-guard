@@ -534,6 +534,19 @@ fn protection_page(state: &UiState) -> gtk::Box {
         *state.helper.borrow_mut() = Some(helper.clone());
         helper_group.add(&helper);
         page.append(&helper_group);
+
+        let allowlist_heading = gtk::Label::new(Some("macOS 受信任工具"));
+        allowlist_heading.set_xalign(0.0);
+        allowlist_heading.add_css_class("title-2");
+        page.append(&allowlist_heading);
+        let allowlist_info = gtk::Label::new(Some(
+            "Spotlight 仅对历史元数据使用精确 Apple 签名例外；第三方工具不会因为名称或安装位置自动放行。Cookie、密码、会话数据和 SSH 私钥仍需人工确认。",
+        ));
+        allowlist_info.set_xalign(0.0);
+        allowlist_info.set_wrap(true);
+        allowlist_info.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+        allowlist_info.set_max_width_chars(SUMMARY_WIDTH_CHARS);
+        page.append(&allowlist_info);
     }
     let browsers_heading = gtk::Label::new(Some("Protected browsers"));
     browsers_heading.set_xalign(0.0);
@@ -2264,6 +2277,8 @@ mod tests {
             }],
             enrolled_exes: vec!["/usr/bin/known-good-helper".into()],
             ssh_keys: vec!["/home/test/.ssh/id_ed25519".into()],
+            mac_system_processes: Vec::new(),
+            mac_trusted_tools: Vec::new(),
         })
         .expect("supported daemon snapshot");
         assert_eq!(
@@ -2292,6 +2307,8 @@ mod tests {
             }],
             enrolled_exes: Vec::new(),
             ssh_keys: Vec::new(),
+            mac_system_processes: Vec::new(),
+            mac_trusted_tools: Vec::new(),
         })
         .unwrap();
         assert_eq!(config.enforcement_mode, None);

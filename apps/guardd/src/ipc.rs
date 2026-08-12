@@ -327,6 +327,8 @@ fn handle_configuration_get(state: &IpcState, _creds: PeerCreds) -> Response {
             .iter()
             .map(|path| path.to_string_lossy().into_owned())
             .collect(),
+        mac_system_processes: Vec::new(),
+        mac_trusted_tools: Vec::new(),
     }))
 }
 

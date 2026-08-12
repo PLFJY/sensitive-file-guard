@@ -132,6 +132,7 @@ impl MacPolicy {
     }
 
     pub fn apply_config(&self, config: MacBackendConfig) -> anyhow::Result<()> {
+        let config = config.with_builtin_mac_allowlist();
         config.validate()?;
         let index = MacResourceIndex::from_enrollments(
             &config.browser_trust,
@@ -335,6 +336,33 @@ impl MacPolicy {
             process: process.clone(),
             operation,
         };
+
+        // macOS system integrations are allowed only through an exact,
+        // signed rule.  The rule is intentionally checked before the shared
+        // browser policy, but only for explicitly low-sensitivity metadata;
+        // critical browser material and SSH keys never take this path.
+        if let Ok(config) = self.config() {
+            if event.resource.kind != ProtectedResourceKind::SshPrivateKey
+                && !event.resource.kind.is_critical_browser()
+                && config
+                    .mac_allowlist
+                    .system_rule(&event.facts.process, event.resource.kind)
+                    .is_some()
+            {
+                inner.stats.allowed = inner.stats.allowed.saturating_add(1);
+                drop(inner);
+                self.record_debug(
+                    "system_process_metadata_allowed",
+                    &event.resource,
+                    Some(&process),
+                    Decision::Allow,
+                    "exact Apple-signed system process metadata exception".into(),
+                    now,
+                );
+                let _ = event.permission.allow_read_only();
+                return;
+            }
+        }
         let decision = inner.runtime.evaluate(&access, now);
         match decision.clone() {
             Decision::Allow => {
@@ -378,9 +406,24 @@ impl MacPolicy {
             Decision::Deny(reason) => {
                 inner.stats.denied = inner.stats.denied.saturating_add(1);
                 drop(inner);
+                let suppress_system_noise =
+                    self.config_optional().ok().flatten().is_some_and(|config| {
+                        config.mac_allowlist.system_processes.iter().any(|rule| {
+                            rule.path == event.facts.process.executable.path
+                                && rule.owner_uid == event.facts.process.executable.owner_uid
+                                && rule.platform_binary == event.facts.process.code.platform_binary
+                                && event.facts.process.code.valid
+                                && event.facts.process.code.team_id == rule.team_id
+                                && event.facts.process.code.signing_id.as_deref()
+                                    == Some(rule.signing_id.as_str())
+                                && process.trust_tier == guard_core::TrustTier::Unknown
+                        })
+                    });
                 self.record(
                     if event.resource.kind == ProtectedResourceKind::SshPrivateKey {
                         "ssh_key_access_blocked"
+                    } else if suppress_system_noise {
+                        "system_process_access_suppressed"
                     } else {
                         "browser_access_denied"
                     },
@@ -1196,6 +1239,7 @@ pub fn prepare_config(
 ) -> anyhow::Result<(MacResourceIndex, MacBrowserTrustStore, bool)> {
     match config {
         Some(config) => {
+            let config = config.clone().with_builtin_mac_allowlist();
             config.validate()?;
             Ok((
                 MacResourceIndex::from_enrollments(
@@ -1434,7 +1478,9 @@ mod tests {
                     ssh_keys: vec![ssh_resource.path],
                 },
                 browser_trust: browsers,
-            };
+                mac_allowlist: platform_macos::config::MacAllowlistConfig::default(),
+            }
+            .with_builtin_mac_allowlist();
             let (index, trust, enabled) = prepare_config(Some(&config)).unwrap();
             let protected = Arc::new(MacProtectedResources::new(enabled, index));
             let graph = Arc::new(Mutex::new(MacProcessGraph::default()));

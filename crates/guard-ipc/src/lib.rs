@@ -467,6 +467,26 @@ pub struct ConfigurationInfo {
     pub browsers: Vec<ConfiguredBrowserInfo>,
     pub enrolled_exes: Vec<String>,
     pub ssh_keys: Vec<String>,
+    #[serde(default)]
+    pub mac_system_processes: Vec<MacSystemProcessInfo>,
+    #[serde(default)]
+    pub mac_trusted_tools: Vec<MacTrustedToolInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MacSystemProcessInfo {
+    pub path: String,
+    pub signing_id: String,
+    pub allow_kinds: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MacTrustedToolInfo {
+    pub path: String,
+    pub team_id: Option<String>,
+    pub signing_id: Option<String>,
+    pub dev: u64,
+    pub ino: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

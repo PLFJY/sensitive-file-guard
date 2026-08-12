@@ -8,11 +8,156 @@ use guard_platform::config::PolicyConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::browser_trust::MacBrowserEnrollment;
+use crate::identity::MacProcessFacts;
+use guard_core::resource::ProtectedResourceKind;
 
 pub const MAC_CONFIG_VERSION: u32 = 1;
 pub const SYSTEM_CONFIG_PATH: &str =
     "/Library/Application Support/Sensitive Data Firewall/config.json";
 static NEXT_TEMP_CONFIG: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacSystemProcessRule {
+    pub path: PathBuf,
+    pub team_id: Option<String>,
+    pub signing_id: String,
+    #[serde(default)]
+    pub platform_binary: bool,
+    pub owner_uid: u32,
+    #[serde(default)]
+    pub allow_kinds: Vec<ProtectedResourceKind>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacTrustedToolRule {
+    pub path: PathBuf,
+    pub dev: u64,
+    pub ino: u64,
+    pub team_id: Option<String>,
+    pub signing_id: Option<String>,
+    pub owner_uid: u32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacAllowlistConfig {
+    #[serde(default)]
+    pub system_processes: Vec<MacSystemProcessRule>,
+    #[serde(default)]
+    pub trusted_tools: Vec<MacTrustedToolRule>,
+}
+
+impl MacAllowlistConfig {
+    pub fn with_builtin_system_rules(mut self) -> Self {
+        let path = PathBuf::from(
+            "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared",
+        );
+        if !self.system_processes.iter().any(|rule| rule.path == path) {
+            self.system_processes.push(MacSystemProcessRule {
+                path,
+                team_id: None,
+                signing_id: "com.apple.mdworker_shared".into(),
+                platform_binary: true,
+                owner_uid: 0,
+                allow_kinds: vec![ProtectedResourceKind::History],
+            });
+        }
+        self
+    }
+
+    pub fn system_rule(
+        &self,
+        process: &MacProcessFacts,
+        kind: ProtectedResourceKind,
+    ) -> Option<&MacSystemProcessRule> {
+        self.system_processes.iter().find(|rule| {
+            rule.path == process.executable.path
+                && rule.owner_uid == process.executable.owner_uid
+                && rule.platform_binary == process.code.platform_binary
+                && process.code.valid
+                && process.code.team_id == rule.team_id
+                && process.code.signing_id.as_deref() == Some(rule.signing_id.as_str())
+                && rule.allow_kinds.contains(&kind)
+        })
+    }
+
+    pub fn trusted_tool_matches(&self, process: &MacProcessFacts) -> bool {
+        self.trusted_tools.iter().any(|rule| {
+            rule.path == process.executable.path
+                && rule.dev == process.executable.dev
+                && rule.ino == process.executable.ino
+                && rule.owner_uid == process.executable.owner_uid
+                && rule.team_id.as_deref() == process.code.team_id.as_deref()
+                && rule.signing_id.as_deref() == process.code.signing_id.as_deref()
+        })
+    }
+}
+
+#[cfg(test)]
+mod allowlist_tests {
+    use super::*;
+
+    fn process(path: PathBuf, _kind: ProtectedResourceKind) -> MacProcessFacts {
+        MacProcessFacts {
+            key: crate::identity::AuditProcessKey {
+                pid: 7,
+                pidversion: 1,
+            },
+            uid: 501,
+            gid: 20,
+            start_time_us: 10,
+            executable: crate::identity::ExecutableSnapshot {
+                path,
+                dev: 3,
+                ino: 4,
+                owner_uid: 0,
+                mode: 0o100755,
+                size: 1,
+                mtime_ns: 1,
+                ctime_ns: 1,
+            },
+            code: crate::identity::MacCodeIdentity {
+                valid: true,
+                platform_binary: true,
+                flags: 0,
+                team_id: None,
+                signing_id: Some("com.apple.mdworker_shared".into()),
+                cdhash: [0; 20],
+            },
+            parent: None,
+            responsible: None,
+        }
+    }
+
+    #[test]
+    fn builtin_spotlight_rule_is_history_only_and_signature_pinned() {
+        let path = PathBuf::from("/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared");
+        let config = MacAllowlistConfig::default().with_builtin_system_rules();
+        let process = process(path, ProtectedResourceKind::History);
+        assert!(config
+            .system_rule(&process, ProtectedResourceKind::History)
+            .is_some());
+        assert!(config
+            .system_rule(&process, ProtectedResourceKind::CookieStore)
+            .is_none());
+    }
+
+    #[test]
+    fn builtin_rule_rejects_same_name_with_wrong_path_or_identity() {
+        let config = MacAllowlistConfig::default().with_builtin_system_rules();
+        let mut process = process(
+            PathBuf::from("/tmp/mdworker_shared"),
+            ProtectedResourceKind::History,
+        );
+        assert!(config
+            .system_rule(&process, ProtectedResourceKind::History)
+            .is_none());
+        process.executable.path = PathBuf::from("/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared");
+        process.code.signing_id = Some("com.example.fake".into());
+        assert!(config
+            .system_rule(&process, ProtectedResourceKind::History)
+            .is_none());
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MacBackendConfig {
@@ -21,6 +166,8 @@ pub struct MacBackendConfig {
     pub policy_enabled: bool,
     pub common_policy: PolicyConfig,
     pub browser_trust: Vec<MacBrowserEnrollment>,
+    #[serde(default)]
+    pub mac_allowlist: MacAllowlistConfig,
 }
 
 impl MacBackendConfig {
@@ -30,6 +177,36 @@ impl MacBackendConfig {
             "unsupported macOS config version"
         );
         self.common_policy.validate()?;
+        for rule in &self.mac_allowlist.system_processes {
+            anyhow::ensure!(
+                rule.path.is_absolute(),
+                "macOS system allowlist path must be absolute"
+            );
+            if let Some(team_id) = &rule.team_id {
+                anyhow::ensure!(
+                    !team_id.trim().is_empty(),
+                    "macOS system allowlist Team ID is empty"
+                );
+            }
+            anyhow::ensure!(
+                !rule.signing_id.trim().is_empty(),
+                "macOS system allowlist signing ID is required"
+            );
+            anyhow::ensure!(
+                !rule.allow_kinds.is_empty(),
+                "macOS system allowlist must name resource kinds"
+            );
+        }
+        for rule in &self.mac_allowlist.trusted_tools {
+            anyhow::ensure!(
+                rule.path.is_absolute(),
+                "macOS trusted tool path must be absolute"
+            );
+            anyhow::ensure!(
+                rule.dev != 0 && rule.ino != 0,
+                "macOS trusted tool file identity is required"
+            );
+        }
         let mut ssh_paths = HashSet::new();
         for key in &self.common_policy.ssh_keys {
             anyhow::ensure!(
@@ -98,6 +275,11 @@ impl MacBackendConfig {
             }
         }
         Ok(())
+    }
+
+    pub fn with_builtin_mac_allowlist(mut self) -> Self {
+        self.mac_allowlist = self.mac_allowlist.with_builtin_system_rules();
+        self
     }
 
     pub fn authoritative_path() -> &'static Path {
@@ -178,6 +360,7 @@ impl MacBackendConfig {
                 ssh_keys: Vec::new(),
             },
             browser_trust: Vec::new(),
+            mac_allowlist: MacAllowlistConfig::default(),
         });
         if let Some(current) = current {
             current.validate_for_peer(peer_uid)?;
@@ -250,6 +433,32 @@ impl MacBackendConfig {
                 .ssh_keys
                 .iter()
                 .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+            mac_system_processes: self
+                .mac_allowlist
+                .system_processes
+                .iter()
+                .map(|rule| guard_ipc::MacSystemProcessInfo {
+                    path: rule.path.to_string_lossy().into_owned(),
+                    signing_id: rule.signing_id.clone(),
+                    allow_kinds: rule
+                        .allow_kinds
+                        .iter()
+                        .map(|kind| kind.kind_code().to_owned())
+                        .collect(),
+                })
+                .collect(),
+            mac_trusted_tools: self
+                .mac_allowlist
+                .trusted_tools
+                .iter()
+                .map(|rule| guard_ipc::MacTrustedToolInfo {
+                    path: rule.path.to_string_lossy().into_owned(),
+                    team_id: rule.team_id.clone(),
+                    signing_id: rule.signing_id.clone(),
+                    dev: rule.dev,
+                    ino: rule.ino,
+                })
                 .collect(),
         }
     }
@@ -407,6 +616,7 @@ mod tests {
                     signing_id: "com.google.Chrome".to_owned(),
                 }],
             }],
+            mac_allowlist: MacAllowlistConfig::default(),
         }
     }
 
@@ -523,6 +733,7 @@ mod tests {
                 app_bundle: None,
                 executables: vec![enrollment],
             }],
+            mac_allowlist: MacAllowlistConfig::default(),
         };
         config.validate_for_peer(uid).unwrap();
         assert!(config.validate_for_peer(uid.saturating_add(1)).is_err());
