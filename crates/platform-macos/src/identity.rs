@@ -54,7 +54,10 @@ impl MacProcessFacts {
         ProcessStableId {
             pid: self.key.pid,
             start_time: self.start_time_us,
-            exe: self.executable.path.clone(),
+            // ES may report an equivalent path through an alias such as
+            // `/var` versus `/private/var`. Normalize only the path spelling;
+            // start token, device and inode remain mandatory identity fields.
+            exe: normalize_executable_path(&self.executable.path),
             exe_dev: self.executable.dev,
             exe_ino: self.executable.ino,
         }
@@ -73,6 +76,10 @@ impl MacProcessFacts {
         );
         Ok(())
     }
+}
+
+fn normalize_executable_path(path: &std::path::Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 #[derive(Debug, Clone)]
@@ -367,6 +374,28 @@ mod tests {
         graph.observe(first, now).unwrap();
         let error = graph.observe(changed, now).unwrap_err();
         assert!(error.to_string().contains("executable_path"));
+    }
+
+    #[test]
+    fn equivalent_executable_aliases_do_not_degrade_the_graph() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("Guard Binary");
+        std::fs::write(&executable, b"synthetic executable").unwrap();
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(&executable, &alias).unwrap();
+
+        let now = Instant::now();
+        let mut first = facts(42, 7, 100, None);
+        first.executable.path = executable;
+        first.executable.dev = 11;
+        first.executable.ino = 22;
+        let mut second = first.clone();
+        second.executable.path = alias;
+
+        let mut graph = MacProcessGraph::default();
+        graph.observe(first, now).unwrap();
+        graph.observe(second, now).unwrap();
+        assert!(!graph.is_degraded());
     }
 
     #[test]
