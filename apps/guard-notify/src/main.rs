@@ -34,7 +34,7 @@ struct Cli {
     /// Fetch once and exit. Intended for diagnostics/tests.
     #[arg(long)]
     once: bool,
-    /// macOS only: send a harmless synthetic notification and exit.
+    /// macOS only: ask the Guard.app process to send a harmless synthetic notification.
     #[arg(long)]
     test_notification: bool,
 }
@@ -128,12 +128,9 @@ fn run_linux(cli: &Cli) -> ExitCode {
 #[cfg(target_os = "macos")]
 fn run_macos(cli: &Cli) -> ExitCode {
     if cli.test_notification {
-        return match notify_macos(
-            "Sensitive File Guard 测试通知",
-            "通知通道正常；这是一条合成测试消息。",
-        ) {
+        return match activate_guard_ui_macos_with_args(&["--test-notification"]) {
             Ok(()) => {
-                eprintln!("guard-notify: macOS test notification delivered");
+                eprintln!("guard-notify: delegated macOS test notification to Guard.app");
                 ExitCode::SUCCESS
             }
             Err(error) => {
@@ -231,28 +228,6 @@ impl MacEventObserver {
 }
 
 #[cfg(target_os = "macos")]
-#[allow(dead_code)]
-fn mac_notification_text(event: &EventInfo) -> (String, String) {
-    let executable = Path::new(&event.exe)
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "A process".into());
-    (
-        "Sensitive File Guard blocked access".into(),
-        format!(
-            "{executable} was blocked from accessing protected {}.",
-            event.resource_kind_code
-        ),
-    )
-}
-
-#[cfg(target_os = "macos")]
-#[allow(dead_code)]
-fn notify_macos(title: &str, body: &str) -> anyhow::Result<()> {
-    platform_macos::notifications::send(title, body)
-}
-
-#[cfg(target_os = "macos")]
 fn fetch_macos_pending(
     client: &guard_client::macos::MacGuardClient,
 ) -> anyhow::Result<HashSet<PendingKey>> {
@@ -295,32 +270,26 @@ impl PendingObserver {
 
 #[cfg(target_os = "macos")]
 fn activate_guard_ui_macos() {
+    if let Err(error) = activate_guard_ui_macos_with_args(&["--pending-only"]) {
+        eprintln!("guard-notify: could not activate Guard.app: {error}");
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn activate_guard_ui_macos_with_args(args: &[&str]) -> anyhow::Result<()> {
     let executable = match std::env::current_exe() {
         Ok(executable) => executable,
-        Err(error) => {
-            eprintln!("guard-notify: cannot locate app bundle: {error}");
-            return;
-        }
+        Err(error) => anyhow::bail!("cannot locate app bundle: {error}"),
     };
-    let guard = match guard_ui_executable(&executable) {
-        Ok(guard) => guard,
-        Err(error) => {
-            eprintln!("guard-notify: {error}");
-            return;
-        }
-    };
-    if let Err(error) = Command::new(&guard)
-        .arg("--pending-only")
+    let guard = guard_ui_executable(&executable)?;
+    Command::new(&guard)
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-    {
-        eprintln!(
-            "guard-notify: could not activate {}: {error}",
-            guard.display()
-        );
-    }
+        .map(|_| ())
+        .map_err(|error| anyhow::anyhow!("could not activate {}: {error}", guard.display()))
 }
 
 #[cfg(target_os = "macos")]
@@ -648,15 +617,6 @@ mod tests {
             backend_diag: "system process".into(),
         };
         assert!(observer.observe(vec![baseline]).is_empty());
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn mac_notification_does_not_include_the_resource_path() {
-        let event = event(7, "/synthetic/secret/Cookies");
-        let (_, body) = mac_notification_text(&event);
-        assert!(!body.contains("/synthetic/secret/Cookies"));
-        assert!(body.contains("test-probe"));
     }
 
     #[cfg(target_os = "macos")]

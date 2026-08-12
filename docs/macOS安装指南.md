@@ -32,13 +32,21 @@ scripts/macos/build-deploy-self-use.sh
 
 “遇到确认请求时自动打开 Guard”是可选的 LaunchAgent。开启后如果 macOS 要求批准，请到“系统设置 → 通用 → 登录项”批准 Guard；Protection 页面会保留注册失败的具体错误，不会再只把开关无提示地弹回去。macOS 的拒绝和确认通知由 `Guard.app` GUI 进程发送；`guard-notify` 只负责发现 pending 请求并唤起 GUI，不会重复发送通知。
 
-在当前用户登录会话中测试系统通知：
+在当前用户登录会话中测试系统通知（必须使用新包；该入口最终由 Guard.app 发通知）：
 
 ```sh
 /Applications/Guard.app/Contents/MacOS/guard-notify --test-notification
 ```
 
 这条命令只发送一条合成通知，不读取受保护文件。若命令失败，查看终端中的原生通知错误；若命令成功但横幅不可见，检查系统设置中的 Guard 通知权限、专注模式和通知中心摘要设置。真实拒绝事件只有在 `guard-notify` 已运行并完成初始事件基线后才会通知新事件。
+
+如果通知来源仍显示为 Script Editor，说明旧版 helper 仍被 launchd 运行，通常是之前移入废纸篓的旧 Guard.app。退出 Guard 后重新运行一键部署脚本；脚本会先停止同一 `top.plfjy.*.guard-notify` 登录项，再安装新包。也可以只检查当前状态：
+
+```sh
+launchctl print "gui/$(id -u)/top.plfjy.SensitiveFileGuard.guard-notify" 2>/dev/null || true
+```
+
+当前版本中，关闭“防护服务”会同时注销并停止 `guard-notify`；重新打开防护服务后才允许重新注册 helper。helper 不能脱离主服务单独轮询或发通知。
 
 ## 三种构建模式
 

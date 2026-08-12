@@ -140,6 +140,22 @@ fn main() {
     if let Some(exit_code) = platform_service::handle_system_extension_command() {
         std::process::exit(exit_code);
     }
+    #[cfg(target_os = "macos")]
+    if std::env::args().any(|arg| arg == "--test-notification") {
+        match platform_macos::notifications::send(
+            "Sensitive File Guard 测试通知",
+            "Guard.app 通知通道正常；这是一条合成测试消息。",
+        ) {
+            Ok(()) => {
+                eprintln!("Guard: delivered synthetic macOS test notification");
+                return;
+            }
+            Err(error) => {
+                eprintln!("Guard: macOS test notification failed: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
     if let Err(error) = platform_service::configure_bundled_runtime() {
         eprintln!("Guard bundled GTK runtime is invalid: {error}");
         std::process::exit(78);
@@ -518,8 +534,9 @@ fn protection_page(state: &UiState) -> gtk::Box {
         let helper = adw::SwitchRow::new();
         helper.set_subtitle_lines(STATUS_SUBTITLE_LINES);
         helper.set_title("遇到确认请求时自动打开 Guard");
-        helper.set_subtitle("建议开启。这只是一个登录项，用于显示浏览器迁移或 SSH 密钥确认；它不会安装扩展，也不会授予权限。");
+        helper.set_subtitle("仅在防护服务开启时运行，用于显示浏览器迁移或 SSH 密钥确认；它不会安装扩展，也不会授予权限。");
         helper.set_active(false);
+        helper.set_sensitive(false);
         let helper_row = helper.clone();
         let helper_syncing = state.helper_syncing.clone();
         let helper_error = state.helper_error.clone();
@@ -1546,11 +1563,12 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
                 // helper can answer XPC. Keep the user's switch on during
                 // that transition; otherwise the two-second status poll
                 // immediately undoes a successful registration request.
-                let helper_registered = overview.helper_running
+                let helper_registered = overview.policy_enabled
+                    && (overview.helper_running
                     || matches!(
                         overview.helper_state.as_str(),
                         "Pending user approval" | "Enabled, not responding"
-                    );
+                    ));
                 if row.is_active() != helper_registered {
                     helper_syncing.set(true);
                     row.set_active(helper_registered);
@@ -1560,7 +1578,11 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
                 if let Some(error) = helper_error.borrow().as_ref() {
                     row.set_subtitle(error);
                 }
-                row.set_sensitive(true);
+                // The pending helper is subordinate to the protection
+                // service. It is intentionally unavailable while the main
+                // protection switch is off, so it cannot keep polling or
+                // surface notifications on its own.
+                row.set_sensitive(overview.policy_enabled);
             }
             extension_status.set_subtitle(&overview.extension_state);
             fda_status.set_subtitle(&overview.full_disk_access);

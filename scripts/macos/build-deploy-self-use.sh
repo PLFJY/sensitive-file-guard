@@ -65,6 +65,14 @@ MACOS_RELEASE_ROOT="$build_root" \
 echo "==> 再次验证最终签名包"
 VERIFY_SIGNING_MODE=self-use "$script_dir/verify-bundle.sh" "$app"
 
+# Remove a previously registered helper before replacing the app. This is
+# important when an older Guard.app was moved to Trash: launchd otherwise may
+# continue running that old guard-notify binary and its historical Script
+# Editor notification bridge.
+notify_label="${APP_BUNDLE_ID:-top.plfjy.SensitiveFileGuard}.guard-notify"
+echo "==> 停止旧版 guard-notify：$notify_label"
+launchctl bootout "gui/$(id -u)/$notify_label" >/dev/null 2>&1 || true
+
 if [ -e "$destination" ]; then
     backup="$HOME/.Trash/Guard.app.backup.$(date +%Y%m%d-%H%M%S)"
     mkdir -p "$HOME/.Trash"

@@ -45,6 +45,15 @@ codesign --verify --strict --verbose=2 "$app/Contents/MacOS/guardctl"
 codesign --verify --strict --verbose=2 "$app/Contents/MacOS/guard-notify"
 codesign --verify --deep --strict --verbose=2 "$app"
 
+# Notifications must originate in the signed Guard process. A stale helper
+# that still embeds the historical osascript/Script Editor bridge is not a
+# valid release artifact, even if the rest of its code signature is valid.
+if strings "$app/Contents/MacOS/Guard" "$app/Contents/MacOS/guard-notify" \
+    | grep -Eiq '/usr/bin/osascript|display notification|Script Editor'; then
+    echo "legacy Script Editor notification path remains in Guard.app" >&2
+    exit 2
+fi
+
 work=$(mktemp -d "${TMPDIR:-/tmp}/guard-verify-bundle.XXXXXX")
 cleanup() { rm -rf -- "$work"; }
 trap cleanup EXIT INT TERM
