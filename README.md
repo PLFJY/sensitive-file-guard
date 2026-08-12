@@ -13,6 +13,8 @@ notary profile, no active/FDA-authorized extension, and SIP is currently
 disabled. See the [macOS install and status guide](docs/INSTALL_MACOS.md) and
 [Phase 11 report](reports/mac/macos-phase-11.md).
 
+各平台的构建、打包、安装、升级、验收和卸载流程见[中文打包与部署指南](docs/打包与部署指南.md)。
+
 > **macOS development status:** the native app and Endpoint Security system
 > extension and GTK control-plane work are documented in
 > [the macOS development guide](docs/INSTALL_MACOS_DEV.md). Phase 02 provides
@@ -162,10 +164,13 @@ model](docs/BROWSER_MIGRATION_MODEL.md).
 
 ## Install
 
-The main guide is [Linux installation and deployment](docs/INSTALL_LINUX.md).
-It covers the supported systemd baseline, Arch/Debian/Ubuntu/Fedora dependency
-commands, native browser discovery, configuration, service operation, updates,
-and removal.
+The platform overview is in the [中文打包与部署指南](docs/打包与部署指南.md).
+The detailed Linux guide is [Linux installation and deployment](docs/INSTALL_LINUX.md),
+and the macOS guides are [macOS install/status](docs/INSTALL_MACOS.md),
+[development](docs/INSTALL_MACOS_DEV.md), and [release](docs/INSTALL_MACOS_RELEASE.md).
+The Linux guide covers the supported systemd baseline, Arch/Debian/Ubuntu/Fedora
+dependency commands, native browser discovery, configuration, service operation,
+updates, and removal.
 
 **Security-accepted Alpha: `strict-filesystem` on the tested Arch host.**
 Other mainstream systemd-based distributions are expected to work with native
