@@ -123,6 +123,7 @@ struct UiState {
     protection_syncing: Rc<Cell<bool>>,
     helper: Rc<RefCell<Option<adw::SwitchRow>>>,
     helper_syncing: Rc<Cell<bool>>,
+    helper_error: Rc<RefCell<Option<String>>>,
     extension_status: adw::ActionRow,
     fda_status: adw::ActionRow,
     sip_status: adw::ActionRow,
@@ -251,6 +252,7 @@ fn build_ui(app: &adw::Application, pending_only: bool, layout_smoke_page: Optio
         protection_syncing: Rc::new(Cell::new(false)),
         helper: Rc::new(RefCell::new(None)),
         helper_syncing: Rc::new(Cell::new(false)),
+        helper_error: Rc::new(RefCell::new(None)),
         extension_status,
         fda_status,
         sip_status,
@@ -516,12 +518,18 @@ fn protection_page(state: &UiState) -> gtk::Box {
         helper.set_active(false);
         let helper_row = helper.clone();
         let helper_syncing = state.helper_syncing.clone();
+        let helper_error = state.helper_error.clone();
         helper.connect_active_notify(move |row| {
             if helper_syncing.get() {
                 return;
             }
             helper_row.set_sensitive(false);
-            spawn_user_agent_change(row.is_active(), helper_row.clone(), helper_syncing.clone());
+            spawn_user_agent_change(
+                row.is_active(),
+                helper_row.clone(),
+                helper_syncing.clone(),
+                helper_error.clone(),
+            );
         });
         *state.helper.borrow_mut() = Some(helper.clone());
         helper_group.add(&helper);
@@ -1270,6 +1278,7 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
     let protection_syncing = state.protection_syncing.clone();
     let helper = state.helper.clone();
     let helper_syncing = state.helper_syncing.clone();
+    let helper_error = state.helper_error.clone();
     let extension_status = state.extension_status.clone();
     let fda_status = state.fda_status.clone();
     let sip_status = state.sip_status.clone();
@@ -1378,12 +1387,24 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
                 );
             }
             if let Some(row) = helper.borrow().as_ref() {
-                if row.is_active() != overview.helper_running {
+                // SMAppService reports RequiresApproval/Enabled before the
+                // helper can answer XPC. Keep the user's switch on during
+                // that transition; otherwise the two-second status poll
+                // immediately undoes a successful registration request.
+                let helper_registered = overview.helper_running
+                    || matches!(
+                        overview.helper_state.as_str(),
+                        "Pending user approval" | "Enabled, not responding"
+                    );
+                if row.is_active() != helper_registered {
                     helper_syncing.set(true);
-                    row.set_active(overview.helper_running);
+                    row.set_active(helper_registered);
                     helper_syncing.set(false);
                 }
                 row.set_subtitle(&overview.helper_state);
+                if let Some(error) = helper_error.borrow().as_ref() {
+                    row.set_subtitle(error);
+                }
                 row.set_sensitive(true);
             }
             extension_status.set_subtitle(&overview.extension_state);
@@ -2148,7 +2169,12 @@ fn spawn_protection_change(
     });
 }
 
-fn spawn_user_agent_change(enabled: bool, row: adw::SwitchRow, syncing: Rc<Cell<bool>>) {
+fn spawn_user_agent_change(
+    enabled: bool,
+    row: adw::SwitchRow,
+    syncing: Rc<Cell<bool>>,
+    error_state: Rc<RefCell<Option<String>>>,
+) {
     glib::MainContext::default().spawn_local(async move {
         let result =
             gio::spawn_blocking(move || platform_service::set_user_agent_enabled(enabled)).await;
@@ -2156,18 +2182,23 @@ fn spawn_user_agent_change(enabled: bool, row: adw::SwitchRow, syncing: Rc<Cell<
         syncing.set(true);
         match result {
             Ok(Ok(())) => {
+                *error_state.borrow_mut() = None;
                 row.set_active(enabled);
                 row.set_tooltip_text(None);
             }
             Ok(Err(error)) => {
                 row.set_active(!enabled);
-                row.set_tooltip_text(Some(&format!("Pending helper change failed: {error}")));
+                let message = format!("启用确认助手失败：{error}");
+                *error_state.borrow_mut() = Some(message.clone());
+                row.set_subtitle(&message);
+                row.set_tooltip_text(Some(&message));
             }
             Err(error) => {
                 row.set_active(!enabled);
-                row.set_tooltip_text(Some(&format!(
-                    "Pending helper task stopped unexpectedly: {error:?}"
-                )));
+                let message = format!("确认助手任务异常：{error:?}");
+                *error_state.borrow_mut() = Some(message.clone());
+                row.set_subtitle(&message);
+                row.set_tooltip_text(Some(&message));
             }
         }
         syncing.set(false);

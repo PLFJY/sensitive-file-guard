@@ -34,6 +34,9 @@ struct Cli {
     /// Fetch once and exit. Intended for diagnostics/tests.
     #[arg(long)]
     once: bool,
+    /// macOS only: send a harmless synthetic notification and exit.
+    #[arg(long)]
+    test_notification: bool,
 }
 
 fn main() -> ExitCode {
@@ -124,6 +127,21 @@ fn run_linux(cli: &Cli) -> ExitCode {
 
 #[cfg(target_os = "macos")]
 fn run_macos(cli: &Cli) -> ExitCode {
+    if cli.test_notification {
+        return match notify_macos(
+            "Sensitive File Guard 测试通知",
+            "通知通道正常；这是一条合成测试消息。",
+        ) {
+            Ok(()) => {
+                eprintln!("guard-notify: macOS test notification delivered");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("guard-notify: macOS test notification failed: {error:#}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let client = match guard_client::macos::MacGuardClient::for_current_process() {
         Ok(client) => client,
         Err(error) => {
@@ -231,27 +249,7 @@ fn mac_notification_text(event: &EventInfo) -> (String, String) {
 
 #[cfg(target_os = "macos")]
 fn notify_macos(title: &str, body: &str) -> anyhow::Result<()> {
-    // Pass metadata through the environment, not through an AppleScript
-    // literal. This avoids code injection through a process name and never
-    // includes a protected resource path or file contents in a notification.
-    const SCRIPT: &str = r#"
-ObjC.import('stdlib');
-const app = Application.currentApplication();
-app.includeStandardAdditions = true;
-app.displayNotification(ObjC.unwrap($.getenv('GUARD_NOTIFY_BODY')), {
-  withTitle: ObjC.unwrap($.getenv('GUARD_NOTIFY_TITLE'))
-});
-"#;
-    let status = Command::new("/usr/bin/osascript")
-        .args(["-l", "JavaScript", "-e", SCRIPT])
-        .env("GUARD_NOTIFY_TITLE", title)
-        .env("GUARD_NOTIFY_BODY", body)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    anyhow::ensure!(status.success(), "osascript exited with {status}");
-    Ok(())
+    platform_macos::notifications::send(title, body)
 }
 
 #[cfg(target_os = "macos")]

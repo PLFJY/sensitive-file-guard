@@ -12,6 +12,7 @@ pub mod discovery;
 pub mod endpoint_security;
 pub mod identity;
 pub mod local_auth;
+pub mod notifications;
 mod pending;
 pub mod resource_index;
 pub mod system_extension;

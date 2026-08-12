@@ -15,6 +15,8 @@ fn main() {
     println!("cargo:rerun-if-changed=../../native/macos/local_auth_bridge.h");
     println!("cargo:rerun-if-changed=../../native/macos/user_agent_bridge.m");
     println!("cargo:rerun-if-changed=../../native/macos/user_agent_bridge.h");
+    println!("cargo:rerun-if-changed=../../native/macos/notification_bridge.m");
+    println!("cargo:rerun-if-changed=../../native/macos/notification_bridge.h");
 
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
         return;
@@ -26,6 +28,7 @@ fn main() {
         .file("../../native/macos/xpc_bridge.m")
         .file("../../native/macos/local_auth_bridge.m")
         .file("../../native/macos/user_agent_bridge.m")
+        .file("../../native/macos/notification_bridge.m")
         .flag("-fobjc-arc")
         .flag("-fblocks")
         .flag("-fmodules")
@@ -41,6 +44,7 @@ fn main() {
         .warnings_into_errors(true)
         .compile("guard_endpoint_security_bridge");
     println!("cargo:rustc-link-lib=framework=Foundation");
+    println!("cargo:rustc-link-lib=framework=AppKit");
     println!("cargo:rustc-link-lib=framework=LocalAuthentication");
     println!("cargo:rustc-link-lib=framework=ServiceManagement");
     println!("cargo:rustc-link-lib=EndpointSecurity");
