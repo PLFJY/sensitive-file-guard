@@ -803,8 +803,8 @@ fn wait_for_activation(
 fn watchdog_seconds(value: Option<&str>) -> anyhow::Result<u64> {
     let seconds = value.unwrap_or("90").parse::<u64>()?;
     anyhow::ensure!(
-        (15..=180).contains(&seconds),
-        "GUARD_EXTENSION_WATCHDOG_SECONDS must be between 15 and 180"
+        (15..=1_800).contains(&seconds),
+        "GUARD_EXTENSION_WATCHDOG_SECONDS must be between 15 and 1800"
     );
     Ok(seconds)
 }
@@ -916,45 +916,39 @@ fn run_system_extension_watchdog(
         )?;
         let stop_file = watchdog_stop_file(std::env::var_os("GUARD_EXTENSION_WATCHDOG_STOP_FILE"))?;
         controller.activate()?;
-        let status = wait_for_activation(controller, std::time::Duration::from_secs(120))?;
-        anyhow::ensure!(
-            status.state == LifecycleState::Active,
-            "watchdog activation did not become active: state={:?}, diagnostic={}",
-            status.state,
-            status.diagnostic
-        );
+        let session = (|| -> anyhow::Result<()> {
+            let status = wait_for_activation(controller, std::time::Duration::from_secs(120))?;
+            anyhow::ensure!(
+                status.state == LifecycleState::Active,
+                "watchdog activation did not become active: state={:?}, diagnostic={}",
+                status.state,
+                status.diagnostic
+            );
 
-        if let Err(error) = ordinary_sanity_with_timeout(std::time::Duration::from_secs(2)) {
-            let deactivation = deactivate_after_watchdog(controller);
-            return match deactivation {
-                Ok(()) => Err(error.context("initial ordinary-open sanity failed; deactivated")),
-                Err(deactivation) => Err(error.context(format!(
-                    "initial ordinary-open sanity failed AND deactivation failed: {deactivation:#}"
-                ))),
-            };
-        }
-        println!("WATCHDOG_ACTIVE duration_seconds={seconds}");
-        std::io::stdout().flush()?;
+            ordinary_sanity_with_timeout(std::time::Duration::from_secs(2))?;
+            println!("WATCHDOG_ACTIVE duration_seconds={seconds}");
+            std::io::stdout().flush()?;
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
-        let mut next_probe = std::time::Instant::now();
-        while std::time::Instant::now() < deadline && !stop_file.exists() {
-            if std::time::Instant::now() >= next_probe {
-                if let Err(error) = ordinary_sanity_with_timeout(std::time::Duration::from_secs(2))
-                {
-                    let deactivation = deactivate_after_watchdog(controller);
-                    return match deactivation {
-                        Ok(()) => Err(error.context("ordinary-open watchdog tripped; deactivated")),
-                        Err(deactivation) => Err(error.context(format!(
-                            "ordinary-open watchdog tripped AND deactivation failed: {deactivation:#}"
-                        ))),
-                    };
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+            let mut next_probe = std::time::Instant::now();
+            while std::time::Instant::now() < deadline && !stop_file.exists() {
+                if std::time::Instant::now() >= next_probe {
+                    ordinary_sanity_with_timeout(std::time::Duration::from_secs(2))?;
+                    next_probe = std::time::Instant::now() + std::time::Duration::from_millis(500);
                 }
-                next_probe = std::time::Instant::now() + std::time::Duration::from_millis(500);
+                std::thread::sleep(std::time::Duration::from_millis(100));
             }
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            Ok(())
+        })();
+        let deactivation = deactivate_after_watchdog(controller);
+        match (session, deactivation) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) => Err(error.context("activation watchdog tripped; deactivated")),
+            (Ok(()), Err(error)) => Err(error.context("activation watchdog could not deactivate")),
+            (Err(error), Err(deactivation)) => Err(error.context(format!(
+                "activation watchdog tripped AND deactivation failed: {deactivation:#}"
+            ))),
         }
-        deactivate_after_watchdog(controller)
     })();
 
     match result {
@@ -1433,9 +1427,9 @@ mod bundled_runtime_tests {
     fn activation_watchdog_duration_is_short_and_bounded() {
         assert_eq!(watchdog_seconds(None).unwrap(), 90);
         assert_eq!(watchdog_seconds(Some("15")).unwrap(), 15);
-        assert_eq!(watchdog_seconds(Some("180")).unwrap(), 180);
+        assert_eq!(watchdog_seconds(Some("1800")).unwrap(), 1_800);
         assert!(watchdog_seconds(Some("14")).is_err());
-        assert!(watchdog_seconds(Some("181")).is_err());
+        assert!(watchdog_seconds(Some("1801")).is_err());
         assert!(watchdog_seconds(Some("not-a-number")).is_err());
     }
 

@@ -72,6 +72,12 @@ LIVE_ES_ACCEPTANCE=I_ACCEPT_SYSTEM_EXTENSION_RISK
 
 缺少该确认或 SIP 仍开启时，脚本会拒绝激活。它不是跳过安全门的开关。
 
+首次 PoC 使用 90 秒自动卸载看门狗。后续需要人工操作的合成浏览器、SSH 和 namespace
+验收也必须通过 `--activate-system-extension-watchdog` 启动；可用
+`GUARD_EXTENSION_WATCHDOG_SECONDS` 将会话明确延长，但范围强制限制为 15–1800 秒。
+看门狗每 500 毫秒执行一次普通文件和进程探测，单次 2 秒未完成即请求卸载；激活等待、
+运行探测或验收本身失败时也不会跳过卸载请求。
+
 ## 紧急恢复
 
 如果启用扩展后普通软件无法打开：
