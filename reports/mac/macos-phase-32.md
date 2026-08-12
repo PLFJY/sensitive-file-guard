@@ -36,7 +36,10 @@ build 32 的最终 self-use bundle verification 通过：host 保留 system-exte
 
 ## SYSTEM EXTENSION ACTIVATION
 
-未请求 activation。检查时已安装的 build 31 extension `top.plfjy.SensitiveFileGuard.guard-es (0.1.0/31)` 仍为 `[activated enabled]`。
+未请求 activation。build 32 安装替换后检查，仍是 build 31 extension
+`top.plfjy.SensitiveFileGuard.guard-es (0.1.0/31)` `[activated enabled]`，运行中的
+`guard-es` PID 仍来自原有 `/Library/SystemExtensions/...` 路径；因此这次 App 替换没有触发
+extension 更新或重启。
 
 ## FULL DISK ACCESS
 
@@ -80,7 +83,13 @@ build 32 的最终 self-use bundle verification 通过：host 保留 system-exte
 
 ## RESTART / UPDATE
 
-build 32 仅生成在 `build/macos-release-v2/Guard.app`；没有替换 `/Applications/Guard.app`，没有重启也没有更新当前 active extension。这样不会在本阶段改变已工作的 live 防护。
+build 32 先在 `build/macos-release-v2/Guard.app` 完成最终验证，随后以可恢复方式安装：原
+build 31 App 已移动至废纸篓中的 `Guard.app.build31.phase32-backup`，build 32 被复制到
+`/Applications/Guard.app`。最终 `CFBundleVersion=32` 与 deep strict codesign 均通过。
+
+没有打开 Guard、没有调用 `OSSystemExtensionRequest`、没有改保护策略或配置；当前 live
+extension 因而保持 build 31 active。build 32 的 bundle 内 `--discover-macos-browsers` 再次
+实测发现 Edge，并将 Safari 资料目录列为 unsupported。
 
 ## FALLBACK STATUS
 
@@ -105,3 +114,5 @@ build 32 仅生成在 `build/macos-release-v2/Guard.app`；没有替换 `/Applic
 - build 32 self-contained GTK/signing/entitlement bundle: PASS
 - final signed build 32 metadata-only native discovery: Edge PASS；Safari detected-but-unsupported PASS
 - `scripts/macos/test-ui-layout.sh build/macos-release-v2/Guard.app`: PASS（Overview / Protection 均为 `800 × 560`）
+- `/Applications/Guard.app` staged build 32: PASS（`CFBundleVersion=32`、deep strict codesign）
+- App staging did not request an extension update: PASS（build 31 extension remains active）
