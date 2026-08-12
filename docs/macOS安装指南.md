@@ -28,6 +28,18 @@ scripts/macos/build-deploy-self-use.sh
 4. 执行 `sudo systemextensionsctl developer on`，打开 `Guard.app`，在 Protection 页面安装防护扩展，并按系统提示批准完全磁盘访问。
 5. 先登记合成浏览器 profile 和临时 SSH key，打开策略后运行现有 `scripts/macos/run-*-acceptance.sh`。
 
+## 确认助手和通知自检
+
+“遇到确认请求时自动打开 Guard”是可选的 LaunchAgent。开启后如果 macOS 要求批准，请到“系统设置 → 通用 → 登录项”批准 Guard；Protection 页面会保留注册失败的具体错误，不会再只把开关无提示地弹回去。
+
+在当前用户登录会话中测试系统通知：
+
+```sh
+/Applications/Guard.app/Contents/MacOS/guard-notify --test-notification
+```
+
+这条命令只发送一条合成通知，不读取受保护文件。若命令失败，查看终端中的原生通知错误；若命令成功但横幅不可见，检查系统设置中的 Guard 通知权限、专注模式和通知中心摘要设置。真实拒绝事件只有在 `guard-notify` 已运行并完成初始事件基线后才会通知新事件。
+
 ## 三种构建模式
 
 - `LOCAL_SIGNING_ONLY=1`：无受限 entitlement，只做 GUI/打包 smoke test，不能真实拦截。
