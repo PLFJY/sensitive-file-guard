@@ -27,14 +27,32 @@ guard_es="$extension_bundle/Contents/MacOS/guard-es"
 service_name=$(plutil -extract NSEndpointSecurityMachServiceName raw \
     "$extension_bundle/Contents/Info.plist")
 team_id=$(codesign -dvv "$extension_bundle" 2>&1 | sed -n 's/^TeamIdentifier=//p')
-if [ -z "$team_id" ] || [ "$team_id" = "not set" ]; then
-    echo "test-xpc-auth.sh requires a Team-signed development bundle" >&2
+signing_authority=$(codesign -dvv "$extension_bundle" 2>&1 \
+    | sed -n 's/^Authority=//p' | head -n 1)
+test -n "$signing_authority" || {
+    echo "could not determine the bundle signing authority" >&2
     exit 2
+}
+signing_selector=$signing_authority
+identity_description="Apple Team $team_id"
+local_certificate=
+if [ -z "$team_id" ] || [ "$team_id" = "not set" ]; then
+    : "${SELF_USE_SIGNING_IDENTITY:?SELF_USE_SIGNING_IDENTITY is required for a local-certificate bundle}"
+    : "${SELF_USE_SIGNING_KEYCHAIN:?SELF_USE_SIGNING_KEYCHAIN is required for a local-certificate bundle}"
+    local_certificate=$(
+        "$script_dir/resolve-self-use-signing-identity.sh" \
+            "$SELF_USE_SIGNING_IDENTITY" "$SELF_USE_SIGNING_KEYCHAIN"
+    )
+    signing_selector=$local_certificate
+    identity_description="local certificate $local_certificate"
+    local_requirement="=certificate leaf = H\"$local_certificate\""
+    codesign --verify --strict --requirement "$local_requirement" "$app_bundle"
+    codesign --verify --strict --requirement "$local_requirement" "$extension_bundle"
 fi
 
 guard_xpc_test_root=$(mktemp -d "${TMPDIR:-/tmp}/guard-xpc-phase05.XXXXXX")
 domain="gui/$(id -u)"
-label="top.plfjy.SensitiveFileGuard.phase05.$PPID"
+label="top.plfjy.SensitiveFileGuard.xpc-auth.$PPID"
 plist="$guard_xpc_test_root/$label.plist"
 probe="$guard_xpc_test_root/wrong-signed-probe"
 test_server="$guard_xpc_test_root/guard-es-xpc-test-server"
@@ -63,18 +81,12 @@ trap cleanup EXIT HUP INT TERM
 # when launched outside its approved container. Re-sign a temporary byte-for-
 # byte copy without entitlements for transport-only testing; the production
 # app/extension bundle remains untouched and live ES is not claimed here.
-signing_authority=$(codesign -dvv "$extension_bundle" 2>&1 \
-    | sed -n 's/^Authority=//p' | head -n 1)
 extension_identifier=$(plutil -extract CFBundleIdentifier raw \
     "$extension_bundle/Contents/Info.plist")
 app_identifier=$(plutil -extract CFBundleIdentifier raw \
     "$app_bundle/Contents/Info.plist")
-test -n "$signing_authority" || {
-    echo "could not determine the development signing authority" >&2
-    exit 2
-}
 cp "$guard_es" "$test_server"
-codesign --force --sign "$signing_authority" \
+codesign --force --sign "$signing_selector" \
     --identifier "$extension_identifier" "$test_server" >/dev/null
 guard_es=$test_server
 mkdir -p "$test_app/Contents/MacOS" "$test_app/Contents/Library/LaunchAgents"
@@ -89,12 +101,19 @@ if [ -d "$app_bundle/Contents/Resources" ]; then
 fi
 cp "$guard_ui" "$test_ui"
 cp "$guard_notify" "$test_app/Contents/MacOS/guard-notify"
-codesign --force --sign "$signing_authority" \
+codesign --force --sign "$signing_selector" \
     --identifier "$app_identifier.guard-notify" \
     "$test_app/Contents/MacOS/guard-notify" >/dev/null
-codesign --force --sign "$signing_authority" \
+codesign --force --sign "$signing_selector" \
     --identifier "$app_identifier" "$test_app" >/dev/null
 guard_ui=$test_ui
+if [ -n "$local_certificate" ]; then
+    codesign --verify --strict --requirement "$local_requirement" "$guard_es"
+    codesign --verify --strict --requirement "$local_requirement" "$guard_ui"
+    codesign --verify --strict --requirement "$local_requirement" "$guardctl"
+    codesign --verify --strict --requirement "$local_requirement" "$guard_notify"
+fi
+echo "XPC transport test identity: $identity_description"
 
 plutil -create xml1 "$plist"
 plutil -insert Label -string "$label" "$plist"
@@ -160,8 +179,8 @@ xcrun clang -fobjc-arc -fmodules -Wall -Wextra -Werror \
     -o "$probe"
 codesign --force --sign - --identifier "$label.wrong-signed" "$probe" >/dev/null
 "$probe" "$service_name"
-codesign --force --sign "$signing_authority" \
-    --identifier "$label.same-team-unlisted" "$probe" >/dev/null
+codesign --force --sign "$signing_selector" \
+    --identifier "$label.same-identity-unlisted" "$probe" >/dev/null
 "$probe" "$service_name"
 
-echo "PASS: signed Guard UI/CLI/pending helper reached XPC; ad-hoc and same-Team unlisted same-UID SSH self-approval attempts did not"
+echo "PASS: signed Guard UI/CLI/pending helper reached XPC; ad-hoc and same-identity unlisted same-UID SSH self-approval attempts did not"
