@@ -145,6 +145,8 @@ fn main() {
     let packaging_smoke = std::env::args().any(|arg| arg == "--packaging-smoke");
     let layout_smoke_page = if std::env::args().any(|arg| arg == "--ui-layout-smoke-protection") {
         Some("protection")
+    } else if std::env::args().any(|arg| arg == "--ui-layout-smoke-log") {
+        Some("log")
     } else if std::env::args().any(|arg| arg == "--ui-layout-smoke") {
         Some("overview")
     } else {
@@ -310,6 +312,9 @@ fn build_ui(app: &adw::Application, pending_only: bool, layout_smoke_page: Optio
 
     if let Some(page) = layout_smoke_page {
         apply_layout_smoke_state(&state);
+        if page == "log" {
+            apply_log_layout_smoke_state(&state);
+        }
         stack.set_visible_child_name(page);
     } else {
         load_configuration(&state);
@@ -334,6 +339,34 @@ fn apply_layout_smoke_state(state: &UiState) {
         .endpoint_security_entitlement_status
         .set_subtitle(long_status);
     state.mac_setup_message.set_text(long_status);
+}
+
+fn apply_log_layout_smoke_state(state: &UiState) {
+    let event = guard_ipc::EventInfo {
+        id: 1,
+        event_code: "access_decision".into(),
+        ts_ms: 1,
+        uid: 501,
+        pid: 42,
+        start_time: 1,
+        decision: "Deny(UnknownProcess)".into(),
+        deny_reason: Some("UnknownProcess".into()),
+        reason_code: Some("browser_protected_resource".into()),
+        resource_kind: "CookieStore".into(),
+        resource_kind_code: "browser_cookie_store".into(),
+        resource_browser: Some("synthetic-browser".into()),
+        resource_profile: Some("Synthetic Profile".into()),
+        path: "/synthetic/protected/Browser Profile/Network/Cookies with a deliberately long metadata path".into(),
+        exe: "/Users/example/Applications/a-process-with-a-deliberately-long-name-that-must-not-stretch-the-window".into(),
+        exe_owner_uid: 501,
+        trust_tier: "Unknown".into(),
+        process_browser: None,
+        parent_pid: None,
+        parent_exe: None,
+        lease_id: None,
+        backend_diag: "synthetic layout smoke".into(),
+    };
+    state.events.append(&event_row(&event));
 }
 
 fn scroll_page(content: gtk::Box) -> gtk::ScrolledWindow {
@@ -578,23 +611,76 @@ fn log_page(state: &UiState) -> gtk::Box {
             }
             data.borrow_mut().extend(page.clone());
             for event in page {
-                let row = gtk::ListBoxRow::new();
-                let label = gtk::Label::new(Some(&format!(
-                    "#{}  {}  {}",
-                    event.id, event.decision, event.path
-                )));
-                label.set_xalign(0.0);
-                label.set_margin_top(6);
-                label.set_margin_bottom(6);
-                label.set_margin_start(6);
-                label.set_margin_end(6);
-                row.set_child(Some(&label));
-                events.append(&row);
+                events.append(&event_row(&event));
             }
         });
     });
     page.append(&older);
     page
+}
+
+fn event_row(event: &guard_ipc::EventInfo) -> gtk::ListBoxRow {
+    let decision = match event.event_code.as_str() {
+        "browser_migration_confirmation_required" => "IMPORT CONFIRMATION REQUIRED",
+        "browser_migration_allowed" => "IMPORT ALLOWED",
+        "browser_migration_blocked" => "IMPORT BLOCKED",
+        "browser_migration_timed_out" => "IMPORT TIMED OUT",
+        "ssh_key_access_confirmation_required" => "SSH CONFIRMATION REQUIRED",
+        "ssh_key_access_allowed" => "SSH ACCESS ALLOWED",
+        "ssh_key_access_blocked" => "SSH ACCESS BLOCKED",
+        "ssh_key_access_timed_out" => "SSH ACCESS TIMED OUT",
+        _ if is_blocked_event(event) => "BLOCKED",
+        _ if event.decision.starts_with("AllowByLease") => "ALLOWED BY LEASE",
+        _ => "ALLOWED",
+    };
+    event_row_with_decision(event, decision)
+}
+
+fn event_row_with_decision(event: &guard_ipc::EventInfo, decision: &str) -> gtk::ListBoxRow {
+    let row = gtk::ListBoxRow::new();
+    let box_ = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    box_.set_hexpand(true);
+    box_.set_margin_top(6);
+    box_.set_margin_bottom(6);
+    box_.set_margin_start(6);
+    box_.set_margin_end(6);
+
+    // Process names and paths are untrusted metadata. Without a width cap a
+    // GTK Label contributes its entire natural width to the ListBox and makes
+    // the security log stretch the whole window horizontally.
+    let title = gtk::Label::new(Some(&format!("{}  ·  {}", decision, event.exe)));
+    title.set_xalign(0.0);
+    title.set_hexpand(true);
+    title.set_wrap(true);
+    title.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    title.set_max_width_chars(SUMMARY_WIDTH_CHARS);
+    title.set_width_chars(1);
+    title.set_lines(2);
+    title.add_css_class(
+        if decision.contains("BLOCKED") || decision.contains("TIMED OUT") {
+            "error"
+        } else {
+            "success"
+        },
+    );
+
+    let subtitle = gtk::Label::new(Some(&format!(
+        "#{} · {} · {}",
+        event.id, event.resource_kind, event.path
+    )));
+    subtitle.set_xalign(0.0);
+    subtitle.set_hexpand(true);
+    subtitle.set_wrap(true);
+    subtitle.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    subtitle.set_max_width_chars(SUMMARY_WIDTH_CHARS);
+    subtitle.set_width_chars(1);
+    subtitle.set_lines(2);
+    subtitle.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+
+    box_.append(&title);
+    box_.append(&subtitle);
+    row.set_child(Some(&box_));
+    row
 }
 
 fn is_blocked_event(event: &guard_ipc::EventInfo) -> bool {
@@ -1296,8 +1382,6 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
                 }
             }
             for event in recent_events {
-                let row = gtk::ListBoxRow::new();
-                let box_ = gtk::Box::new(gtk::Orientation::Vertical, 2);
                 let decision = match event.event_code.as_str() {
                     "browser_migration_confirmation_required" => "IMPORT CONFIRMATION REQUIRED",
                     "browser_migration_allowed" => "IMPORT ALLOWED",
@@ -1311,22 +1395,7 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
                     _ if event.decision.starts_with("AllowByLease") => "ALLOWED BY LEASE",
                     _ => "ALLOWED",
                 };
-                let title = gtk::Label::new(Some(&format!("{}  ·  {}", decision, event.exe)));
-                title.set_xalign(0.0);
-                title.add_css_class(if decision.contains("BLOCKED") || decision.contains("TIMED OUT") {
-                    "error"
-                } else {
-                    "success"
-                });
-                let subtitle = gtk::Label::new(Some(&format!(
-                    "#{} · {} · {}",
-                    event.id, event.resource_kind, event.path
-                )));
-                subtitle.set_xalign(0.0);
-                subtitle.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
-                box_.append(&title);
-                box_.append(&subtitle);
-                row.set_child(Some(&box_));
+                let row = event_row_with_decision(&event, decision);
                 if after_id.is_some() {
                     events.insert(&row, 0);
                 } else {

@@ -72,3 +72,4 @@ run_page() {
 
 run_page overview --ui-layout-smoke
 run_page protection --ui-layout-smoke-protection
+run_page log --ui-layout-smoke-log
