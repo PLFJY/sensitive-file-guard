@@ -60,18 +60,15 @@ it without provisioning profiles. It tests packaging, not Endpoint Security.
 
 ## Release installation
 
-1. Build with a Developer ID Application identity and separate matching host
-   and Endpoint Security provisioning profiles as documented in the release
-   guide.
-2. Notarize and staple with the external Keychain-profile flow.
-3. Place the stapled `Guard.app` in `/Applications`.
-4. Launch Guard and request system-extension activation through the UI.
-5. Complete ordinary System Settings approval if requested.
-6. Grant Full Disk Access through System Settings when Guard reports
-   `REQUIRES_FULL_DISK_ACCESS`.
-7. Register the pending helper with its separate SMAppService switch.
-8. Enroll only reviewed profiles/keys, then enable policy after authenticated
-   product health reports active enforcement.
+For the normal end-user sequence, follow the Chinese
+[macOS protection guide](macOS保护启用指南.md). The GUI now requests
+system-extension installation, opens the Full Disk Access pane, and explains
+whether a local test build lacks the Apple authorization required to continue.
+
+Release publishers must still build with a Developer ID Application identity,
+matching host/Endpoint Security provisioning profiles, then notarize and staple
+before distributing `Guard.app`. An end user cannot repair a missing restricted
+entitlement by granting more local permissions.
 
 Guard never edits TCC, disables SIP/Secure Boot, shells out to
 `systemextensionsctl`, or silently modifies shell profiles. The CLI remains at
