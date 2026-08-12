@@ -111,6 +111,8 @@ pub struct PlatformOverview {
     pub full_disk_access: String,
     pub policy_enabled: bool,
     pub helper_state: String,
+    pub sip_state: String,
+    pub developer_mode_state: String,
 }
 
 #[cfg(target_os = "macos")]
@@ -128,6 +130,22 @@ fn self_use_bundle_marker_present() -> bool {
             .and_then(std::path::Path::parent)
             .is_some_and(|contents| contents.join("Resources/SELF_USE_SIP_OFF.txt").is_file())
     })
+}
+
+#[cfg(target_os = "macos")]
+fn current_app_bundle() -> Option<std::path::PathBuf> {
+    std::env::current_exe()
+        .ok()?
+        .parent()?
+        .parent()?
+        .parent()
+        .map(std::path::Path::to_path_buf)
+}
+
+#[cfg(target_os = "macos")]
+fn self_use_app_is_in_applications() -> bool {
+    current_app_bundle()
+        .is_some_and(|app| app.parent() == Some(std::path::Path::new("/Applications")))
 }
 
 #[cfg(target_os = "macos")]
@@ -234,6 +252,12 @@ pub fn mac_setup_readiness() -> MacSetupReadiness {
             explanation: "这是 SIP-off 自用构建，但当前 SIP 仍处于开启状态。请在 macOS Recovery 中手动执行 csrutil disable，重启后再回来安装扩展；Guard 不会也不能替你修改 SIP。".into(),
         };
     }
+    if self_use && !self_use_app_is_in_applications() {
+        return MacSetupReadiness {
+            can_request_extension_install: false,
+            explanation: "SIP-off 自用构建需要从 /Applications 启动，macOS 才会接受防护扩展安装。请把 Guard.app 复制到 /Applications 后重新打开；不要从 build/ 目录点击安装。".into(),
+        };
+    }
     match platform_macos::system_extension::host_install_entitlement_present() {
         Ok(true) => MacSetupReadiness {
             can_request_extension_install: true,
@@ -325,6 +349,8 @@ pub fn platform_overview(
             "Not running"
         }
         .into(),
+        sip_state: "Not applicable".into(),
+        developer_mode_state: "Not applicable".into(),
     }
 }
 
@@ -356,6 +382,21 @@ pub fn platform_overview(
             .and_then(|configuration| configuration.policy_enabled)
             .unwrap_or(false),
         helper_state: helper_state.into(),
+        sip_state: if self_use_bundle_marker_present() {
+            match sip_is_disabled() {
+                Ok(true) => "已关闭（自用模式要求）".into(),
+                Ok(false) => "已开启（自用模式不可用）".into(),
+                Err(_) => "无法检查".into(),
+            }
+        } else {
+            "不适用".into()
+        },
+        developer_mode_state: if self_use_bundle_marker_present() {
+            "需手动启用：sudo systemextensionsctl developer on（当前 macOS 没有只读状态查询）"
+                .into()
+        } else {
+            "不适用".into()
+        },
     }
 }
 
@@ -371,6 +412,8 @@ pub fn platform_overview(
         full_disk_access: "Unknown".into(),
         policy_enabled: false,
         helper_state: "Unsupported".into(),
+        sip_state: "Unsupported".into(),
+        developer_mode_state: "Unsupported".into(),
     }
 }
 

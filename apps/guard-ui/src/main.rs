@@ -108,6 +108,8 @@ struct UiState {
     helper_syncing: Rc<Cell<bool>>,
     extension_status: adw::ActionRow,
     fda_status: adw::ActionRow,
+    sip_status: adw::ActionRow,
+    developer_mode_status: adw::ActionRow,
     mac_setup_message: gtk::Label,
     pending_dialogs: Rc<RefCell<PendingDialogController>>,
 }
@@ -173,6 +175,12 @@ fn build_ui(app: &adw::Application, pending_only: bool) {
     let fda_status = adw::ActionRow::new();
     fda_status.set_title("完全磁盘访问");
     fda_status.set_subtitle("正在检查权限状态…");
+    let sip_status = adw::ActionRow::new();
+    sip_status.set_title("SIP");
+    sip_status.set_subtitle("正在检查…");
+    let developer_mode_status = adw::ActionRow::new();
+    developer_mode_status.set_title("System Extension developer mode");
+    developer_mode_status.set_subtitle("正在检查…");
     let mac_setup_message = gtk::Label::new(None);
     mac_setup_message.set_wrap(true);
     mac_setup_message.set_xalign(0.0);
@@ -197,6 +205,8 @@ fn build_ui(app: &adw::Application, pending_only: bool) {
         helper_syncing: Rc::new(Cell::new(false)),
         extension_status,
         fda_status,
+        sip_status,
+        developer_mode_status,
         mac_setup_message,
         pending_dialogs: Rc::new(RefCell::new(PendingDialogController::default())),
     };
@@ -325,6 +335,8 @@ fn protection_page(state: &UiState) -> gtk::Box {
         page.append(&heading);
         let group = adw::PreferencesGroup::new();
         group.set_title("请按以下顺序完成");
+        group.add(&state.sip_status);
+        group.add(&state.developer_mode_status);
         group.add(&state.extension_status);
         group.add(&state.fda_status);
         page.append(&group);
@@ -1049,6 +1061,8 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
     let helper_syncing = state.helper_syncing.clone();
     let extension_status = state.extension_status.clone();
     let fda_status = state.fda_status.clone();
+    let sip_status = state.sip_status.clone();
+    let developer_mode_status = state.developer_mode_status.clone();
     let pending_dialogs = state.pending_dialogs.clone();
     let config_state = state.clone();
     let window = window.clone();
@@ -1161,6 +1175,8 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
             }
             extension_status.set_subtitle(&overview.extension_state);
             fda_status.set_subtitle(&overview.full_disk_access);
+            sip_status.set_subtitle(&overview.sip_state);
+            developer_mode_status.set_subtitle(&overview.developer_mode_state);
             detail.set_text(&platform_service::overview_detail(
                 daemon.as_ref(),
                 &overview,
