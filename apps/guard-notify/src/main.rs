@@ -157,10 +157,10 @@ fn run_macos(cli: &Cli) -> ExitCode {
         let events_ok = match client.events_cursor(Some(100), None, events.last_seen()) {
             Ok(snapshot) => {
                 for event in events.observe(snapshot) {
-                    let (title, body) = mac_notification_text(&event);
-                    if let Err(error) = notify_macos(&title, &body) {
-                        eprintln!("guard-notify: macOS system notification failed: {error:#}");
-                    }
+                    // Guard.app owns macOS event notifications. This helper
+                    // remains responsible for surfacing pending confirmations
+                    // and must not duplicate the event notification stream.
+                    let _ = event;
                 }
                 true
             }
@@ -172,12 +172,6 @@ fn run_macos(cli: &Cli) -> ExitCode {
         let pending_ok = match fetch_macos_pending(&client) {
             Ok(pending) => {
                 if observer.observe(pending) {
-                    if let Err(error) = notify_macos(
-                        "Sensitive File Guard confirmation required",
-                        "A protected browser-data or SSH-key access request is waiting for your decision.",
-                    ) {
-                        eprintln!("guard-notify: macOS system notification failed: {error:#}");
-                    }
                     activate_guard_ui_macos();
                 }
                 true
@@ -237,6 +231,7 @@ impl MacEventObserver {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(dead_code)]
 fn mac_notification_text(event: &EventInfo) -> (String, String) {
     let executable = Path::new(&event.exe)
         .file_name()
@@ -252,6 +247,7 @@ fn mac_notification_text(event: &EventInfo) -> (String, String) {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(dead_code)]
 fn notify_macos(title: &str, body: &str) -> anyhow::Result<()> {
     platform_macos::notifications::send(title, body)
 }

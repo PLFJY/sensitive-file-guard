@@ -4,7 +4,7 @@
 
 ## 运行链路
 
-`Guard.app` 负责 GUI、配置和用户确认；嵌套的 `guard-es.systemextension` 创建 Endpoint Security client；`guardctl` 和 `guard-notify` 通过经过签名身份验证的 XPC 与控制面通信。策略、资源索引、进程身份、审计和 deadline 逻辑只有一份，不在 GUI 中复制。
+`Guard.app` 负责 GUI、配置、用户确认和 macOS 系统通知；嵌套的 `guard-es.systemextension` 创建 Endpoint Security client；`guardctl` 和 `guard-notify` 通过经过签名身份验证的 XPC 与控制面通信。`guard-notify` 在 macOS 上只负责发现 pending 请求并唤起 Guard，不发送拒绝通知，避免通知代理和 GUI 重复发送。策略、资源索引、进程身份、审计和 deadline 逻辑只有一份，不在 GUI 中复制。
 
 ## AUTH_OPEN 决策
 

@@ -30,7 +30,7 @@ scripts/macos/build-deploy-self-use.sh
 
 ## 确认助手和通知自检
 
-“遇到确认请求时自动打开 Guard”是可选的 LaunchAgent。开启后如果 macOS 要求批准，请到“系统设置 → 通用 → 登录项”批准 Guard；Protection 页面会保留注册失败的具体错误，不会再只把开关无提示地弹回去。
+“遇到确认请求时自动打开 Guard”是可选的 LaunchAgent。开启后如果 macOS 要求批准，请到“系统设置 → 通用 → 登录项”批准 Guard；Protection 页面会保留注册失败的具体错误，不会再只把开关无提示地弹回去。macOS 的拒绝和确认通知由 `Guard.app` GUI 进程发送；`guard-notify` 只负责发现 pending 请求并唤起 GUI，不会重复发送通知。
 
 在当前用户登录会话中测试系统通知：
 
