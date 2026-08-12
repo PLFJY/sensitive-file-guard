@@ -42,6 +42,10 @@ else
     team=${DEVELOPMENT_TEAM:?DEVELOPMENT_TEAM is required}
     signing_mode=release
 fi
+
+if [ "$signing_mode" = self-use ]; then
+    "$script_dir/self-use-safety-gate.sh"
+fi
 case "$build_root" in /|"$repo_dir") echo "unsafe MACOS_RELEASE_ROOT: $build_root" >&2; exit 2 ;; esac
 if [ "$signing_mode" = release ]; then
     : "${HOST_PROVISIONING_PROFILE:?HOST_PROVISIONING_PROFILE is required}"
@@ -63,12 +67,14 @@ for command_name in codesign ditto file; do
     }
 done
 
-MACOS_BUILD_ROOT="$build_root" BUILD_PROFILE=release SKIP_SIGNING=1 \
+SELF_USE_SIP_OFF=0 MACOS_BUILD_ROOT="$build_root" BUILD_PROFILE=release SKIP_SIGNING=1 \
     "$script_dir/build-dev-app.sh"
 "$script_dir/bundle-gtk-runtime.sh" "$app"
 
 if [ "$signing_mode" = self-use ]; then
-    printf '%s\n' 'SELF-USE / SIP-OFF: local entitlement-bearing build; not notarized or distributable' \
+    printf '%s\n%s\n' \
+        'SELF-USE / SIP-OFF: local entitlement-bearing build; not notarized or distributable' \
+        'SAFETY_GATE=mac-auth-scope-v1' \
         >"$app/Contents/Resources/SELF_USE_SIP_OFF.txt"
 fi
 

@@ -10,6 +10,19 @@ self_use=${SELF_USE_SIP_OFF:-0}
 case "$self_use" in 0|1) ;; *) echo "SELF_USE_SIP_OFF must be 0 or 1" >&2; exit 2 ;; esac
 if [ "$self_use" = 1 ]; then
     : "${SELF_USE_SIGNING_IDENTITY:?SELF_USE_SIGNING_IDENTITY is required for SELF_USE_SIP_OFF=1}"
+    test "${LIVE_ES_ACCEPTANCE:-}" = I_ACCEPT_SYSTEM_EXTENSION_RISK || {
+        echo "refusing live Endpoint Security activation without LIVE_ES_ACCEPTANCE=I_ACCEPT_SYSTEM_EXTENSION_RISK" >&2
+        exit 2
+    }
+    sip_status=$(csrutil status 2>&1 || true)
+    case "$(printf '%s' "$sip_status" | tr '[:upper:]' '[:lower:]')" in
+        *disabled*) ;;
+        *)
+            echo "$sip_status" >&2
+            echo "BLOCKED: self-use live ES acceptance requires SIP disabled" >&2
+            exit 77
+            ;;
+    esac
 else
     : "${APP_BUNDLE_ID:?approved APP_BUNDLE_ID is required}"
     : "${SYSTEM_EXTENSION_BUNDLE_ID:?approved SYSTEM_EXTENSION_BUNDLE_ID is required}"
@@ -28,6 +41,7 @@ canary="SDF_CANARY_MAC_ES_PHASE03"
 activated=0
 app_root=${MACOS_ES_POC_ROOT:-"$repo_dir/build/macos-es-poc"}
 app="$app_root/Guard.app"
+installed_app=${MACOS_ES_POC_INSTALLED_APP:-"/Applications/Guard ES PoC.app"}
 
 cleanup() {
     if [ "$activated" -eq 1 ]; then
@@ -47,9 +61,16 @@ probe=$(cd target/debug && pwd)/guard-test-probe
 if [ "$self_use" = 1 ]; then
     GUARD_ES_POC=1 GUARD_ES_POC_FILE="$fixture" GUARD_ES_POC_ALLOW_EXE="$probe" \
         SELF_USE_SIP_OFF=1 SELF_USE_SIGNING_IDENTITY="$SELF_USE_SIGNING_IDENTITY" \
-        MACOS_RELEASE_ROOT="$app_root" CODESIGN_TIMESTAMP=none \
-        scripts/macos/build-release-app.sh
-    scripts/macos/self-use-preflight.sh "$app"
+        SELF_USE_SIGNING_KEYCHAIN="${SELF_USE_SIGNING_KEYCHAIN:-}" \
+        MACOS_BUILD_ROOT="$app_root" BUILD_PROFILE=release GUARD_BUILD_NUMBER=2 \
+        scripts/macos/build-dev-app.sh
+    scripts/macos/inspect-signing.sh "$app"
+    test ! -e "$installed_app" || {
+        echo "refusing to overwrite existing PoC app: $installed_app" >&2
+        exit 2
+    }
+    ditto "$app" "$installed_app"
+    app="$installed_app"
 else
     GUARD_ES_POC=1 \
 GUARD_ES_POC_FILE="$fixture" \

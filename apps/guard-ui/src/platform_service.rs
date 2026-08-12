@@ -123,13 +123,17 @@ pub struct MacSetupReadiness {
 }
 
 #[cfg(target_os = "macos")]
-fn self_use_bundle_marker_present() -> bool {
-    std::env::current_exe().ok().is_some_and(|executable| {
-        executable
-            .parent()
-            .and_then(std::path::Path::parent)
-            .is_some_and(|contents| contents.join("Resources/SELF_USE_SIP_OFF.txt").is_file())
-    })
+fn self_use_bundle_marker() -> Option<String> {
+    let executable = std::env::current_exe().ok()?;
+    let contents = executable.parent()?.parent()?;
+    std::fs::read_to_string(contents.join("Resources/SELF_USE_SIP_OFF.txt")).ok()
+}
+
+#[cfg(target_os = "macos")]
+fn self_use_safety_gate_valid(marker: &str) -> bool {
+    marker
+        .lines()
+        .any(|line| line == "SAFETY_GATE=mac-auth-scope-v1")
 }
 
 #[cfg(target_os = "macos")]
@@ -245,7 +249,16 @@ pub const fn protection_switch_subtitle() -> &'static str {
 
 #[cfg(target_os = "macos")]
 pub fn mac_setup_readiness() -> MacSetupReadiness {
-    let self_use = self_use_bundle_marker_present();
+    let self_use_marker = self_use_bundle_marker();
+    let self_use = self_use_marker
+        .as_deref()
+        .is_some_and(self_use_safety_gate_valid);
+    if self_use_marker.is_some() && !self_use {
+        return MacSetupReadiness {
+            can_request_extension_install: false,
+            explanation: "这个 SIP-off 自用包没有通过当前 macOS AUTH_OPEN 安全门，安装按钮已强制禁用。请重新构建，不要激活事故前的旧包。".into(),
+        };
+    }
     if self_use && !sip_is_disabled().unwrap_or(false) {
         return MacSetupReadiness {
             can_request_extension_install: false,
@@ -382,7 +395,7 @@ pub fn platform_overview(
             .and_then(|configuration| configuration.policy_enabled)
             .unwrap_or(false),
         helper_state: helper_state.into(),
-        sip_state: if self_use_bundle_marker_present() {
+        sip_state: if self_use_bundle_marker().is_some() {
             match sip_is_disabled() {
                 Ok(true) => "已关闭（自用模式要求）".into(),
                 Ok(false) => "已开启（自用模式不可用）".into(),
@@ -391,7 +404,7 @@ pub fn platform_overview(
         } else {
             "不适用".into()
         },
-        developer_mode_state: if self_use_bundle_marker_present() {
+        developer_mode_state: if self_use_bundle_marker().is_some() {
             "需手动启用：sudo systemextensionsctl developer on（当前 macOS 没有只读状态查询）"
                 .into()
         } else {
@@ -1127,7 +1140,7 @@ pub fn migration_pending() -> anyhow::Result<Vec<guard_ipc::MigrationPendingInfo
 
 #[cfg(all(test, target_os = "macos"))]
 mod bundled_runtime_tests {
-    use super::render_loader_cache;
+    use super::{render_loader_cache, self_use_safety_gate_valid};
 
     #[test]
     fn loader_cache_is_relocated_and_escaped() {
@@ -1137,5 +1150,16 @@ mod bundled_runtime_tests {
         );
         assert!(!rendered.contains("@GUARD_APP@"));
         assert!(rendered.contains(r#"/Applications/Guard \"QA\".app/Contents"#));
+    }
+
+    #[test]
+    fn self_use_marker_requires_the_current_auth_scope_gate() {
+        assert!(self_use_safety_gate_valid(
+            "SELF-USE / SIP-OFF\nSAFETY_GATE=mac-auth-scope-v1\n"
+        ));
+        assert!(!self_use_safety_gate_valid("SELF-USE / SIP-OFF\n"));
+        assert!(!self_use_safety_gate_valid(
+            "SELF-USE / SIP-OFF\nSAFETY_GATE=older-revision\n"
+        ));
     }
 }

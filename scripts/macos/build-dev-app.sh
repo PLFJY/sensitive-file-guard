@@ -19,6 +19,8 @@ version=${GUARD_VERSION:-0.1.0}
 build_number=${GUARD_BUILD_NUMBER:-1}
 build_profile=${BUILD_PROFILE:-debug}
 signing_identity=${SIGNING_IDENTITY:--}
+self_use=${SELF_USE_SIP_OFF:-0}
+self_use_keychain=${SELF_USE_SIGNING_KEYCHAIN:-}
 
 validate_bundle_id() {
     case "$1" in
@@ -31,6 +33,28 @@ validate_bundle_id() {
 validate_bundle_id "$app_bundle_id"
 validate_bundle_id "$extension_bundle_id"
 validate_bundle_id "$guard_xpc_service_name"
+case "$self_use" in 0|1) ;; *) echo "SELF_USE_SIP_OFF must be 0 or 1" >&2; exit 2 ;; esac
+if [ "$self_use" = 1 ]; then
+    signing_identity=${SELF_USE_SIGNING_IDENTITY:?SELF_USE_SIGNING_IDENTITY is required for SELF_USE_SIP_OFF=1}
+    test "$signing_identity" != - || {
+        echo "SELF_USE_SIP_OFF requires a local certificate; ad-hoc signing is not valid for authenticated XPC" >&2
+        exit 2
+    }
+    test "${SKIP_SIGNING:-0}" != 1 || {
+        echo "SELF_USE_SIP_OFF cannot be combined with SKIP_SIGNING=1" >&2
+        exit 2
+    }
+    if [ -n "$self_use_keychain" ]; then
+        keychain_password=$(security find-generic-password -a "$USER" \
+            -s io.github.plfjy.SensitiveFileGuard.self-use-keychain -w 2>/dev/null) || {
+            echo "cannot unlock SELF_USE_SIGNING_KEYCHAIN: local keychain password is unavailable" >&2
+            exit 2
+        }
+        security unlock-keychain -p "$keychain_password" "$self_use_keychain"
+        unset keychain_password
+    fi
+    "$script_dir/self-use-safety-gate.sh"
+fi
 case "$version:$build_number" in
     *[!0-9.:+-]*)
         echo "GUARD_VERSION/GUARD_BUILD_NUMBER contain unsupported characters" >&2
@@ -119,17 +143,32 @@ if [ -n "${HOST_PROVISIONING_PROFILE:-}" ] || [ -n "${EXTENSION_PROVISIONING_PRO
     cp "$EXTENSION_PROVISIONING_PROFILE" "$extension_bundle/Contents/embedded.provisionprofile"
 fi
 
+if [ "$self_use" = 1 ]; then
+    mkdir -p "$app_bundle/Contents/Resources"
+    printf '%s\n%s\n' \
+        'SELF-USE / SIP-OFF development bundle; not notarized or distributable' \
+        'SAFETY_GATE=mac-auth-scope-v1' \
+        >"$app_bundle/Contents/Resources/SELF_USE_SIP_OFF.txt"
+fi
+
 if [ "${SKIP_SIGNING:-0}" != "1" ]; then
-    codesign --force --sign "$signing_identity" \
+    sign_code() {
+        if [ -n "$self_use_keychain" ]; then
+            codesign --force --sign "$signing_identity" --keychain "$self_use_keychain" "$@"
+        else
+            codesign --force --sign "$signing_identity" "$@"
+        fi
+    }
+    sign_code \
         --identifier "$app_bundle_id.guardctl" \
         "$app_bundle/Contents/MacOS/guardctl"
-    codesign --force --sign "$signing_identity" \
+    sign_code \
         --identifier "$app_bundle_id.guard-notify" \
         "$app_bundle/Contents/MacOS/guard-notify"
-    codesign --force --sign "$signing_identity" \
+    sign_code \
         --entitlements packaging/macos/GuardES.entitlements \
         "$extension_bundle"
-    codesign --force --sign "$signing_identity" \
+    sign_code \
         --entitlements packaging/macos/Guard.entitlements \
         "$app_bundle"
     codesign --verify --deep --strict "$app_bundle"
@@ -138,7 +177,8 @@ if [ "${SKIP_SIGNING:-0}" != "1" ]; then
     if [ "$signed_team" = "not set" ]; then
         signed_team=
     fi
-    if [ -n "${DEVELOPMENT_TEAM:-}" ] && [ "$signed_team" != "$DEVELOPMENT_TEAM" ]; then
+    if [ "$self_use" = 0 ] && [ -n "${DEVELOPMENT_TEAM:-}" ] \
+        && [ "$signed_team" != "$DEVELOPMENT_TEAM" ]; then
         echo "signed TeamIdentifier '$signed_team' does not match DEVELOPMENT_TEAM '$DEVELOPMENT_TEAM'" >&2
         exit 2
     fi
@@ -154,6 +194,8 @@ if [ "${SKIP_SIGNING:-0}" = "1" ]; then
     echo "signing skipped"
 elif [ -n "$signed_team" ]; then
     echo "signed TeamIdentifier: $signed_team"
+elif [ "$self_use" = 1 ]; then
+    echo "signed local certificate identity: TeamIdentifier intentionally not set"
 else
     echo "signed TeamIdentifier: not set (ad-hoc bundles cannot activate for release acceptance)"
 fi

@@ -63,6 +63,8 @@ elif [ "$signing_mode" = self-use ]; then
     ! grep -q 'com.apple.developer.system-extension.install' "$work/extension.entitlements"
     test -f "$app/Contents/Resources/SELF_USE_SIP_OFF.txt"
     grep -q 'SELF-USE / SIP-OFF' "$app/Contents/Resources/SELF_USE_SIP_OFF.txt"
+    grep -qx 'SAFETY_GATE=mac-auth-scope-v1' \
+        "$app/Contents/Resources/SELF_USE_SIP_OFF.txt"
 else
     ! grep -q 'com.apple.developer.system-extension.install' "$work/host.entitlements"
     ! grep -q 'com.apple.developer.endpoint-security.client' "$work/host.entitlements"
