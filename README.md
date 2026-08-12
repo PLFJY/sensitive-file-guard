@@ -1,381 +1,73 @@
-# Sensitive Data Firewall
+# Sensitive Data Firewall（敏感文件防火墙）
 
-Platform status:
+这是一个本地访问防火墙：在文件被成功打开前，阻止未经授权的进程读取受保护的浏览器认证数据和 SSH 私钥。它不是杀毒软件，也不是网络 DLP。
 
-| Platform | Status |
-|---|---|
-| Linux | SECURITY-ACCEPTED ALPHA on the recorded Arch `strict-filesystem` host; not rerun during the macOS-only phases |
-| macOS | SIP-off self-use candidate passes offline gates; live re-acceptance paused until the owner reboots |
+## 当前状态
 
-The primary macOS path is experimental self-use: a local certificate, SIP
-disabled by the owner from Recovery, System Extension developer mode, and
-normal user approval/FDA. It is not a notarized SIP-on distribution. After an
-incident caused unprotected opens to fail closed, the extension was deactivated,
-SIP was re-enabled, AUTH_OPEN scope was corrected, and activation safety gates
-were added. Live results remain unaccepted until a controlled synthetic rerun.
-See the [macOS install and status guide](docs/INSTALL_MACOS.md) and
-[Phase 17 incident report](reports/mac/macos-phase-17.md).
+| 平台 | 交付方式 | 状态 |
+| --- | --- | --- |
+| Linux | root `guardd` + fanotify + systemd | 在记录的 Arch `strict-filesystem` 主机上有 Alpha 验收记录 |
+| macOS | `Guard.app` + Endpoint Security system extension | 自用实验路径；需要 SIP 关闭、开发模式、本地签名和用户授权 |
 
-各平台的构建、打包、安装、升级、验收和卸载流程见[中文打包与部署指南](docs/打包与部署指南.md)。
+macOS 自用路径是当前首选开发路径，故意不等待 Apple provisioning、Developer ID 或公证。它不是 SIP 开启的消费者分发包。Guard 不会自动关闭 SIP、修改 TCC 数据库或自动授予完全磁盘访问权限。
 
-> **macOS development status:** the native app and Endpoint Security system
-> extension and GTK control-plane work are documented in
-> [the macOS development guide](docs/INSTALL_MACOS_DEV.md). Phase 02 provides
-> bundle/signing/lifecycle plumbing; Phases 03–06 add the deadline-safe ES
-> adapter, signer-aware identity, authenticated XPC/LocalAuthentication, and a
-> macOS-specific GTK status/pending-helper flow. Phase 07 connects browser
-> resource classification, fail-closed policy, interactive migration, and
-> root-bound read-only FFLAGS leases. Phase 08 adds owner-scoped SSH-key
-> enrollment, deadline-bounded manual reads, and ten-second exact-key process-
-> tree leases. The specialized `guardctl ssh load` shortcut is intentionally
-> unsupported on macOS; ordinary `ssh-add` uses the same manual read flow.
-> Phase 09 mediates hardlink/rename namespace changes, keeps aliases protected
-> by kernel file identity, detects ES sequence gaps, bounds hot-path state, and
-> exposes semantic enforcement/FDA/approval health with lifecycle counters.
-> Phase 10 adds a self-contained arm64 release-bundle path, explicit inside-out
-> hardened-runtime signing, external-credential notarization, update/recovery,
-> and GTK runtime/license verification. Later work adds an explicit SIP-off
-> self-use mode, certificate-pinned local XPC, semantic GUI readiness, and an
-> AUTH_OPEN scope safety gate. Real live enforcement must be re-accepted on the
-> owner's controlled SIP-off host before it is claimed.
+## 快速入口
 
-> **Linux status: SECURITY-ACCEPTED ALPHA ON TESTED ARCH HOST when configured
-> with `strict-filesystem`.** Conservative mode remains available and retains
-> its measured replacement-inode race; it is not the security-accepted backend.
-> This is an Alpha with the explicit non-goals below, not a claim of protection
-> against root, browser compromise, or already-open descriptors.
+- [中文文档目录](docs/README.md)
+- [构建与部署总手册](docs/构建与部署手册.md)
+- [macOS 自用保护启用指南](docs/INSTALL_MACOS.md)
+- [Linux 安装指南](docs/INSTALL_LINUX.md)
+- [安全模型](docs/SECURITY_MODEL.md)
+- [macOS 阶段报告](reports/mac/)
 
-> SSH private-key reads are held for explicit confirmation and scoped to a
-> short-lived process-tree lease. See the [portable/Linux SSH access model](docs/SSH_ACCESS_MODEL.md)
-> and [macOS SSH protection guide](docs/MACOS_SSH_PROTECTION.md).
+## 一键流程
 
-A narrow local capability firewall. Browser auth/session resources retain
-pre-open access denial. Protected SSH-key reads use interactive pre-read
-confirmation and a short-lived in-memory lease.
-
-> Core principle: **Prevent unauthorized browser-secret and SSH-key reads before
-> protected data is opened.**
-
-## ⚠️ Do not test on real secrets
-
-Never point this tool, its tests, or its fixtures at your real browser profiles,
-cookies, saved passwords, session tokens, or real SSH private keys. All tests
-use synthetic fixtures only (see `crates/guard-test-fixtures`). Browser and
-ordinary tests use no IP networking; the Phase 22.2 privileged harness uses
-only a disposable non-loopback dummy address in the local namespace and never
-contacts the Internet.
-
-## What it protects (V1)
-
-1. Browser authentication/session data: cookies + sidecars, session data,
-   browser key material, selected Local/Session Storage and IndexedDB trees,
-   saved-login databases (secondary priority).
-2. SSH private keys: the existing hardened `ssh-agent` path remains supported.
-   Ordinary protected-key reads require an interactive Allow/Block decision;
-   the existing `ssh-add`/`ssh-agent` one-shot load exception remains supported.
-
-## Threat model
-
-**Blocks:** ordinary same-user cookie stealers directly opening/copying protected
-browser files; Python/Node/shell scripts reading protected browser data;
-malicious build/postinstall scripts reading protected browser data; and
-unapproved reads of enrolled SSH private keys.
-
-**Allows:** a browser accessing its own profile; an approved SSH-key reader
-under a short exact process-tree lease; normal `git push`, SSH authentication,
-and SSH-format Git signing through the hardened `ssh-agent` path; a recognized, trusted browser
-import from another enrolled browser profile is held for a one-time user
-confirmation, then receives a temporary `MigrationAccessLease` bound directly
-to that exact process tree. `guardctl migration authorize` remains available
-for advanced pre-authorization; an
-explicit one-shot `SshLoadLease` for loading a private key into `ssh-agent`.
-The Linux fanotify backend does **not** claim that migration access is
-read-only because permission events do not reveal the opener's original flags.
-The macOS Endpoint Security backend responds to approved migration opens with
-`FREAD` only and reports `read_only_guaranteed = true` in backend status.
-
-**Explicit V1 non-goals:** root/SYSTEM compromise; kernel exploits; browser
-process injection; malicious browser extensions; browser remote-debugging
-attacks; memory scraping of already-open secrets; an attacker engineered against
-this project; full information-flow tracking after a user grants access; proving
-every browser storage location is covered on every release. The open-only
-fanotify backend also does not observe an inode that is renamed into and back
-out of a sensitive pathname without any open occurring while it has that name.
-
-## Architecture
-
-```
-              CLI / guard-notify
-                     |
-              local authenticated IPC
-                     |
-                +----v-----+
-                |  guardd  |   privileged root daemon (owns fanotify perm group)
-                |----------|
-                | policy   |
-                | identity |
-                | resources|
-                | leases   |
-                | audit    |
-                +----+-----+
-                     |
-          fanotify FAN_OPEN_PERM (CAP_SYS_ADMIN)
-                     |
-          protected filesystem resources
-```
-
-Binaries: `guardd` (daemon), `guardctl` (control), `guard-ui` (native GTK/libadwaita
-control center), and `guard-notify` (unprivileged user-session notification
-presenter).
-
-## Graphical control center
-
-`guard-ui` is the preferred interactive Linux client. It shows live ACTIVE,
-DEGRADED, STOPPED, and UNREACHABLE states; stages Strict or
-Conservative policy and individual browser/SSH-key enrollments; applies a
-complete candidate through the authenticated `guardctl` helper; and displays
-the daemon's blocked-event audit log. It never writes `/etc/guardd/config.json`,
-evaluates policy, or runs as root. `guardctl` remains the supported
-CLI/automation tool.
-Its Overview switch controls the system protection and the current user's
-desktop notification service together, and reflects both actual unit states.
-The Protection page loads the active metadata-only configuration snapshot from
-`guardd`, then separately polls any SSH keys actively enrolled at runtime, so
-root-only config-file permissions or a runtime enrollment cannot make a
-protected key appear unprotected. Its draft exists only in the open window;
-Discard fetches the daemon's active policy again, and the UI creates no local
-state file or database. It discovers installed native browser sources on refresh and
-also supports an explicit custom browser entry (family, existing profile root,
-and canonical executable). It shows metadata-only SSH key suggestions without
-enrolling them; discovery alone never grants trust.
-
-### Browser imports
-
-Browser imports work without a preparatory command. A trusted enrolled browser
-opening its own enrolled profile is allowed immediately. An unknown process,
-fake browser executable, or cross-UID process is denied immediately. When a
-trusted enrolled browser opens another enrolled browser's profile, the current
-open remains blocked while guard-ui asks whether this is an import. Allow binds
-10-minute leases to the exact verified importer process trees. Edge utility
-processes from that same verified import burst share the one confirmation for
-60 seconds; each still receives its own revalidated, root-bound lease. This is
-daemon memory only, not a polkit-wide password cache. Block, closing the dialog,
-and timeout deny the queued opens. When `guard-notify` launched the UI for this
-confirmation, it closes after the final confirmed allow once no prompt remains
-queued; a manually opened control center stays open. See [the browser migration
-model](docs/BROWSER_MIGRATION_MODEL.md).
-
-## Install
-
-The platform overview is in the [中文打包与部署指南](docs/打包与部署指南.md).
-The detailed Linux guide is [Linux installation and deployment](docs/INSTALL_LINUX.md),
-and the macOS guides are [macOS install/status](docs/INSTALL_MACOS.md),
-[development](docs/INSTALL_MACOS_DEV.md), and [release](docs/INSTALL_MACOS_RELEASE.md).
-The Linux guide covers the supported systemd baseline, Arch/Debian/Ubuntu/Fedora
-dependency commands, native browser discovery, configuration, service operation,
-updates, and removal.
-
-**Security-accepted Alpha: `strict-filesystem` on the tested Arch host.**
-Other mainstream systemd-based distributions are expected to work with native
-browser packages but have not received equivalent privileged acceptance
-testing. Snap and Flatpak browsers are currently unsupported for the
-security-accepted path.
-
-### Short source quick-start
+Linux（普通用户执行，安装阶段脚本按需询问 sudo）：
 
 ```sh
-# As your normal user, from a source checkout:
+scripts/build-deploy-linux.sh
+```
+
+只构建：
+
+```sh
+scripts/build-deploy-linux.sh --build-only
+```
+
+macOS 自用包（必须先在 Recovery 手动关闭 SIP；脚本不会自动激活扩展）：
+
+```sh
+scripts/macos/build-deploy-self-use.sh
+```
+
+脚本会把旧的 `/Applications/Guard.app` 移入 `~/.Trash` 作为可恢复备份，不会删除旧包。
+
+## 安全测试规则
+
+所有自动化测试只使用 `crates/guard-test-fixtures` 中的合成浏览器 profile、临时 SSH key 和临时目录。禁止把真实 cookies、密码、session token、浏览器数据库或 SSH 私钥交给测试。日志只记录元数据，不记录秘密内容。
+
+每个阶段都应按以下顺序执行：检查代码 → 实现 → `cargo fmt --check` → 相关 clippy/test → 更新 `reports/mac/` 报告 → 独立提交。除非用户明确要求，不启动 Docker。
+
+## 从源码构建
+
+```sh
 cargo build --release
-sudo deploy/install.sh
-sudo guardctl setup --home "$HOME"
-sudo systemctl enable --now guardd
-systemctl --user enable --now guard-notify
-guardctl status
+cargo fmt --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+git diff --check
 ```
 
-The installer installs already-built binaries; it does not build as root,
-enable, or start the daemon. `guardctl setup` writes a new, reviewed strict
-configuration only after finding native browser profile/executable pairs.
+macOS 主机运行 Linux-only crate 可能因本机缺少 fanotify/inotify libc 符号而无法完成全 workspace 检查；此时应运行文档中列出的 macOS 相关 crate 检查，并在报告中记录确切错误，不得把阻塞写成通过。
 
-## Run (without systemd)
+## 设计边界
 
-```sh
-# Start the daemon (requires CAP_SYS_ADMIN for fanotify enforcement).
-sudo target/release/guardd \
-    --enforce-browser-config /path/to/config.json \
-    --ipc-socket /run/guardd/guardd.sock \
-    --audit-db /var/lib/guardd/audit.db
+- Linux 的 authoritative daemon 以 root 运行，使用 fanotify permission events。
+- macOS 的 authoritative backend 是 Endpoint Security；自用包保留 restricted entitlements，并使用本地证书锚定的 XPC 身份验证。
+- 同 UID 不等于可信；Guard、`guardctl`、`guard-notify` 和 `guard-es` 都必须满足签名身份与标识符要求。
+- 迁移和 SSH 读取确认受内核 deadline 约束，超时默认拒绝。
+- 浏览器分类以已验证的可执行文件和资源身份为准；macOS Safari 使用独立的窄路径分类，其他浏览器沿用共享主逻辑。
 
-# In another terminal: query status.
-target/release/guardctl --socket /run/guardd/guardd.sock status
+## 许可与贡献
 
-# GUI control center:
-target/release/guard-ui
-```
-
-## Config
-
-See [`deploy/guardd-config.example.json`](deploy/guardd-config.example.json)
-for a deliberately empty strict-mode template. It contains no username, UID,
-profile, or guessed SSH-key path. Use `sudo guardctl setup --home "$HOME"` to
-generate a new reviewable native-browser configuration without `owner_uid`;
-guardd stats the
-existing profile root; it fails rather than silently substituting UID 0.
-
-Linux enforcement is explicit:
-
-```json
-{
-  "enforcement_mode": "strict-filesystem"
-}
-```
-
-- `conservative` is a compatibility mode that marks discovered objects and
-  directories, then uses inotify rediscovery. It has lower overhead but a
-  measured first-open race for replacement inodes.
-- `strict-filesystem` installs `FAN_MARK_FILESYSTEM | FAN_OPEN_PERM` once per
-  distinct protected filesystem. It classifies new sensitive paths before the
-  first open completes. A structural path hit immediately records the inode
-  before guardd answers the permission event, so a later rename outside the
-  namespace remains inode-protected. It is opt-in because it intercepts all
-  opens on those filesystems and has a measurable cost.
-
-`guardctl status` reports `mode`, observed/required filesystem-mark counts and
-kernel mark health, strict-event and fast-allow counters,
-protected/allowed/denied counts, queue overflows, audit
-drops, classifier failures, topology health, and hardlink-alias scans. Strict
-startup fails instead of reporting ACTIVE if any required profile/key
-filesystem cannot be marked.
-
-### SSH private-key access
-
-SSH private-key reads are mediated before the read completes. An ordinary
-reader is held by `FAN_ACCESS_PERM` and the GTK app shows one **Allow** or
-**Block** prompt with the program, PID, executable, and key path. Allow crosses
-the non-cached `org.guardd.ssh-read-resolve` Polkit action, then creates a
-memory-only ten-second lease for that exact verified process tree and key.
-Closing the prompt, selecting Block, expiry after 60 seconds, or reader exit
-denies the held read. The lease is not saved to disk and cannot cover another
-key, user, executable identity, or PID reuse.
-
-`guardctl ssh load` remains the narrow `ssh-add` / trusted `ssh-agent` special
-case: it receives its existing one-shot verified load lease and therefore does
-not create an ordinary read prompt. See [SSH_ACCESS_MODEL.md](docs/SSH_ACCESS_MODEL.md).
-
-## Logs
-
-```sh
-journalctl -u guardd -f          # systemd
-RUST_LOG=info                    # env var (set in the unit file)
-```
-
-## Defensive browser adversarial acceptance
-
-For the macOS disposable namespace/health suite, use
-`scripts/macos/run-namespace-health-acceptance.sh`. It requires an activated,
-SIP-off self-use or formally provisioned extension and uses only its own temporary Chrome profile; see
-[the macOS namespace/health guide](docs/MACOS_NAMESPACE_AND_HEALTH.md).
-
-Run this from the intended Arch desktop user's logged-in session. It builds
-unique disposable Firefox/Chromium profiles below `/tmp`, exercises ordinary
-read, mmap, SQLite, copy, links, rename, child, `/proc/PID/fd`, replacement
-inode, nested-resource, and local-sink paths, then deletes the fixtures:
-
-```sh
-sudo bash scripts/test-browser-adversarial-root.sh
-```
-
-An enforcement PASS requires all three facts: the probe returned failure, its
-output contained no canary, and a new audit `Deny` appeared. Notification
-delivery is a separate assertion and never substitutes for access denial. When
-a working `org.freedesktop.Notifications` desktop service is available, every
-audited adversarial DENY is offered as a visible “Blocked protected-data
-access” notification and the delivered/expected totals must match. Use
-`KEEP_WORK=1` only when you intentionally want to retain the synthetic audit
-artifacts for inspection.
-
-The observed Arch result was `PASS=24 FAIL=0 BLOCKED=0`, including 15/15 mako
-deliveries. This is strong steady-state evidence, but it does not make the
-inotify rediscovery interval race-free.
-
-## Defensive SSH broker acceptance
-
-The SSH suite creates its own temporary HOME, ephemeral key, disposable system
-OpenSSH agent, same-UID fake listeners, and hostile loader environment. It
-never touches `~/.ssh` or an existing `SSH_AUTH_SOCK`:
-
-```sh
-sudo bash scripts/test-ssh-broker-adversarial-root.sh
-```
-
-The broker verifies both the stopped system `ssh-add` child and the connected
-agent's kernel credentials/stable executable identity. It pins the verified
-agent socket inode behind a root-controlled pathname, sanitizes the exec
-environment, binds the live `ssh-add` environment to that exact pin on the
-permission-event hot path, and grants one protected-key open for 30 seconds.
-The observed result was `PASS=29 FAIL=0 BLOCKED=0`; even a non-cooperative
-client that ignored the returned pin could not load the key, and the malicious
-listeners received zero private-key bytes.
-
-## Topology race measurement
-
-This synthetic-only stress harness compares the conservative watcher interval
-with strict first-open enforcement:
-
-```sh
-sudo bash scripts/test-topology-race-stress-root.sh
-sudo ENFORCEMENT_MODE=strict-filesystem \
-  bash scripts/test-topology-race-stress-root.sh
-```
-
-On the tested `/tmp` tmpfs, the Phase 18 conservative measurement allowed all
-10,000 immediate replacement reads (1171/2225/2347/4039 microseconds
-p50/p95/p99/max to convergence). The Phase 19 conservative rerun again allowed
-10,000/10,000. Strict Mode denied 10,000/10,000 immediate reads with zero
-recoveries. A separate 10,000-iteration external-hardlink/replacement attack
-also had zero recoveries after the strict alias check was added.
-
-The Phase 19.1 rename-away regression additionally proved both an owning
-browser's first open and a denied first open promote the new inode before it is
-renamed outside the profile. Both cases had zero recoveries. A rename-only
-transit with no open at the sensitive name remains outside `FAN_OPEN_PERM` and
-is documented rather than presented as protected. A targeted 16,000-open
-multi-hardlink amplification run completed in 889 ms with no queue overflow,
-classifier failure, or audit drop.
-
-Run the broader strict and performance acceptance with:
-
-```sh
-sudo bash scripts/test-strict-filesystem-root.sh
-sudo bash scripts/test-strict-concurrency-root.sh
-sudo bash scripts/benchmark-strict-filesystem-root.sh
-```
-
-On this host, a 100,000-open unprotected workload on the marked ext4
-filesystem fell from about 900k opens/s without guardd to about 72.6k opens/s
-in Strict Mode (12.41x wall-time). The bounded 180,624-event concurrent run had
-zero fanotify overflows, audit drops, classifier failures, or deadlocks. See
-[`reports/phase-19.md`](reports/phase-19.md). The post-review rename-away fix
-and evidence are in [`reports/phase-19.1.md`](reports/phase-19.1.md).
-
-## Status
-
-Hardening Pass 2 and Strict Filesystem Enforcement are implemented. Every
-mandatory privileged suite was actually run on the target Arch host;
-strict first-open/replacement/alias tests, steady-state browser protection, the
-hardened SSH broker, real systemd recovery/polkit, audit-content scans, desktop
-notifications, queue stress, and Rust quality gates passed. Linux V1 is
-**SECURITY-ACCEPTED ALPHA ON TESTED ARCH HOST in `strict-filesystem` mode**.
-Conservative mode is explicitly not promoted. See
-[`reports/phase-16.md`](reports/phase-16.md),
-[`reports/phase-17.md`](reports/phase-17.md), and
-[`reports/phase-18.md`](reports/phase-18.md),
-[`reports/phase-19.md`](reports/phase-19.md),
-[`reports/phase-19.1.md`](reports/phase-19.1.md), plus
-[`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md).
-
-Those acceptance statements are historical browser-firewall and hardened
-SSH-broker evidence. The rewritten Phase 22.2 behavioral backend is **not yet
-security-accepted** until its new privileged BPF matrix and real GTK flow are
-run. Current evidence and the exact blocked rerun command are recorded in
-[`reports/phase-22.2.md`](reports/phase-22.2.md).
+请先阅读 [安全模型](docs/SECURITY_MODEL.md) 和 [平台架构](docs/PLATFORM_ARCHITECTURE.md)。提交 macOS 改动时附上对应的 `reports/mac/macos-phase-*.md` 测试报告，并明确区分离线测试、人工验收和阻塞项。
