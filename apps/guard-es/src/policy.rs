@@ -362,6 +362,25 @@ impl MacPolicy {
                 let _ = event.permission.allow_read_only();
                 return;
             }
+            if event.resource.kind != ProtectedResourceKind::SshPrivateKey
+                && !event.resource.kind.is_critical_browser()
+                && config
+                    .mac_allowlist
+                    .trusted_tool_matches(&event.facts.process)
+            {
+                inner.stats.allowed = inner.stats.allowed.saturating_add(1);
+                drop(inner);
+                self.record_debug(
+                    "trusted_tool_metadata_allowed",
+                    &event.resource,
+                    Some(&process),
+                    Decision::Allow,
+                    "explicitly enrolled tool metadata exception".into(),
+                    now,
+                );
+                let _ = event.permission.allow_read_only();
+                return;
+            }
         }
         let decision = inner.runtime.evaluate(&access, now);
         match decision.clone() {

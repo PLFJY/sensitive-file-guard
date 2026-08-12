@@ -8,6 +8,7 @@ use guard_platform::config::PolicyConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::browser_trust::MacBrowserEnrollment;
+use crate::code_signature::CodeSignatureInspector;
 use crate::identity::MacProcessFacts;
 use guard_core::resource::ProtectedResourceKind;
 
@@ -86,10 +87,35 @@ impl MacAllowlistConfig {
                 && rule.dev == process.executable.dev
                 && rule.ino == process.executable.ino
                 && rule.owner_uid == process.executable.owner_uid
+                && process.code.valid
+                && process.code.signing_id.is_some()
                 && rule.team_id.as_deref() == process.code.team_id.as_deref()
                 && rule.signing_id.as_deref() == process.code.signing_id.as_deref()
         })
     }
+}
+
+pub fn enroll_trusted_tool(path: &Path, owner_uid: u32) -> anyhow::Result<MacTrustedToolRule> {
+    let canonical = std::fs::canonicalize(path)?;
+    let metadata = std::fs::metadata(&canonical)?;
+    anyhow::ensure!(
+        metadata.is_file() && (metadata.uid() == 0 || metadata.uid() == owner_uid),
+        "trusted tool must be root-owned or owned by the current user"
+    );
+    let signature = crate::code_signature::NativeCodeSignatureInspector.inspect(&canonical)?;
+    anyhow::ensure!(signature.valid, "trusted tool has no valid code signature");
+    anyhow::ensure!(
+        signature.signing_id.is_some(),
+        "trusted tool has no stable signing identifier"
+    );
+    Ok(MacTrustedToolRule {
+        path: canonical,
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+        team_id: signature.team_id,
+        signing_id: signature.signing_id,
+        owner_uid,
+    })
 }
 
 #[cfg(test)]
@@ -206,6 +232,12 @@ impl MacBackendConfig {
                 rule.dev != 0 && rule.ino != 0,
                 "macOS trusted tool file identity is required"
             );
+            let current = std::fs::metadata(&rule.path)?;
+            anyhow::ensure!(
+                current.dev() == rule.dev && current.ino() == rule.ino,
+                "macOS trusted tool changed and requires reenrollment: {}",
+                rule.path.display()
+            );
         }
         let mut ssh_paths = HashSet::new();
         for key in &self.common_policy.ssh_keys {
@@ -310,6 +342,18 @@ impl MacBackendConfig {
         crate::browser_trust::MacBrowserTrustStore::load_and_revalidate(
             self.browser_trust.clone(),
         )?;
+        for tool in &self.mac_allowlist.trusted_tools {
+            let canonical = std::fs::canonicalize(&tool.path)?;
+            anyhow::ensure!(
+                canonical == tool.path,
+                "macOS trusted tool path must be a canonical path"
+            );
+            let metadata = std::fs::metadata(&canonical)?;
+            anyhow::ensure!(
+                metadata.is_file() && (metadata.uid() == 0 || metadata.uid() == peer_uid),
+                "macOS trusted tool must be root-owned or authenticated-peer-owned"
+            );
+        }
         for executable in &self.common_policy.enrolled_exes {
             let canonical = std::fs::canonicalize(executable)?;
             anyhow::ensure!(

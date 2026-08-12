@@ -547,6 +547,19 @@ fn protection_page(state: &UiState) -> gtk::Box {
         allowlist_info.set_wrap_mode(gtk::pango::WrapMode::WordChar);
         allowlist_info.set_max_width_chars(SUMMARY_WIDTH_CHARS);
         page.append(&allowlist_info);
+        let add_tool = gtk::Button::with_label("添加受信任工具…");
+        add_tool.set_halign(gtk::Align::Start);
+        let tool_state = state.clone();
+        let trusted_tools = gtk::ListBox::new();
+        trusted_tools.set_selection_mode(gtk::SelectionMode::None);
+        trusted_tools.add_css_class("boxed-list");
+        let trusted_tools_for_dialog = trusted_tools.clone();
+        add_tool.connect_clicked(move |_| {
+            show_add_trusted_tool_dialog(&tool_state, &trusted_tools_for_dialog)
+        });
+        page.append(&add_tool);
+        page.append(&trusted_tools);
+        render_trusted_tools(state, &trusted_tools);
     }
     let browsers_heading = gtk::Label::new(Some("Protected browsers"));
     browsers_heading.set_xalign(0.0);
@@ -1146,6 +1159,114 @@ fn show_add_key_dialog(state: &UiState) {
     });
     dialog.show();
 }
+
+#[cfg(target_os = "macos")]
+fn show_add_trusted_tool_dialog(state: &UiState, list: &gtk::ListBox) {
+    let dialog = gtk::FileChooserNative::new(
+        Some("选择受信任工具 App 内的可执行文件"),
+        None::<&gtk::Window>,
+        gtk::FileChooserAction::Open,
+        Some("验证并添加"),
+        Some("取消"),
+    );
+    let list = list.clone();
+    let candidate = state.candidate.clone();
+    let apply = state.apply.clone();
+    let dialog_state = state.clone();
+    dialog.connect_response(move |dialog, response| {
+        if response == gtk::ResponseType::Accept {
+            if let Some(path) = dialog.file().and_then(|file| file.path()) {
+                let candidate = candidate.clone();
+                let apply = apply.clone();
+                let dialog_state = dialog_state.clone();
+                let list = list.clone();
+                glib::MainContext::default().spawn_local(async move {
+                    let result = gio::spawn_blocking(move || {
+                        // SAFETY: geteuid has no pointer arguments and reads
+                        // only the current authenticated desktop UID.
+                        let uid = unsafe { libc::geteuid() };
+                        platform_macos::config::enroll_trusted_tool(&path, uid)
+                    })
+                    .await;
+                    match result {
+                        Ok(Ok(rule)) => {
+                            if let Some(config) = candidate.borrow_mut().as_mut() {
+                                if !config
+                                    .mac_allowlist
+                                    .trusted_tools
+                                    .iter()
+                                    .any(|existing| existing.path == rule.path)
+                                {
+                                    config.mac_allowlist.trusted_tools.push(rule);
+                                    apply.set_sensitive(true);
+                                    dialog_state.mac_setup_message.set_text(
+                                        "受信任工具已加入待应用配置；关键浏览器数据和 SSH 私钥仍需人工确认。",
+                                    );
+                                    render_trusted_tools(&dialog_state, &list);
+                                }
+                            }
+                        }
+                        Ok(Err(error)) => dialog_state
+                            .mac_setup_message
+                            .set_text(&format!("工具未添加：{error}")),
+                        Err(error) => dialog_state
+                            .mac_setup_message
+                            .set_text(&format!("验证任务失败：{error:?}")),
+                    }
+                });
+            }
+        }
+        dialog.destroy();
+    });
+    dialog.show();
+}
+
+#[cfg(target_os = "macos")]
+fn render_trusted_tools(state: &UiState, list: &gtk::ListBox) {
+    while let Some(child) = list.first_child() {
+        list.remove(&child);
+    }
+    let candidate = state.candidate.borrow();
+    let Some(config) = candidate.as_ref() else {
+        return;
+    };
+    for tool in &config.mac_allowlist.trusted_tools {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        row.set_margin_top(8);
+        row.set_margin_bottom(8);
+        row.set_margin_start(10);
+        row.set_margin_end(10);
+        let label = gtk::Label::new(Some(&format!(
+            "{} · 已登记（仅低敏感度元数据）",
+            tool.path.display()
+        )));
+        label.set_xalign(0.0);
+        label.set_hexpand(true);
+        label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+        let remove = gtk::Button::with_label("撤销");
+        let candidate = state.candidate.clone();
+        let apply = state.apply.clone();
+        let path = tool.path.clone();
+        remove.connect_clicked(move |_| {
+            if let Some(config) = candidate.borrow_mut().as_mut() {
+                config
+                    .mac_allowlist
+                    .trusted_tools
+                    .retain(|item| item.path != path);
+                apply.set_sensitive(true);
+            }
+        });
+        row.append(&label);
+        row.append(&remove);
+        list.append(&row);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn show_add_trusted_tool_dialog(_state: &UiState, _list: &gtk::ListBox) {}
+
+#[cfg(not(target_os = "macos"))]
+fn render_trusted_tools(_state: &UiState, _list: &gtk::ListBox) {}
 
 fn show_add_browser_dialog(state: &UiState) {
     let dialog = gtk::Dialog::with_buttons(
