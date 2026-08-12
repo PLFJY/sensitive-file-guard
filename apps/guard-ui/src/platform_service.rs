@@ -29,7 +29,7 @@ pub fn configure_bundled_runtime() -> anyhow::Result<()> {
         let cache_root = std::env::var_os("HOME")
             .map(std::path::PathBuf::from)
             .ok_or_else(|| anyhow::anyhow!("HOME is unavailable for GTK runtime cache"))?
-            .join("Library/Caches/io.github.plfjy.SensitiveFileGuard");
+            .join("Library/Caches/top.plfjy.SensitiveFileGuard");
         std::fs::create_dir_all(&cache_root)?;
         let cache = cache_root.join("gdk-pixbuf-loaders.cache");
         let temporary = cache_root.join(format!(
@@ -706,6 +706,7 @@ pub fn handle_system_extension_command() -> Option<i32> {
         matches!(
             argument.as_str(),
             "--activate-system-extension"
+                | "--activate-system-extension-watchdog"
                 | "--deactivate-system-extension"
                 | "--system-extension-status"
         )
@@ -721,6 +722,9 @@ pub fn handle_system_extension_command() -> Option<i32> {
                 return Some(1);
             }
         };
+    if action == "--activate-system-extension-watchdog" {
+        return Some(run_system_extension_watchdog(&controller));
+    }
     let submitted = match action.as_str() {
         "--activate-system-extension" => controller.activate(),
         "--deactivate-system-extension" => controller.deactivate(),
@@ -731,30 +735,233 @@ pub fn handle_system_extension_command() -> Option<i32> {
         eprintln!("guard-ui: {error}");
         return Some(1);
     }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    match wait_for_lifecycle(&controller, std::time::Duration::from_secs(30)) {
+        Ok(status) => {
+            println!(
+                "system-extension state={:?} diagnostic={}",
+                status.state, status.diagnostic
+            );
+            Some(i32::from(status.state == LifecycleState::Failed))
+        }
+        Err(error) => {
+            eprintln!("guard-ui: {error}");
+            Some(1)
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_lifecycle(
+    controller: &platform_macos::system_extension::SystemExtensionController,
+    timeout: std::time::Duration,
+) -> anyhow::Result<platform_macos::system_extension::LifecycleStatus> {
+    use platform_macos::system_extension::LifecycleState;
+
+    let deadline = std::time::Instant::now() + timeout;
     loop {
-        match controller.status() {
-            Ok(status) if status.state != LifecycleState::Submitted => {
-                println!(
-                    "system-extension state={:?} diagnostic={}",
-                    status.state, status.diagnostic
-                );
-                return Some(i32::from(status.state == LifecycleState::Failed));
+        let status = controller.status()?;
+        if status.state != LifecycleState::Submitted {
+            return Ok(status);
+        }
+        anyhow::ensure!(
+            std::time::Instant::now() < deadline,
+            "system extension request still pending after {} seconds",
+            timeout.as_secs()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_activation(
+    controller: &platform_macos::system_extension::SystemExtensionController,
+    timeout: std::time::Duration,
+) -> anyhow::Result<platform_macos::system_extension::LifecycleStatus> {
+    use platform_macos::system_extension::LifecycleState;
+
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let status = controller.status()?;
+        if !matches!(
+            status.state,
+            LifecycleState::Submitted | LifecycleState::UserApprovalRequired
+        ) {
+            return Ok(status);
+        }
+        anyhow::ensure!(
+            std::time::Instant::now() < deadline,
+            "system extension did not become active within {} seconds (last state={:?}, diagnostic={})",
+            timeout.as_secs(),
+            status.state,
+            status.diagnostic
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn watchdog_seconds(value: Option<&str>) -> anyhow::Result<u64> {
+    let seconds = value.unwrap_or("90").parse::<u64>()?;
+    anyhow::ensure!(
+        (15..=180).contains(&seconds),
+        "GUARD_EXTENSION_WATCHDOG_SECONDS must be between 15 and 180"
+    );
+    Ok(seconds)
+}
+
+#[cfg(target_os = "macos")]
+fn watchdog_stop_file(value: Option<std::ffi::OsString>) -> anyhow::Result<std::path::PathBuf> {
+    let path = value
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("GUARD_EXTENSION_WATCHDOG_STOP_FILE is required"))?;
+    anyhow::ensure!(path.is_absolute(), "watchdog stop file must be absolute");
+    anyhow::ensure!(!path.exists(), "watchdog stop file already exists");
+    anyhow::ensure!(
+        path.parent().is_some_and(std::path::Path::is_dir),
+        "watchdog stop file parent does not exist"
+    );
+    Ok(path)
+}
+
+#[cfg(target_os = "macos")]
+fn ordinary_file_open_sanity() -> anyhow::Result<()> {
+    use std::io::Read;
+
+    for path in [
+        "/System/Library/CoreServices/SystemVersion.plist",
+        "/etc/hosts",
+        "/bin/sh",
+    ] {
+        let mut file = std::fs::File::open(path)
+            .map_err(|error| anyhow::anyhow!("ordinary open failed for {path}: {error}"))?;
+        let mut first_byte = [0_u8; 1];
+        file.read_exact(&mut first_byte)
+            .map_err(|error| anyhow::anyhow!("ordinary read failed for {path}: {error}"))?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn ordinary_process_sanity() -> anyhow::Result<()> {
+    let status = std::process::Command::new("/bin/cat")
+        .arg("/System/Library/CoreServices/SystemVersion.plist")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()?;
+    anyhow::ensure!(status.success(), "ordinary /bin/cat probe failed: {status}");
+    let status = std::process::Command::new("/usr/bin/true")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()?;
+    anyhow::ensure!(
+        status.success(),
+        "ordinary /usr/bin/true probe failed: {status}"
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn ordinary_sanity_with_timeout(timeout: std::time::Duration) -> anyhow::Result<()> {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _ = sender.send(ordinary_file_open_sanity().and_then(|_| ordinary_process_sanity()));
+    });
+    match receiver.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => anyhow::bail!(
+            "ordinary file/process sanity did not complete within {} milliseconds",
+            timeout.as_millis()
+        ),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            anyhow::bail!("ordinary file/process sanity worker disconnected")
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn deactivate_after_watchdog(
+    controller: &platform_macos::system_extension::SystemExtensionController,
+) -> anyhow::Result<()> {
+    use platform_macos::system_extension::LifecycleState;
+
+    controller.deactivate()?;
+    let status = wait_for_lifecycle(controller, std::time::Duration::from_secs(30))?;
+    anyhow::ensure!(
+        status.state == LifecycleState::Deactivated,
+        "watchdog deactivation did not complete safely: state={:?}, diagnostic={}",
+        status.state,
+        status.diagnostic
+    );
+    println!(
+        "WATCHDOG_DEACTIVATED state={:?} diagnostic={}",
+        status.state, status.diagnostic
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn run_system_extension_watchdog(
+    controller: &platform_macos::system_extension::SystemExtensionController,
+) -> i32 {
+    use platform_macos::system_extension::LifecycleState;
+    use std::io::Write;
+
+    let result = (|| -> anyhow::Result<()> {
+        let seconds = watchdog_seconds(
+            std::env::var("GUARD_EXTENSION_WATCHDOG_SECONDS")
+                .ok()
+                .as_deref(),
+        )?;
+        let stop_file = watchdog_stop_file(std::env::var_os("GUARD_EXTENSION_WATCHDOG_STOP_FILE"))?;
+        controller.activate()?;
+        let status = wait_for_activation(controller, std::time::Duration::from_secs(120))?;
+        anyhow::ensure!(
+            status.state == LifecycleState::Active,
+            "watchdog activation did not become active: state={:?}, diagnostic={}",
+            status.state,
+            status.diagnostic
+        );
+
+        if let Err(error) = ordinary_sanity_with_timeout(std::time::Duration::from_secs(2)) {
+            let deactivation = deactivate_after_watchdog(controller);
+            return match deactivation {
+                Ok(()) => Err(error.context("initial ordinary-open sanity failed; deactivated")),
+                Err(deactivation) => Err(error.context(format!(
+                    "initial ordinary-open sanity failed AND deactivation failed: {deactivation:#}"
+                ))),
+            };
+        }
+        println!("WATCHDOG_ACTIVE duration_seconds={seconds}");
+        std::io::stdout().flush()?;
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+        let mut next_probe = std::time::Instant::now();
+        while std::time::Instant::now() < deadline && !stop_file.exists() {
+            if std::time::Instant::now() >= next_probe {
+                if let Err(error) = ordinary_sanity_with_timeout(std::time::Duration::from_secs(2))
+                {
+                    let deactivation = deactivate_after_watchdog(controller);
+                    return match deactivation {
+                        Ok(()) => Err(error.context("ordinary-open watchdog tripped; deactivated")),
+                        Err(deactivation) => Err(error.context(format!(
+                            "ordinary-open watchdog tripped AND deactivation failed: {deactivation:#}"
+                        ))),
+                    };
+                }
+                next_probe = std::time::Instant::now() + std::time::Duration::from_millis(500);
             }
-            Ok(_) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-            Ok(status) => {
-                println!(
-                    "system-extension state={:?} diagnostic=request still pending after 30 seconds",
-                    status.state
-                );
-                return Some(1);
-            }
-            Err(error) => {
-                eprintln!("guard-ui: status query failed: {error}");
-                return Some(1);
-            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        deactivate_after_watchdog(controller)
+    })();
+
+    match result {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("guard-ui: activation watchdog failed: {error:#}");
+            1
         }
     }
 }
@@ -873,6 +1080,7 @@ pub fn handle_system_extension_command() -> Option<i32> {
         matches!(
             argument.as_str(),
             "--activate-system-extension"
+                | "--activate-system-extension-watchdog"
                 | "--deactivate-system-extension"
                 | "--system-extension-status"
                 | "--discover-macos-browsers"
@@ -1195,7 +1403,10 @@ pub fn migration_pending() -> anyhow::Result<Vec<guard_ipc::MigrationPendingInfo
 
 #[cfg(all(test, target_os = "macos"))]
 mod bundled_runtime_tests {
-    use super::{render_loader_cache, self_use_safety_gate_valid};
+    use super::{
+        ordinary_file_open_sanity, ordinary_process_sanity, ordinary_sanity_with_timeout,
+        render_loader_cache, self_use_safety_gate_valid, watchdog_seconds, watchdog_stop_file,
+    };
 
     #[test]
     fn loader_cache_is_relocated_and_escaped() {
@@ -1216,5 +1427,35 @@ mod bundled_runtime_tests {
         assert!(!self_use_safety_gate_valid(
             "SELF-USE / SIP-OFF\nSAFETY_GATE=older-revision\n"
         ));
+    }
+
+    #[test]
+    fn activation_watchdog_duration_is_short_and_bounded() {
+        assert_eq!(watchdog_seconds(None).unwrap(), 90);
+        assert_eq!(watchdog_seconds(Some("15")).unwrap(), 15);
+        assert_eq!(watchdog_seconds(Some("180")).unwrap(), 180);
+        assert!(watchdog_seconds(Some("14")).is_err());
+        assert!(watchdog_seconds(Some("181")).is_err());
+        assert!(watchdog_seconds(Some("not-a-number")).is_err());
+    }
+
+    #[test]
+    fn activation_watchdog_stop_path_is_absolute_nonexistent_and_space_safe() {
+        let temporary = tempfile::tempdir().unwrap();
+        let stop = temporary.path().join("stop Guard watchdog now");
+        assert_eq!(
+            watchdog_stop_file(Some(stop.clone().into_os_string())).unwrap(),
+            stop
+        );
+        std::fs::write(&stop, b"stop").unwrap();
+        assert!(watchdog_stop_file(Some(stop.into_os_string())).is_err());
+        assert!(watchdog_stop_file(Some("relative-stop".into())).is_err());
+    }
+
+    #[test]
+    fn activation_watchdog_can_open_and_spawn_ordinary_system_targets() {
+        ordinary_file_open_sanity().unwrap();
+        ordinary_process_sanity().unwrap();
+        ordinary_sanity_with_timeout(std::time::Duration::from_secs(2)).unwrap();
     }
 }

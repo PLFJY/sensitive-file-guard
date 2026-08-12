@@ -46,7 +46,9 @@ services all pending timers; it does not create an unbounded thread per open.
 `scripts/macos/run-es-poc.sh` compiles a development-only exact fixture path and
 one exact allowed probe executable into `guard-es`; the allow comparison also
 requires the executable's `st_dev` and `st_ino` identity. It verifies that
-`/usr/bin/cat` is denied and `guard-test-probe` is allowed. The script creates a
+`/bin/cat` is denied and `guard-test-probe` is allowed. The script first proves
+that `/bin/cat` exists and is executable so a missing command cannot become a
+false deny pass. It creates a
 temporary synthetic canary only, uses no network, and explicitly deactivates
 the extension on exit.
 

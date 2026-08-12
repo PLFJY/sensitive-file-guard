@@ -58,7 +58,9 @@ scripts/macos/build-release-app.sh
 8. 暂时保持保护策略关闭。先验证扩展 Active、`guard-es` 运行、认证 XPC 可用、
    Endpoint Security backend Active。
 9. 只创建一个临时合成文件，先验证普通系统文件仍可打开，再验证该合成文件的
-   `/usr/bin/cat` DENY 和明确登记 probe 的 ALLOW。
+   `/bin/cat` DENY 和明确登记 probe 的 ALLOW。当前 macOS 系统没有
+   `/usr/bin/cat`，验收脚本会先确认 `/bin/cat` 确实存在且可执行，避免把“命令不存在”
+   错报为内核拒绝。
 10. 基础安全验收通过后，才继续合成浏览器、临时 SSH key、deadline、namespace 和
     restart/update 验收。
 

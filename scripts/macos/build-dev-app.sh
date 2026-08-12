@@ -10,7 +10,7 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH= cd -- "$script_dir/../.." && pwd)
 build_root=${MACOS_BUILD_ROOT:-"$repo_dir/build/macos"}
 app_bundle="$build_root/Guard.app"
-app_bundle_id=${APP_BUNDLE_ID:-io.github.plfjy.SensitiveFileGuard}
+app_bundle_id=${APP_BUNDLE_ID:-top.plfjy.SensitiveFileGuard}
 extension_bundle_id=${SYSTEM_EXTENSION_BUNDLE_ID:-"$app_bundle_id.guard-es"}
 guard_xpc_service_name=${GUARD_XPC_SERVICE_NAME:-"$extension_bundle_id.control"}
 notify_label="$app_bundle_id.guard-notify"
@@ -46,7 +46,7 @@ if [ "$self_use" = 1 ]; then
     }
     if [ -n "$self_use_keychain" ]; then
         keychain_password=$(security find-generic-password -a "$USER" \
-            -s io.github.plfjy.SensitiveFileGuard.self-use-keychain -w 2>/dev/null) || {
+            -s top.plfjy.SensitiveFileGuard.self-use-keychain -w 2>/dev/null) || {
             echo "cannot unlock SELF_USE_SIGNING_KEYCHAIN: local keychain password is unavailable" >&2
             exit 2
         }

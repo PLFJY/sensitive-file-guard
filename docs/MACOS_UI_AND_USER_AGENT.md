@@ -27,7 +27,7 @@ The app embeds:
 
 ```text
 Guard.app/Contents/Library/LaunchAgents/
-  io.github.plfjy.SensitiveFileGuard.guard-notify.plist
+  top.plfjy.SensitiveFileGuard.guard-notify.plist
 ```
 
 The plist uses `BundleProgram = Contents/MacOS/guard-notify`. The GTK app

@@ -749,6 +749,7 @@ dependencies = [
  "platform-macos",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

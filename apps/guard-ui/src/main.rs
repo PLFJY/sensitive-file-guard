@@ -15,6 +15,9 @@ mod platform_service;
 
 use pending_dialog::{PendingDialogController, PendingPrompt, PromptKey, PromptKind, PromptState};
 
+#[cfg(target_os = "macos")]
+const APP_ID: &str = platform_macos::DEFAULT_APP_BUNDLE_ID;
+#[cfg(not(target_os = "macos"))]
 const APP_ID: &str = "io.github.plfjy.SensitiveFileGuard";
 const PENDING_ONLY_ARG: &str = "--pending-only";
 

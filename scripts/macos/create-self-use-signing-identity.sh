@@ -8,13 +8,11 @@ fi
 
 identity=${SELF_USE_SIGNING_IDENTITY:-Guard Local Development Certificate}
 keychain=${SELF_USE_SIGNING_KEYCHAIN:-"$HOME/Library/Keychains/GuardSelfUse.keychain-db"}
-password_service=io.github.plfjy.SensitiveFileGuard.self-use-keychain
-
-resolved=$("$(dirname "$0")/resolve-self-use-signing-identity.sh" \
-    "$identity" "$keychain" 2>/dev/null) && {
-    echo "existing self-use signing identity: $identity ($resolved)"
-    exit 0
-}
+password_service=top.plfjy.SensitiveFileGuard.self-use-keychain
+# Read-only compatibility for a keychain created before the product identifier
+# moved to top.plfjy. New and updated credentials are stored only under the new
+# service name.
+legacy_password_service=io.github.plfjy.SensitiveFileGuard.self-use-keychain
 
 for command_name in openssl security; do
     command -v "$command_name" >/dev/null 2>&1 || {
@@ -23,10 +21,18 @@ for command_name in openssl security; do
     }
 done
 
+resolved=$("$(dirname "$0")/resolve-self-use-signing-identity.sh" \
+    "$identity" "$keychain" 2>/dev/null || true)
+
 if [ -f "$keychain" ]; then
     password=$(security find-generic-password -a "$USER" -s "$password_service" -w 2>/dev/null) || {
-        echo "existing self-use keychain password is unavailable from the login keychain: $keychain" >&2
-        exit 2
+        password=$(security find-generic-password -a "$USER" \
+            -s "$legacy_password_service" -w 2>/dev/null) || {
+            echo "existing self-use keychain password is unavailable from the login keychain: $keychain" >&2
+            exit 2
+        }
+        security add-generic-password -U -a "$USER" -s "$password_service" -w "$password"
+        echo "migrated self-use Keychain service identifier to $password_service"
     }
 else
     password=$(openssl rand -hex 32)
@@ -35,6 +41,12 @@ else
     security add-generic-password -U -a "$USER" -s "$password_service" -w "$password"
 fi
 security unlock-keychain -p "$password" "$keychain"
+
+if [ -n "$resolved" ]; then
+    unset password
+    echo "existing self-use signing identity: $identity ($resolved)"
+    exit 0
+fi
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/guard-local-identity.XXXXXX")
 cleanup() { rm -rf -- "$work"; }

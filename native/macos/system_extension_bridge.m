@@ -27,7 +27,7 @@ static void GuardInitialize(void) {
         GuardStates = [NSMutableDictionary dictionary];
         GuardDiagnostics = [NSMutableDictionary dictionary];
         GuardDelegates = [NSMutableDictionary dictionary];
-        GuardRequestQueue = dispatch_queue_create("io.github.plfjy.guard.system-extension", DISPATCH_QUEUE_SERIAL);
+        GuardRequestQueue = dispatch_queue_create("top.plfjy.guard.system-extension", DISPATCH_QUEUE_SERIAL);
     });
 }
 

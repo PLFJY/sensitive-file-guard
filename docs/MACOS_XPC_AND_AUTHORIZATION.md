@@ -10,7 +10,7 @@ The Endpoint Security extension declares this explicit Info.plist entry:
 
 ```text
 NSEndpointSecurityMachServiceName =
-  io.github.plfjy.SensitiveFileGuard.guard-es.control
+  top.plfjy.SensitiveFileGuard.guard-es.control
 ```
 
 Custom bundle identifiers derive the value as

@@ -64,17 +64,15 @@ mod tests {
 
     #[test]
     fn constructs_required_nested_bundle_paths() {
-        let layout = DevelopmentBundleLayout::new(
-            "/tmp/Guard.app",
-            "io.github.plfjy.SensitiveFileGuard.guard-es",
-        )
-        .unwrap();
+        let layout =
+            DevelopmentBundleLayout::new("/tmp/Guard.app", "top.plfjy.SensitiveFileGuard.guard-es")
+                .unwrap();
         assert_eq!(
             layout.app_executable(),
             PathBuf::from("/tmp/Guard.app/Contents/MacOS/Guard")
         );
-        assert_eq!(layout.extension_executable(), PathBuf::from("/tmp/Guard.app/Contents/Library/SystemExtensions/io.github.plfjy.SensitiveFileGuard.guard-es.systemextension/Contents/MacOS/guard-es"));
-        assert_eq!(layout.extension_info_plist(), PathBuf::from("/tmp/Guard.app/Contents/Library/SystemExtensions/io.github.plfjy.SensitiveFileGuard.guard-es.systemextension/Contents/Info.plist"));
+        assert_eq!(layout.extension_executable(), PathBuf::from("/tmp/Guard.app/Contents/Library/SystemExtensions/top.plfjy.SensitiveFileGuard.guard-es.systemextension/Contents/MacOS/guard-es"));
+        assert_eq!(layout.extension_info_plist(), PathBuf::from("/tmp/Guard.app/Contents/Library/SystemExtensions/top.plfjy.SensitiveFileGuard.guard-es.systemextension/Contents/Info.plist"));
     }
 
     #[test]

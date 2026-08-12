@@ -34,7 +34,7 @@ fi
 
 guard_xpc_test_root=$(mktemp -d "${TMPDIR:-/tmp}/guard-xpc-phase05.XXXXXX")
 domain="gui/$(id -u)"
-label="io.github.plfjy.SensitiveFileGuard.phase05.$PPID"
+label="top.plfjy.SensitiveFileGuard.phase05.$PPID"
 plist="$guard_xpc_test_root/$label.plist"
 probe="$guard_xpc_test_root/wrong-signed-probe"
 test_server="$guard_xpc_test_root/guard-es-xpc-test-server"
