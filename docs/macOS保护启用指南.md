@@ -59,7 +59,9 @@ scripts/macos/create-self-use-signing-identity.sh
 完成离线评审后，按以下顺序操作：
 
 1. 确认 `systemextensionsctl list` 中没有旧 Guard 扩展处于 enabled/active；若显示
-   `terminated waiting to uninstall on reboot`，先重启完成移除。
+   `terminated waiting to uninstall on reboot`，先重启完成移除。在重启清空这些记录以前，
+   不要替换后再启动新版本 App；macOS 可能把同 bundle ID 的新扩展当作更新自动登记并
+   激活，从而生成更多待卸载记录。
 2. 在 Recovery 里手动执行 `csrutil disable`，然后重启。Guard 不会替你做这一步。
 3. 登录后执行 `csrutil status`，确认明确显示 disabled。
 4. 执行 `sudo systemextensionsctl developer on`。
