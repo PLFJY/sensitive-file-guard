@@ -18,6 +18,7 @@ guard-browser.workspace = true
 guard-ipc.workspace = true
 guard-platform.workspace = true
 guard-runtime.workspace = true
+guard-ssh.workspace = true
 libc.workspace = true
 platform-macos.workspace = true
 serde_json.workspace = true

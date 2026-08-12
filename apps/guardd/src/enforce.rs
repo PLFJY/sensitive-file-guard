@@ -381,6 +381,8 @@ impl EnforcementEngine {
         let (target, _) = self.resolve_process(pid)?;
         (target.uid == resource.owner_uid).then(|| SshPendingDetails {
             resource,
+            resource_dev: None,
+            resource_ino: None,
             target_root: target.stable.clone(),
             target,
         })

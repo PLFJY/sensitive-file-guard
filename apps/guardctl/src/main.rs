@@ -214,8 +214,8 @@ enum MigrationAction {
 enum SshAction {
     /// Enroll a single SSH private key at runtime. The daemon canonicalizes +
     /// stats the path, refuses `.pub` / reserved names (known_hosts, config,
-    /// authorized_keys), and adds a narrow `FAN_ACCESS_PERM` mark so actual
-    /// raw read attempts are mediated. No key contents are ever sent.
+    /// authorized_keys), and adds it to the selected platform's pre-read
+    /// authorization set. No key contents are ever sent.
     Protect {
         /// Path to the SSH private key (e.g. ~/.ssh/id_ed25519).
         path: PathBuf,
@@ -228,6 +228,8 @@ enum SshAction {
     /// exits. No key bytes are ever sent over IPC.
     ///
     /// Requires `SSH_AUTH_SOCK` to point at a running `ssh-agent`.
+    /// This specialized shortcut is intentionally unsupported on macOS;
+    /// ordinary ssh-add uses the manual protected-read approval flow there.
     Load {
         /// Path to the protected SSH private key to load.
         path: PathBuf,
@@ -1366,8 +1368,16 @@ fn print_ssh_protected(s: &guard_ipc::SshProtectedInfo) {
     println!("  path             : {}", s.path);
     println!("  owner_uid        : {}", s.owner_uid);
     println!("  resource_id      : {}", s.resource_id);
-    println!("  reads are allowed, reported, and watched for immediate external sends.");
-    println!("  the brokered ssh-agent path still uses a one-shot SshLoadLease.");
+    #[cfg(target_os = "macos")]
+    {
+        println!("  FREAD opens require Block/Allow confirmation or a short exact-key process-tree lease.");
+        println!("  guardctl ssh load is unsupported; ordinary ssh-add uses manual read approval.");
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        println!("  reads are allowed, reported, and watched for immediate external sends.");
+        println!("  the brokered ssh-agent path still uses a one-shot SshLoadLease.");
+    }
 }
 
 fn print_ssh_load_authorized(s: &guard_ipc::SshLoadAuthorizedInfo) {
@@ -1741,6 +1751,11 @@ fn run_ssh_load(
     ssh_add: Option<&Path>,
     json: bool,
 ) -> anyhow::Result<()> {
+    if cfg!(target_os = "macos") {
+        anyhow::bail!(
+            "ssh load is not supported on macOS in this Alpha; run ordinary ssh-add and approve its protected-key read"
+        );
+    }
     // 1. ssh-add needs a reachable agent socket.
     let _agent_socket = std::env::var_os("SSH_AUTH_SOCK")
         .ok_or_else(|| anyhow::anyhow!("SSH_AUTH_SOCK is not set; start ssh-agent first"))?;

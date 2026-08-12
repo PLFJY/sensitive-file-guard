@@ -27,7 +27,11 @@ int main(int argc, const char *argv[]) {
               (void)error;
               dispatch_semaphore_signal(finished);
             }];
-        NSData *request = [@"{\"version\":5,\"op\":{\"kind\":\"status\"}}"
+        // Attempt the capability-expanding operation directly, without the
+        // signed client or LocalAuthentication. The XPC signing requirement
+        // must reject this connection before the handler can reply, whether
+        // or not the synthetic pending ID exists.
+        NSData *request = [@"{\"version\":5,\"op\":{\"kind\":\"ssh_read_resolve\",\"id\":\"synthetic-pending\",\"action\":\"allow\"}}"
             dataUsingEncoding:NSUTF8StringEncoding];
         [proxy request:request
               withReply:^(NSData *response, NSString *error) {
@@ -40,10 +44,11 @@ int main(int argc, const char *argv[]) {
         [connection invalidate];
         if (receivedResponse) {
             fprintf(stderr,
-                    "FAIL: wrong-signed same-UID process received an XPC response\n");
+                    "FAIL: wrong-signed same-UID process reached SSH Allow XPC\n");
             return 1;
         }
-        fprintf(stderr, "PASS: wrong-signed same-UID XPC process was rejected\n");
+        fprintf(stderr,
+                "PASS: wrong-signed same-UID SSH Allow attempt was rejected\n");
         return 0;
     }
 }

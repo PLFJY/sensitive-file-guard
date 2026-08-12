@@ -3,14 +3,16 @@
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use std::os::unix::fs::MetadataExt;
+
 use guard_audit::{AuditRecord, AuditStore};
 use guard_core::lease::MigrationLeaseState;
 use guard_core::policy::{AccessEvent, AccessOperation, Decision, DenyReason};
-use guard_core::{ProcessIdentity, ProtectedResource};
+use guard_core::{ProcessIdentity, ProtectedResource, ProtectedResourceKind};
 use guard_platform::{PendingPermission, ProcessIdentityResolver};
 use guard_runtime::{
     AuthorizationRuntime, MigrationEnqueueResult, MigrationPendingDetails, PendingMigrationStore,
-    PendingTakeResult,
+    PendingSshReadStore, PendingTakeResult, SshEnqueueResult, SshPendingDetails,
 };
 use platform_macos::browser_trust::{MacBrowserTrustStore, MacProcessIdentityResolver};
 use platform_macos::config::MacBackendConfig;
@@ -21,6 +23,7 @@ use platform_macos::endpoint_security::{
 use platform_macos::resource_index::MacResourceIndex;
 
 pub const MIGRATION_LEASE_SECS: u64 = 10 * 60;
+pub const SSH_READ_LEASE_SECS: u64 = 10;
 
 trait OpenPermission: Send {
     fn requested_fflags(&self) -> u32;
@@ -59,6 +62,18 @@ impl PendingPermission for ReadOnlyPendingPermission {
     }
 }
 
+struct ExactPendingPermission(Box<dyn OpenPermission>);
+
+impl PendingPermission for ExactPendingPermission {
+    fn allow(self: Box<Self>) -> anyhow::Result<()> {
+        self.0.allow_exact()
+    }
+
+    fn deny(self: Box<Self>) -> anyhow::Result<()> {
+        self.0.deny()
+    }
+}
+
 struct BrowserOpenEvent {
     facts: AuthOpenFacts,
     resource: ProtectedResource,
@@ -89,10 +104,11 @@ pub struct PolicyStats {
 struct PolicyInner {
     runtime: AuthorizationRuntime,
     pending: PendingMigrationStore,
+    ssh_pending: PendingSshReadStore,
     stats: PolicyStats,
 }
 
-pub struct MacBrowserPolicy {
+pub struct MacPolicy {
     inner: Mutex<PolicyInner>,
     resources: Arc<MacProtectedResources>,
     resolver: Arc<MacProcessIdentityResolver>,
@@ -100,7 +116,7 @@ pub struct MacBrowserPolicy {
     audit: Arc<AuditStore>,
 }
 
-impl MacBrowserPolicy {
+impl MacPolicy {
     pub fn new(
         resources: Arc<MacProtectedResources>,
         resolver: Arc<MacProcessIdentityResolver>,
@@ -117,7 +133,10 @@ impl MacBrowserPolicy {
 
     pub fn apply_config(&self, config: MacBackendConfig) -> anyhow::Result<()> {
         config.validate()?;
-        let index = MacResourceIndex::from_browser_enrollments(&config.browser_trust)?;
+        let index = MacResourceIndex::from_enrollments(
+            &config.browser_trust,
+            &config.common_policy.ssh_keys,
+        )?;
         let trust = MacBrowserTrustStore::load_and_revalidate(config.browser_trust.clone())?;
         self.resolver.replace_trust(trust)?;
         self.resources.replace(config.policy_enabled, index)?;
@@ -129,11 +148,16 @@ impl MacBrowserPolicy {
     }
 
     pub fn config(&self) -> anyhow::Result<MacBackendConfig> {
-        self.config
+        self.config_optional()?
+            .ok_or_else(|| anyhow::anyhow!("authoritative macOS configuration is not loaded"))
+    }
+
+    pub fn config_optional(&self) -> anyhow::Result<Option<MacBackendConfig>> {
+        Ok(self
+            .config
             .read()
             .map_err(|_| anyhow::anyhow!("macOS policy config lock is poisoned"))?
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("authoritative macOS configuration is not loaded"))
+            .clone())
     }
 
     pub fn enabled(&self) -> bool {
@@ -142,6 +166,10 @@ impl MacBrowserPolicy {
 
     pub fn resource_counts(&self) -> (usize, usize) {
         self.resources.counts()
+    }
+
+    pub fn ssh_key_count(&self) -> usize {
+        self.resources.ssh_key_count()
     }
 
     pub fn browser_count(&self) -> usize {
@@ -252,7 +280,11 @@ impl MacBrowserPolicy {
                 inner.stats.denied = inner.stats.denied.saturating_add(1);
                 drop(inner);
                 self.record(
-                    "browser_access_denied",
+                    if event.resource.kind == ProtectedResourceKind::SshPrivateKey {
+                        "ssh_key_access_blocked"
+                    } else {
+                        "browser_access_denied"
+                    },
                     &event.resource,
                     None,
                     Decision::Deny(DenyReason::UnknownProcess),
@@ -263,6 +295,36 @@ impl MacBrowserPolicy {
                 return;
             }
         };
+        if event.resource.kind == ProtectedResourceKind::SshPrivateKey
+            && event.permission.requested_fflags() & ES_FFLAG_READ == 0
+        {
+            if process.uid != event.resource.owner_uid {
+                inner.stats.denied = inner.stats.denied.saturating_add(1);
+                drop(inner);
+                self.record(
+                    "ssh_key_access_blocked",
+                    &event.resource,
+                    Some(&process),
+                    Decision::Deny(DenyReason::WrongUid),
+                    "cross-UID write-only open denied".into(),
+                    now,
+                );
+                let _ = event.permission.deny();
+            } else {
+                inner.stats.allowed = inner.stats.allowed.saturating_add(1);
+                drop(inner);
+                self.record_debug(
+                    "ssh_key_write_only_allowed",
+                    &event.resource,
+                    Some(&process),
+                    Decision::Allow,
+                    "write-only AUTH_OPEN cannot disclose key bytes; integrity is outside the access-firewall scope".into(),
+                    now,
+                );
+                let _ = event.permission.allow_exact();
+            }
+            return;
+        }
         let operation = if event.permission.requested_fflags() & ES_FFLAG_WRITE != 0 {
             AccessOperation::Write
         } else {
@@ -292,20 +354,36 @@ impl MacBrowserPolicy {
                 inner.stats.allowed = inner.stats.allowed.saturating_add(1);
                 drop(inner);
                 self.record_debug(
-                    "browser_migration_allowed_by_lease",
+                    if event.resource.kind == ProtectedResourceKind::SshPrivateKey {
+                        "ssh_key_access_allowed"
+                    } else {
+                        "browser_migration_allowed_by_lease"
+                    },
                     &event.resource,
                     Some(&process),
                     decision,
-                    "read_only_guaranteed=true root-bound migration lease".into(),
+                    if event.resource.kind == ProtectedResourceKind::SshPrivateKey {
+                        "short exact-key root-bound SSH read lease".into()
+                    } else {
+                        "read_only_guaranteed=true root-bound migration lease".into()
+                    },
                     now,
                 );
-                let _ = event.permission.allow_read_only();
+                if event.resource.kind == ProtectedResourceKind::SshPrivateKey {
+                    let _ = event.permission.allow_exact();
+                } else {
+                    let _ = event.permission.allow_read_only();
+                }
             }
             Decision::Deny(reason) => {
                 inner.stats.denied = inner.stats.denied.saturating_add(1);
                 drop(inner);
                 self.record(
-                    "browser_access_denied",
+                    if event.resource.kind == ProtectedResourceKind::SshPrivateKey {
+                        "ssh_key_access_blocked"
+                    } else {
+                        "browser_access_denied"
+                    },
                     &event.resource,
                     Some(&process),
                     Decision::Deny(reason),
@@ -389,9 +467,59 @@ impl MacBrowserPolicy {
                 }
             }
             Decision::RequireSshKeyConfirmation => {
-                inner.stats.denied = inner.stats.denied.saturating_add(1);
-                drop(inner);
-                let _ = event.permission.deny();
+                let Some(budget) = event.interactive_budget else {
+                    inner.stats.denied = inner.stats.denied.saturating_add(1);
+                    drop(inner);
+                    self.record(
+                        "ssh_key_access_timed_out",
+                        &event.resource,
+                        Some(&process),
+                        Decision::Deny(DenyReason::SshApprovalRequired),
+                        "Endpoint Security deadline has no interactive budget".into(),
+                        now,
+                    );
+                    let _ = event.permission.deny();
+                    return;
+                };
+                let details = SshPendingDetails {
+                    resource: event.resource.clone(),
+                    resource_dev: Some(event.facts.target_dev),
+                    resource_ino: Some(event.facts.target_ino),
+                    target_root: process.stable.clone(),
+                    target: process.clone(),
+                };
+                let timeout_secs = budget.as_secs().max(1);
+                let result = inner.ssh_pending.enqueue_with_timeout(
+                    details,
+                    Box::new(ExactPendingPermission(event.permission)),
+                    now,
+                    timeout_secs,
+                );
+                match result {
+                    SshEnqueueResult::Created(_) | SshEnqueueResult::Joined => {
+                        drop(inner);
+                        self.record(
+                            "ssh_key_access_confirmation_required",
+                            &event.resource,
+                            Some(&process),
+                            decision,
+                            format!("exact_key=true prompt_budget_secs={timeout_secs}"),
+                            now,
+                        );
+                    }
+                    SshEnqueueResult::DenySuppressed | SshEnqueueResult::DenyLimit => {
+                        inner.stats.denied = inner.stats.denied.saturating_add(1);
+                        drop(inner);
+                        self.record(
+                            "ssh_key_access_blocked",
+                            &event.resource,
+                            Some(&process),
+                            Decision::Deny(DenyReason::SshApprovalRequired),
+                            "pending queue full or recently blocked".into(),
+                            now,
+                        );
+                    }
+                }
             }
         }
     }
@@ -515,12 +643,198 @@ impl MacBrowserPolicy {
         Ok(guard_ipc::MigrationResolutionInfo::Allowed)
     }
 
+    pub fn ssh_pending_for_uid(&self, uid: u32) -> Vec<guard_ipc::SshPendingInfo> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .ssh_pending
+            .list_for_uid(uid, false)
+            .iter()
+            .map(ssh_pending_info)
+            .collect()
+    }
+
+    pub fn ssh_pending_item_for_uid(
+        &self,
+        id: &str,
+        uid: u32,
+    ) -> Option<guard_ipc::SshPendingInfo> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .ssh_pending
+            .get_for_uid(id, uid, false)
+            .as_ref()
+            .map(ssh_pending_info)
+    }
+
+    pub fn resolve_ssh_read(
+        &self,
+        id: &str,
+        uid: u32,
+        allow: bool,
+    ) -> anyhow::Result<guard_ipc::SshReadResolutionInfo> {
+        self.resolve_ssh_read_at(id, uid, allow, epoch_seconds())
+    }
+
+    fn resolve_ssh_read_at(
+        &self,
+        id: &str,
+        uid: u32,
+        allow: bool,
+        now: u64,
+    ) -> anyhow::Result<guard_ipc::SshReadResolutionInfo> {
+        let request = {
+            let mut inner = self
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            match inner
+                .ssh_pending
+                .take_for_resolution_result(id, uid, false, now, !allow)
+            {
+                PendingTakeResult::Ready(request) => request,
+                PendingTakeResult::TimedOut(request) => {
+                    let details = request.details.clone();
+                    request.resolve(false);
+                    inner.stats.denied = inner.stats.denied.saturating_add(1);
+                    drop(inner);
+                    self.record(
+                        "ssh_key_access_timed_out",
+                        &details.resource,
+                        Some(&details.target),
+                        Decision::Deny(DenyReason::SshApprovalRequired),
+                        "pending resolution arrived after expiry".into(),
+                        now,
+                    );
+                    anyhow::bail!("timed_out")
+                }
+                result => anyhow::bail!(result.error_code().unwrap_or("pending_unavailable")),
+            }
+        };
+        let details = request.details.clone();
+        if !allow {
+            request.resolve(false);
+            self.note_ssh_denied();
+            self.record(
+                "ssh_key_access_blocked",
+                &details.resource,
+                Some(&details.target),
+                Decision::Deny(DenyReason::SshApprovalRequired),
+                "explicit user block".into(),
+                now,
+            );
+            return Ok(guard_ipc::SshReadResolutionInfo::Blocked);
+        }
+
+        let validation = self.revalidate_ssh_pending(&details);
+        let current = match validation {
+            Ok(current) => current,
+            Err(error) => {
+                request.resolve(false);
+                self.note_ssh_denied();
+                self.record(
+                    "ssh_key_access_blocked",
+                    &details.resource,
+                    Some(&details.target),
+                    Decision::Deny(DenyReason::IdentityMismatch),
+                    format!("post-authentication revalidation failed: {error}"),
+                    now,
+                );
+                return Err(error);
+            }
+        };
+        let lease_id = {
+            let mut inner = self
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            match inner
+                .runtime
+                .approve_ssh_read(&details, &current, now, SSH_READ_LEASE_SECS)
+            {
+                Ok((lease_id, _)) => lease_id,
+                Err(error) => {
+                    drop(inner);
+                    request.resolve(false);
+                    self.note_ssh_denied();
+                    self.record(
+                        "ssh_key_access_blocked",
+                        &details.resource,
+                        Some(&details.target),
+                        Decision::Deny(DenyReason::IdentityMismatch),
+                        format!("post-authentication reader mismatch: {error}"),
+                        now,
+                    );
+                    anyhow::bail!(error)
+                }
+            }
+        };
+        if let Err(error) = request.try_resolve(true) {
+            self.revoke_ssh_lease(lease_id);
+            anyhow::bail!("retained AUTH_OPEN was no longer resolvable: {error}");
+        }
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .stats
+            .allowed += 1;
+        self.record(
+            "ssh_key_access_allowed",
+            &details.resource,
+            Some(&current),
+            Decision::AllowByLease(lease_id),
+            format!("exact_key=true root_bound=true lease_secs={SSH_READ_LEASE_SECS}"),
+            now,
+        );
+        Ok(guard_ipc::SshReadResolutionInfo::Allowed)
+    }
+
+    fn revalidate_ssh_pending(
+        &self,
+        details: &SshPendingDetails,
+    ) -> anyhow::Result<ProcessIdentity> {
+        anyhow::ensure!(
+            self.resources.is_configured_ssh_resource(&details.resource),
+            "SSH key is no longer configured"
+        );
+        let canonical = std::fs::canonicalize(&details.resource.path)?;
+        anyhow::ensure!(
+            canonical == details.resource.path,
+            "SSH key path identity changed"
+        );
+        let metadata = std::fs::metadata(&canonical)?;
+        anyhow::ensure!(
+            metadata.is_file()
+                && metadata.uid() == details.resource.owner_uid
+                && Some(metadata.dev()) == details.resource_dev
+                && Some(metadata.ino()) == details.resource_ino,
+            "SSH key owner or file identity changed before confirmation"
+        );
+        let current = self
+            .resolver
+            .resolve(details.target.stable.pid, details.resource.owner_uid)?;
+        anyhow::ensure!(
+            self.resolver.is_live_instance(&details.target_root)?,
+            "SSH reader root exited before confirmation"
+        );
+        Ok(current)
+    }
+
+    fn note_ssh_denied(&self) {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        inner.stats.denied = inner.stats.denied.saturating_add(1);
+    }
+
     pub fn maintenance(&self) {
         self.maintenance_at(epoch_seconds());
     }
 
     fn maintenance_at(&self, now: u64) {
-        let expired = {
+        let (expired_migrations, expired_ssh_reads) = {
             let mut inner = self
                 .inner
                 .lock()
@@ -533,14 +847,23 @@ impl MacBrowserPolicy {
                     }
                 }
             }
-            let expired = inner.pending.expire(now, self.resolver.as_ref());
+            for lease in &mut inner.runtime.leases_mut().ssh_read {
+                if !self.resolver.is_live_instance(&lease.root).unwrap_or(false) {
+                    lease.revoked = true;
+                }
+            }
+            let expired_migrations = inner.pending.expire(now, self.resolver.as_ref());
+            let expired_ssh_reads = inner.ssh_pending.expire(now, self.resolver.as_ref());
+            let expired_count = expired_migrations
+                .len()
+                .saturating_add(expired_ssh_reads.len());
             inner.stats.denied = inner
                 .stats
                 .denied
-                .saturating_add(u64::try_from(expired.len()).unwrap_or(u64::MAX));
-            expired
+                .saturating_add(u64::try_from(expired_count).unwrap_or(u64::MAX));
+            (expired_migrations, expired_ssh_reads)
         };
-        for request in expired {
+        for request in expired_migrations {
             let details = request.details.clone();
             request.resolve(false);
             self.record(
@@ -552,14 +875,27 @@ impl MacBrowserPolicy {
                 now,
             );
         }
+        for request in expired_ssh_reads {
+            let details = request.details.clone();
+            request.resolve(false);
+            self.record(
+                "ssh_key_access_timed_out",
+                &details.resource,
+                Some(&details.target),
+                Decision::Deny(DenyReason::SshApprovalRequired),
+                "prompt deadline or reader process lifetime ended".into(),
+                now,
+            );
+        }
     }
 
     pub fn lease_infos_for_uid(&self, uid: u32) -> Vec<guard_ipc::LeaseInfo> {
-        self.inner
+        let inner = self
+            .inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .runtime
-            .leases()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let leases = inner.runtime.leases();
+        let mut infos = leases
             .migration
             .iter()
             .filter(|lease| lease.uid == uid)
@@ -583,7 +919,27 @@ impl MacBrowserPolicy {
                 revoked: lease.revoked,
                 used: false,
             })
-            .collect()
+            .collect::<Vec<_>>();
+        infos.extend(
+            leases
+                .ssh_read
+                .iter()
+                .filter(|lease| lease.uid == uid)
+                .map(|lease| guard_ipc::LeaseInfo {
+                    id: lease.id.0.to_string(),
+                    kind: "ssh_read".into(),
+                    uid: lease.uid,
+                    source_browser: None,
+                    source_profile: None,
+                    target_browser: None,
+                    resource: Some(lease.resource.0.clone()),
+                    state: Some(format!("root_pid={}", lease.root.pid)),
+                    expires_at: lease.expires_at,
+                    revoked: lease.revoked,
+                    used: false,
+                }),
+        );
+        infos
     }
 
     pub fn revoke_lease_by_id(&self, id: &str, uid: u32) -> bool {
@@ -594,18 +950,28 @@ impl MacBrowserPolicy {
             .inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let Some(lease) = inner
+        if let Some(lease) = inner
             .runtime
             .leases_mut()
             .migration
             .iter_mut()
             .find(|lease| lease.id.0 == id && lease.uid == uid)
-        else {
-            return false;
-        };
-        lease.revoked = true;
-        lease.state = MigrationLeaseState::Dead;
-        true
+        {
+            lease.revoked = true;
+            lease.state = MigrationLeaseState::Dead;
+            return true;
+        }
+        if let Some(lease) = inner
+            .runtime
+            .leases_mut()
+            .ssh_read
+            .iter_mut()
+            .find(|lease| lease.id.0 == id && lease.uid == uid)
+        {
+            lease.revoked = true;
+            return true;
+        }
+        false
     }
 
     pub fn recent_events(
@@ -750,6 +1116,22 @@ impl MacBrowserPolicy {
         }
     }
 
+    fn revoke_ssh_lease(&self, lease_id: guard_core::LeaseId) {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(lease) = inner
+            .runtime
+            .leases_mut()
+            .ssh_read
+            .iter_mut()
+            .find(|lease| lease.id == lease_id)
+        {
+            lease.revoked = true;
+        }
+    }
+
     fn record_debug(
         &self,
         event_code: &str,
@@ -816,7 +1198,10 @@ pub fn prepare_config(
         Some(config) => {
             config.validate()?;
             Ok((
-                MacResourceIndex::from_browser_enrollments(&config.browser_trust)?,
+                MacResourceIndex::from_enrollments(
+                    &config.browser_trust,
+                    &config.common_policy.ssh_keys,
+                )?,
                 MacBrowserTrustStore::load_and_revalidate(config.browser_trust.clone())?,
                 config.policy_enabled,
             ))
@@ -840,6 +1225,19 @@ fn migration_info(info: &guard_runtime::PendingMigrationInfo) -> guard_ipc::Migr
         target_pid: info.target_pid,
         target_start_time: info.target_start_time,
         requested_data: info.requested_data.clone(),
+        created_at: info.created_at,
+        expires_at: info.expires_at,
+    }
+}
+
+fn ssh_pending_info(info: &guard_runtime::PendingSshReadInfo) -> guard_ipc::SshPendingInfo {
+    guard_ipc::SshPendingInfo {
+        id: info.id.clone(),
+        uid: info.uid,
+        key_path: info.key_path.clone(),
+        process_exe: info.process_exe.clone(),
+        pid: info.pid,
+        start_time: info.start_time,
         created_at: info.created_at,
         expires_at: info.expires_at,
     }
@@ -956,7 +1354,7 @@ mod tests {
     struct Fixture {
         _root: tempfile::TempDir,
         graph: Arc<Mutex<MacProcessGraph>>,
-        policy: MacBrowserPolicy,
+        policy: MacPolicy,
         resources: HashMap<String, ProtectedResource>,
         executables: HashMap<String, std::path::PathBuf>,
         uid: u32,
@@ -1020,13 +1418,20 @@ mod tests {
                     },
                 );
             }
+            let reader = root.path().join("synthetic-reader");
+            std::fs::write(&reader, b"synthetic reader executable").unwrap();
+            executables.insert("reader".into(), reader);
+            let ssh_key = root.path().join("id_ed25519");
+            std::fs::write(&ssh_key, b"synthetic ephemeral private-key fixture").unwrap();
+            let ssh_resource = guard_ssh::enroll_key(&ssh_key).unwrap();
+            resources.insert("ssh".into(), ssh_resource.clone());
             let config = MacBackendConfig {
                 version: platform_macos::config::MAC_CONFIG_VERSION,
                 policy_enabled: true,
                 common_policy: PolicyConfig {
                     browsers: common,
                     enrolled_exes: Vec::new(),
-                    ssh_keys: Vec::new(),
+                    ssh_keys: vec![ssh_resource.path],
                 },
                 browser_trust: browsers,
             };
@@ -1035,7 +1440,7 @@ mod tests {
             let graph = Arc::new(Mutex::new(MacProcessGraph::default()));
             let resolver = Arc::new(MacProcessIdentityResolver::new(Arc::clone(&graph), trust));
             let audit_path = root.path().join("audit.db");
-            let policy = MacBrowserPolicy::new(
+            let policy = MacPolicy::new(
                 protected,
                 resolver,
                 Arc::new(AuditStore::open(&audit_path).unwrap()),
@@ -1335,5 +1740,186 @@ mod tests {
             .any(|event| event.event_code == "browser_migration_blocked"));
         let json = serde_json::to_string(&events).unwrap();
         assert!(!json.contains("synthetic cookies"));
+    }
+
+    #[test]
+    fn ssh_read_requires_approval_and_lease_is_exact_key_uid_and_process_tree() {
+        let fixture = Fixture::new();
+        let now = 1_000;
+        let reader = fixture.facts("reader", 80, None);
+        fixture.observe(reader.clone());
+        let (event, first) = fixture.event(
+            reader.clone(),
+            "ssh",
+            ES_FFLAG_READ | ES_FFLAG_WRITE,
+            Some(Duration::from_secs(20)),
+        );
+        fixture.policy.handle_at(event, now);
+        let (event, joined) = fixture.event(
+            reader.clone(),
+            "ssh",
+            ES_FFLAG_READ,
+            Some(Duration::from_secs(20)),
+        );
+        fixture.policy.handle_at(event, now);
+        let pending = fixture.policy.ssh_pending_for_uid(fixture.uid);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(*first.lock().unwrap(), Terminal::Pending);
+        assert_eq!(*joined.lock().unwrap(), Terminal::Pending);
+        assert_eq!(
+            fixture
+                .policy
+                .resolve_ssh_read_at(&pending[0].id, fixture.uid, true, now + 1)
+                .unwrap(),
+            guard_ipc::SshReadResolutionInfo::Allowed
+        );
+        assert_eq!(
+            *first.lock().unwrap(),
+            Terminal::Flags(ES_FFLAG_READ | ES_FFLAG_WRITE)
+        );
+        assert_eq!(*joined.lock().unwrap(), Terminal::Flags(ES_FFLAG_READ));
+        assert!(fixture
+            .policy
+            .resolve_ssh_read_at(&pending[0].id, fixture.uid, true, now + 1)
+            .is_err());
+
+        let descendant = fixture.facts("reader", 81, Some(reader.key));
+        fixture.observe(descendant.clone());
+        let (event, descendant_state) = fixture.event(
+            descendant,
+            "ssh",
+            ES_FFLAG_READ,
+            Some(Duration::from_secs(20)),
+        );
+        fixture.policy.handle_at(event, now + 2);
+        assert_eq!(
+            *descendant_state.lock().unwrap(),
+            Terminal::Flags(ES_FFLAG_READ)
+        );
+
+        let unrelated = fixture.facts("reader", 82, None);
+        fixture.observe(unrelated.clone());
+        let (event, unrelated_state) = fixture.event(
+            unrelated,
+            "ssh",
+            ES_FFLAG_READ,
+            Some(Duration::from_secs(20)),
+        );
+        fixture.policy.handle_at(event, now + 2);
+        assert_eq!(*unrelated_state.lock().unwrap(), Terminal::Pending);
+        let unrelated_pending = fixture.policy.ssh_pending_for_uid(fixture.uid);
+        assert_eq!(unrelated_pending.len(), 1);
+        fixture
+            .policy
+            .resolve_ssh_read_at(&unrelated_pending[0].id, fixture.uid, false, now + 3)
+            .unwrap();
+        assert_eq!(*unrelated_state.lock().unwrap(), Terminal::Flags(0));
+
+        let mut cross_uid = fixture.facts("reader", 83, None);
+        cross_uid.uid = fixture.uid.saturating_add(1);
+        fixture.observe(cross_uid.clone());
+        let (event, cross_uid_state) = fixture.event(
+            cross_uid,
+            "ssh",
+            ES_FFLAG_READ,
+            Some(Duration::from_secs(20)),
+        );
+        fixture.policy.handle_at(event, now + 4);
+        assert_eq!(*cross_uid_state.lock().unwrap(), Terminal::Flags(0));
+        assert!(fixture.policy.ssh_pending_for_uid(fixture.uid).is_empty());
+
+        fixture.graph.lock().unwrap().remove_terminal(reader.key);
+        fixture.policy.maintenance_at(now + 5);
+        assert!(fixture
+            .policy
+            .lease_infos_for_uid(fixture.uid)
+            .iter()
+            .any(|lease| lease.kind == "ssh_read" && lease.revoked));
+        let events = fixture
+            .policy
+            .recent_events(fixture.uid, 100, None, None)
+            .unwrap();
+        for required in [
+            "ssh_key_access_confirmation_required",
+            "ssh_key_access_allowed",
+            "ssh_key_access_blocked",
+        ] {
+            assert!(events.iter().any(|event| event.event_code == required));
+        }
+        let json = serde_json::to_string(&events).unwrap();
+        assert!(!json.contains("synthetic ephemeral private-key fixture"));
+    }
+
+    #[test]
+    fn ssh_write_only_deadline_replacement_and_late_resolution_fail_safely() {
+        let fixture = Fixture::new();
+        let now = 2_000;
+        let writer = fixture.facts("reader", 90, None);
+        fixture.observe(writer.clone());
+        let (event, write_only) =
+            fixture.event(writer, "ssh", ES_FFLAG_WRITE, Some(Duration::from_secs(20)));
+        fixture.policy.handle_at(event, now);
+        assert_eq!(*write_only.lock().unwrap(), Terminal::Flags(ES_FFLAG_WRITE));
+        assert!(fixture.policy.ssh_pending_for_uid(fixture.uid).is_empty());
+
+        let reader = fixture.facts("reader", 91, None);
+        fixture.observe(reader.clone());
+        let (event, replaced) =
+            fixture.event(reader, "ssh", ES_FFLAG_READ, Some(Duration::from_secs(20)));
+        fixture.policy.handle_at(event, now + 1);
+        let pending = fixture.policy.ssh_pending_for_uid(fixture.uid);
+        let key = fixture.resources.get("ssh").unwrap().path.clone();
+        std::fs::rename(&key, key.with_extension("old")).unwrap();
+        std::fs::write(&key, b"replacement synthetic key").unwrap();
+        assert!(fixture
+            .policy
+            .resolve_ssh_read_at(&pending[0].id, fixture.uid, true, now + 2)
+            .is_err());
+        assert_eq!(*replaced.lock().unwrap(), Terminal::Flags(0));
+
+        let late_reader = fixture.facts("reader", 92, None);
+        fixture.observe(late_reader.clone());
+        let (event, late) = fixture.event(
+            late_reader,
+            "ssh",
+            ES_FFLAG_READ,
+            Some(Duration::from_secs(2)),
+        );
+        fixture.policy.handle_at(event, now + 3);
+        let pending = fixture.policy.ssh_pending_for_uid(fixture.uid);
+        assert!(fixture
+            .policy
+            .resolve_ssh_read_at(&pending[0].id, fixture.uid, true, now + 5)
+            .is_err());
+        assert_eq!(*late.lock().unwrap(), Terminal::Flags(0));
+        assert!(fixture
+            .policy
+            .recent_events(fixture.uid, 100, None, None)
+            .unwrap()
+            .iter()
+            .any(|event| event.event_code == "ssh_key_access_timed_out"));
+    }
+
+    #[test]
+    fn ssh_pending_queue_pressure_and_missing_interactive_budget_deny() {
+        let fixture = Fixture::new();
+        let now = 3_000;
+        let mut states = Vec::new();
+        for pid in 100..=108 {
+            let reader = fixture.facts("reader", pid, None);
+            fixture.observe(reader.clone());
+            let (event, state) =
+                fixture.event(reader, "ssh", ES_FFLAG_READ, Some(Duration::from_secs(20)));
+            fixture.policy.handle_at(event, now);
+            states.push(state);
+        }
+        assert_eq!(fixture.policy.ssh_pending_for_uid(fixture.uid).len(), 8);
+        assert_eq!(*states.last().unwrap().lock().unwrap(), Terminal::Flags(0));
+
+        let no_budget_reader = fixture.facts("reader", 109, None);
+        fixture.observe(no_budget_reader.clone());
+        let (event, no_budget) = fixture.event(no_budget_reader, "ssh", ES_FFLAG_READ, None);
+        fixture.policy.handle_at(event, now + 1);
+        assert_eq!(*no_budget.lock().unwrap(), Terminal::Flags(0));
     }
 }

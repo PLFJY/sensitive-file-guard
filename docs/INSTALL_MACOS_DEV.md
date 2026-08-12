@@ -1,8 +1,8 @@
 # macOS development build
 
 The development `Guard.app` contains the Endpoint Security extension, GTK
-control center, authenticated XPC clients, pending helper, and browser policy
-runtime. It is not distributable packaging. Live enforcement still requires
+control center, authenticated XPC clients, pending helper, and browser/SSH
+policy runtime. It is not distributable packaging. Live enforcement still requires
 Apple-approved Endpoint Security provisioning and Full Disk Access.
 
 Requirements:
@@ -77,3 +77,18 @@ pending-only lifecycle are described in
 The browser AUTH_OPEN classifier, interactive migration runtime, audit events,
 and FREAD-only lease behavior are described in
 [the macOS browser-protection guide](MACOS_BROWSER_PROTECTION.md).
+SSH private-key enrollment, manual read approval, short process-tree leases,
+and the deliberately unsupported specialized agent shortcut are described in
+[the macOS SSH-protection guide](MACOS_SSH_PROTECTION.md).
+
+Entitlement-independent SSH fixture validation uses a newly generated key only:
+
+```sh
+cargo build -p guardctl
+scripts/macos/test-ephemeral-ssh-key.sh target/debug/guardctl
+```
+
+On an installed, activated, provisioned test host, run
+`scripts/macos/run-ssh-policy-acceptance.sh build/macos/Guard.app` for the real
+Block/Allow/process-tree flow. The script refuses to continue when authenticated
+XPC/Endpoint Security is unavailable and never selects a key from `~/.ssh`.

@@ -32,6 +32,11 @@ pub struct MigrationPendingDetails {
 #[derive(Debug, Clone)]
 pub struct SshPendingDetails {
     pub resource: ProtectedResource,
+    /// File identity observed by an OS authorization event. Linux leaves this
+    /// absent; macOS uses it to reject key replacement between AUTH_OPEN and
+    /// user approval.
+    pub resource_dev: Option<u64>,
+    pub resource_ino: Option<u64>,
     pub target: ProcessIdentity,
     pub target_root: ProcessStableId,
 }
@@ -461,6 +466,8 @@ impl PendingMigrationStore {
 struct SshPendingKey {
     uid: u32,
     resource: ProtectedResourceId,
+    resource_dev: Option<u64>,
+    resource_ino: Option<u64>,
     root: ProcessStableId,
 }
 
@@ -469,6 +476,8 @@ impl SshPendingKey {
         Self {
             uid: details.target.uid,
             resource: details.resource.id.clone(),
+            resource_dev: details.resource_dev,
+            resource_ino: details.resource_ino,
             root: details.target_root.clone(),
         }
     }
@@ -484,6 +493,13 @@ pub struct PendingSshReadRequest {
 
 impl PendingSshReadRequest {
     pub fn resolve(self, allow: bool) {
+        if let Err(error) = self.try_resolve(allow) {
+            tracing::error!(%error, "failed to resolve pending SSH key read permission");
+        }
+    }
+
+    pub fn try_resolve(self, allow: bool) -> anyhow::Result<()> {
+        let mut first_error = None;
         for permission in self.permissions {
             let result = if allow {
                 permission.allow()
@@ -491,8 +507,12 @@ impl PendingSshReadRequest {
                 permission.deny()
             };
             if let Err(error) = result {
-                tracing::error!(%error, "failed to resolve pending SSH key read permission");
+                first_error.get_or_insert(error);
             }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
         }
     }
 }
@@ -550,6 +570,18 @@ impl PendingSshReadStore {
         permission: Box<dyn PendingPermission>,
         now: u64,
     ) -> SshEnqueueResult {
+        self.enqueue_with_timeout(details, permission, now, PENDING_TIMEOUT_SECS)
+    }
+
+    /// Enqueue with a platform-derived prompt lifetime. macOS supplies the
+    /// remaining safe Endpoint Security interaction budget.
+    pub fn enqueue_with_timeout(
+        &mut self,
+        details: SshPendingDetails,
+        permission: Box<dyn PendingPermission>,
+        now: u64,
+        timeout_secs: u64,
+    ) -> SshEnqueueResult {
         self.blocked.retain(|_, until| now < *until);
         let key = SshPendingKey::from_details(&details);
         if self.blocked.contains_key(&key) {
@@ -574,7 +606,7 @@ impl PendingSshReadStore {
             id: self.next_id,
             details,
             created_at: now,
-            expires_at: now.saturating_add(PENDING_TIMEOUT_SECS),
+            expires_at: now.saturating_add(timeout_secs),
             permissions: vec![permission],
         };
         let info = PendingSshReadInfo::from(&request);
@@ -763,6 +795,8 @@ mod tests {
                 profile: None,
                 path: PathBuf::from("/synthetic/id_ed25519"),
             },
+            resource_dev: None,
+            resource_ino: None,
             target_root: target.stable.clone(),
             target,
         }

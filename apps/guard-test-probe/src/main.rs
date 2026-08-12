@@ -25,6 +25,9 @@ fn main() -> ExitCode {
             do_copy_read(Path::new(&args[2]), Path::new(&args[3]))
         }
         Some("child-read") if args.len() == 3 => do_child_read(Path::new(&args[2])),
+        Some("read-then-child-read") if args.len() == 3 => {
+            do_read_then_child_read(Path::new(&args[2]))
+        }
         Some("proc-fd") if args.len() == 4 => do_proc_fd(&args[2], &args[3]),
         Some("hold-fd") if args.len() == 4 => do_hold_fd(Path::new(&args[2]), Path::new(&args[3])),
         Some("exfil-unix") if args.len() == 4 => {
@@ -97,6 +100,7 @@ fn print_usage() {
            sqlite DATABASE\n\
            copy-read SOURCE DESTINATION\n\
            child-read PATH\n\
+           read-then-child-read PATH\n\
            proc-fd PID FD\n\
            hold-fd PATH READY_FILE\n\
            exfil-unix PATH SOCKET\n\
@@ -118,6 +122,41 @@ fn do_read(path: &Path) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(error) => report_failure("open/read", path, &error),
+    }
+}
+
+/// Read one byte in this process, then have a child read the same fixture.
+/// This is a local process-tree lease probe: bytes are discarded and the
+/// command has no networking or persistence behavior.
+fn do_read_then_child_read(path: &Path) -> ExitCode {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) => return report_failure("open root read", path, &error),
+    };
+    let mut byte = [0_u8; 1];
+    if let Err(error) = file.read_exact(&mut byte) {
+        return report_failure("root read", path, &error);
+    }
+    drop(file);
+    let executable = match std::env::current_exe() {
+        Ok(executable) => executable,
+        Err(error) => return report_failure("resolve child executable", path, &error),
+    };
+    match Command::new(executable)
+        .arg("read")
+        .arg(path)
+        .stdout(std::process::Stdio::null())
+        .status()
+    {
+        Ok(status) if status.success() => {
+            println!("{{\"root_read\":true,\"descendant_read\":true}}");
+            ExitCode::SUCCESS
+        }
+        Ok(status) => {
+            eprintln!("guard-test-probe: descendant read exited with {status}");
+            ExitCode::FAILURE
+        }
+        Err(error) => report_failure("spawn descendant reader", path, &error),
     }
 }
 

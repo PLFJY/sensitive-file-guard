@@ -7,7 +7,11 @@
 > adapter, signer-aware identity, authenticated XPC/LocalAuthentication, and a
 > macOS-specific GTK status/pending-helper flow. Phase 07 connects browser
 > resource classification, fail-closed policy, interactive migration, and
-> root-bound read-only FFLAGS leases. Live entitled ES acceptance remains
+> root-bound read-only FFLAGS leases. Phase 08 adds owner-scoped SSH-key
+> enrollment, deadline-bounded manual reads, and ten-second exact-key process-
+> tree leases. The specialized `guardctl ssh load` shortcut is intentionally
+> unsupported on macOS; ordinary `ssh-add` uses the same manual read flow.
+> Live entitled ES acceptance remains
 > externally blocked until an Apple-provisioned test host is available.
 
 > **Current status: SECURITY-ACCEPTED ALPHA ON TESTED ARCH HOST when configured
@@ -17,7 +21,8 @@
 > against root, browser compromise, or already-open descriptors.
 
 > SSH private-key reads are held for explicit confirmation and scoped to a
-> short-lived process-tree lease. See the [SSH access model](docs/SSH_ACCESS_MODEL.md).
+> short-lived process-tree lease. See the [portable/Linux SSH access model](docs/SSH_ACCESS_MODEL.md)
+> and [macOS SSH protection guide](docs/MACOS_SSH_PROTECTION.md).
 
 A narrow local capability firewall. Browser auth/session resources retain
 pre-open access denial. Protected SSH-key reads use interactive pre-read

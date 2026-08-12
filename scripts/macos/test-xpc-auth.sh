@@ -158,4 +158,4 @@ codesign --force --sign "$signing_authority" \
     --identifier "$label.same-team-unlisted" "$probe" >/dev/null
 "$probe" "$service_name"
 
-echo "PASS: signed Guard UI/CLI/pending helper reached XPC; ad-hoc and same-Team unlisted same-UID clients did not"
+echo "PASS: signed Guard UI/CLI/pending helper reached XPC; ad-hoc and same-Team unlisted same-UID SSH self-approval attempts did not"

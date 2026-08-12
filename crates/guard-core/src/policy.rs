@@ -47,6 +47,7 @@ pub enum DenyReason {
     UnknownProcess,
     NotTrustedIdentity,
     CrossBrowserWithoutLease,
+    SshApprovalRequired,
     LeaseExpired,
     LeaseRevoked,
     LeaseScopeMismatch,
@@ -70,6 +71,7 @@ impl DenyReason {
             // A different browser tried to read another browser's profile
             // without a migration access lease.
             Self::CrossBrowserWithoutLease => "migration_lease_required",
+            Self::SshApprovalRequired => "ssh_read_approval_required",
             Self::LeaseExpired => "lease_expired",
             Self::LeaseRevoked => "lease_revoked",
             // Reserved for backends that can enforce a narrower lease scope.
@@ -1054,6 +1056,10 @@ mod tests {
             DenyReason::CrossBrowserWithoutLease.reason_code(),
             "migration_lease_required"
         );
+        assert_eq!(
+            DenyReason::SshApprovalRequired.reason_code(),
+            "ssh_read_approval_required"
+        );
         assert_eq!(DenyReason::LeaseExpired.reason_code(), "lease_expired");
         assert_eq!(DenyReason::LeaseRevoked.reason_code(), "lease_revoked");
         assert_eq!(
@@ -1078,6 +1084,7 @@ mod tests {
             DenyReason::UnknownProcess,
             DenyReason::NotTrustedIdentity,
             DenyReason::CrossBrowserWithoutLease,
+            DenyReason::SshApprovalRequired,
             DenyReason::LeaseExpired,
             DenyReason::LeaseRevoked,
             DenyReason::LeaseScopeMismatch,

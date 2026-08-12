@@ -30,6 +30,15 @@ impl MacBackendConfig {
             "unsupported macOS config version"
         );
         self.common_policy.validate()?;
+        let mut ssh_paths = HashSet::new();
+        for key in &self.common_policy.ssh_keys {
+            anyhow::ensure!(
+                guard_ssh::is_private_key_candidate(key),
+                "SSH enrollment rejects public-key and reserved non-private-key names: {}",
+                key.display()
+            );
+            anyhow::ensure!(ssh_paths.insert(key), "duplicate macOS SSH key enrollment");
+        }
         let mut ids = HashSet::new();
         for browser in &self.browser_trust {
             anyhow::ensure!(
@@ -133,18 +142,52 @@ impl MacBackendConfig {
             );
         }
         for key in &self.common_policy.ssh_keys {
-            let canonical = std::fs::canonicalize(key)?;
+            let resource = guard_ssh::enroll_key(key)?;
+            let canonical = resource.path;
             anyhow::ensure!(
                 canonical == *key,
                 "SSH key enrollment must use a canonical path"
             );
-            let metadata = std::fs::metadata(&canonical)?;
             anyhow::ensure!(
-                metadata.is_file() && metadata.uid() == peer_uid,
+                resource.owner_uid == peer_uid,
                 "SSH key enrollment must be an authenticated-peer-owned file"
             );
         }
         Ok(())
+    }
+
+    /// Build a peer-scoped configuration update for one SSH key. Enrollment
+    /// canonicalizes/stats the file and applies shared name rules without
+    /// opening or parsing private-key contents.
+    pub fn with_ssh_key_for_peer(
+        current: Option<&Self>,
+        path: &Path,
+        peer_uid: u32,
+    ) -> anyhow::Result<(Self, guard_core::ProtectedResource)> {
+        let resource = guard_ssh::enroll_key(path)?;
+        anyhow::ensure!(
+            resource.owner_uid == peer_uid,
+            "only the authenticated key owner may enroll this SSH key"
+        );
+        let mut config = current.cloned().unwrap_or_else(|| Self {
+            version: MAC_CONFIG_VERSION,
+            policy_enabled: true,
+            common_policy: PolicyConfig {
+                browsers: Vec::new(),
+                enrolled_exes: Vec::new(),
+                ssh_keys: Vec::new(),
+            },
+            browser_trust: Vec::new(),
+        });
+        if let Some(current) = current {
+            current.validate_for_peer(peer_uid)?;
+        }
+        if !config.common_policy.ssh_keys.contains(&resource.path) {
+            config.common_policy.ssh_keys.push(resource.path.clone());
+            config.common_policy.ssh_keys.sort();
+        }
+        config.validate_for_peer(peer_uid)?;
+        Ok((config, resource))
     }
 
     pub fn to_metadata_review(&self) -> MacConfigReview {
@@ -482,5 +525,28 @@ mod tests {
         };
         config.validate_for_peer(uid).unwrap();
         assert!(config.validate_for_peer(uid.saturating_add(1)).is_err());
+    }
+
+    #[test]
+    fn ssh_enrollment_uses_owner_and_name_metadata_without_reading_key() {
+        // SAFETY: geteuid has no pointer arguments and reads only the test
+        // process credential.
+        let uid = unsafe { libc::geteuid() };
+        let root = tempfile::tempdir().unwrap();
+        let key = root.path().join("id_ed25519");
+        std::fs::write(&key, b"ephemeral synthetic key bytes").unwrap();
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let (config, resource) = MacBackendConfig::with_ssh_key_for_peer(None, &key, uid).unwrap();
+        assert!(config.policy_enabled);
+        assert_eq!(config.common_policy.ssh_keys, vec![resource.path]);
+        assert!(config.browser_trust.is_empty());
+        assert_eq!(config.to_ipc_metadata_for_uid(uid).ssh_keys.len(), 1);
+
+        let public = root.path().join("id_ed25519.pub");
+        std::fs::write(&public, b"synthetic public key").unwrap();
+        assert!(MacBackendConfig::with_ssh_key_for_peer(Some(&config), &public, uid).is_err());
+        let reserved = root.path().join("known_hosts");
+        std::fs::write(&reserved, b"synthetic host metadata").unwrap();
+        assert!(MacBackendConfig::with_ssh_key_for_peer(Some(&config), &reserved, uid).is_err());
     }
 }

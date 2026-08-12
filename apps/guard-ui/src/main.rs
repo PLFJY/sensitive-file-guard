@@ -1145,13 +1145,14 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
                     "ssh_key_access_confirmation_required" => "SSH CONFIRMATION REQUIRED",
                     "ssh_key_access_allowed" => "SSH ACCESS ALLOWED",
                     "ssh_key_access_blocked" => "SSH ACCESS BLOCKED",
+                    "ssh_key_access_timed_out" => "SSH ACCESS TIMED OUT",
                     _ if is_blocked_event(&event) => "BLOCKED",
                     _ if event.decision.starts_with("AllowByLease") => "ALLOWED BY LEASE",
                     _ => "ALLOWED",
                 };
                 let title = gtk::Label::new(Some(&format!("{}  ·  {}", decision, event.exe)));
                 title.set_xalign(0.0);
-                title.add_css_class(if matches!(decision, "BLOCKED" | "NETWORK BLOCKED") {
+                title.add_css_class(if decision.contains("BLOCKED") || decision.contains("TIMED OUT") {
                     "error"
                 } else {
                     "success"

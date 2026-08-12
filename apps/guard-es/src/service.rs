@@ -6,7 +6,8 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use guard_ipc::{
-    MigrationResolutionAction, Request, RequestOp, Response, ResponseBody, StatusInfo,
+    MigrationResolutionAction, Request, RequestOp, Response, ResponseBody, SshReadResolutionAction,
+    StatusInfo,
 };
 use guard_platform::BackendHealth;
 use platform_macos::browser_trust::MacProcessIdentityResolver;
@@ -19,13 +20,13 @@ use platform_macos::xpc::{
     AuthenticatedPeer, MacXpcServer, SigningRequirements, XpcRequestHandler,
 };
 
-use crate::policy::{prepare_config, MacBrowserPolicy};
+use crate::policy::{prepare_config, MacPolicy};
 
 const AUDIT_PATH: &str = "/Library/Application Support/Sensitive Data Firewall/audit.db";
 const HELPER_HEALTH_WINDOW: Duration = Duration::from_secs(3);
 
 struct ControlHandler {
-    policy: Arc<MacBrowserPolicy>,
+    policy: Arc<MacPolicy>,
     backend_health: Arc<RwLock<BackendHealth>>,
     helper_heartbeats: Mutex<HashMap<u32, Instant>>,
 }
@@ -122,10 +123,26 @@ impl XpcRequestHandler for ControlHandler {
                     }
                 }
             }
-            RequestOp::SshPendingList => Response::ok(ResponseBody::SshPending(Vec::new())),
-            RequestOp::SshPendingGet { .. } | RequestOp::SshReadResolve { .. } => {
-                Response::err("ssh_policy_is_not_available_before_phase_08")
+            RequestOp::SshPendingList => Response::ok(ResponseBody::SshPending(
+                self.policy.ssh_pending_for_uid(peer.euid),
+            )),
+            RequestOp::SshPendingGet { id } => {
+                match self.policy.ssh_pending_item_for_uid(&id, peer.euid) {
+                    Some(item) => Response::ok(ResponseBody::SshPendingItem(Box::new(item))),
+                    None => Response::err("pending_ssh_read_not_found"),
+                }
             }
+            RequestOp::SshReadResolve { id, action } => {
+                let allow = action == SshReadResolutionAction::Allow;
+                match self.policy.resolve_ssh_read(&id, peer.euid, allow) {
+                    Ok(result) => Response::ok(ResponseBody::SshReadResolved(result)),
+                    Err(error) => Response::err(error.to_string()),
+                }
+            }
+            RequestOp::SshProtect { path } => self.protect_ssh_key(peer.euid, &path),
+            RequestOp::SshLoadAuthorize { .. } => Response::err(
+                "ssh_load_not_supported_on_macos: use ordinary ssh-add and approve its protected-key read",
+            ),
             _ => Response::err("operation_not_available_on_macos"),
         }
     }
@@ -154,6 +171,35 @@ impl ControlHandler {
         })
     }
 
+    fn protect_ssh_key(&self, peer_uid: u32, path: &str) -> Response {
+        let current = match self.policy.config_optional() {
+            Ok(config) => config,
+            Err(error) => return Response::err(format!("configuration_unavailable: {error}")),
+        };
+        let (config, resource) = match MacBackendConfig::with_ssh_key_for_peer(
+            current.as_ref(),
+            Path::new(path),
+            peer_uid,
+        ) {
+            Ok(update) => update,
+            Err(error) => return Response::err(format!("ssh_enrollment_denied: {error}")),
+        };
+        if let Err(error) = prepare_config(Some(&config)) {
+            return Response::err(format!("configuration_prepare_failed: {error}"));
+        }
+        if let Err(error) = config.write_authoritative() {
+            return Response::err(format!("configuration_apply_failed: {error}"));
+        }
+        if let Err(error) = self.policy.apply_config(config) {
+            return Response::err(format!("configuration_reload_failed: {error}"));
+        }
+        Response::ok(ResponseBody::SshProtected(guard_ipc::SshProtectedInfo {
+            path: resource.path.to_string_lossy().into_owned(),
+            owner_uid: resource.owner_uid,
+            resource_id: resource.id.0,
+        }))
+    }
+
     fn pending_helper_poll(&self, uid: u32) -> Response {
         let Ok(mut heartbeats) = self.helper_heartbeats.lock() else {
             return Response::err("pending_helper_health_unavailable");
@@ -163,7 +209,7 @@ impl ControlHandler {
         Response::ok(ResponseBody::PendingHelperSnapshot(
             guard_ipc::PendingHelperSnapshotInfo {
                 migrations: self.policy.pending_for_uid(uid),
-                ssh_reads: Vec::new(),
+                ssh_reads: self.policy.ssh_pending_for_uid(uid),
             },
         ))
     }
@@ -217,7 +263,7 @@ impl ControlHandler {
             strict_alias_matches: None,
             topology_degraded: None,
             protected_files,
-            ssh_protected_keys: 0,
+            ssh_protected_keys: self.policy.ssh_key_count(),
             protected_trees,
             browsers: self.policy.browser_count(),
             browser_exes: self.policy.browser_executable_count(),
@@ -302,11 +348,7 @@ pub fn run() -> ExitCode {
             return ExitCode::from(78);
         }
     };
-    let policy = Arc::new(MacBrowserPolicy::new(
-        Arc::clone(&resources),
-        resolver,
-        audit,
-    ));
+    let policy = Arc::new(MacPolicy::new(Arc::clone(&resources), resolver, audit));
     if let Some(config) = loaded_config {
         if let Err(error) = policy.apply_config(config) {
             eprintln!("guard-es: policy configuration could not be loaded: {error}");

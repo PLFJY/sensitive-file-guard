@@ -79,6 +79,20 @@ impl MacProtectedResources {
         (index.concrete_count(), index.tree_root_count())
     }
 
+    pub fn ssh_key_count(&self) -> usize {
+        self.index
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .ssh_key_count()
+    }
+
+    pub fn is_configured_ssh_resource(&self, resource: &ProtectedResource) -> bool {
+        self.index
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_configured_ssh_resource(resource)
+    }
+
     pub fn metadata_snapshot(&self) -> (Vec<ProtectedResource>, Vec<guard_browser::TreeRoot>) {
         let index = self
             .index

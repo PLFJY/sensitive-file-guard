@@ -19,6 +19,7 @@ pub struct MacResourceIndex {
     files: HashMap<FileIdentity, ProtectedResource>,
     tree_roots: HashMap<FileIdentity, TreeRoot>,
     profiles: Vec<MacProfileScope>,
+    ssh_paths: HashMap<std::path::PathBuf, ProtectedResource>,
 }
 
 #[derive(Debug)]
@@ -74,6 +75,28 @@ impl MacResourceIndex {
         Ok(index)
     }
 
+    pub fn from_enrollments(
+        browsers: &[MacBrowserEnrollment],
+        ssh_keys: &[std::path::PathBuf],
+    ) -> anyhow::Result<Self> {
+        use std::os::unix::fs::MetadataExt;
+
+        let mut index = Self::from_browser_enrollments(browsers)?;
+        for path in ssh_keys {
+            let resource = guard_ssh::enroll_key(path)?;
+            let metadata = std::fs::metadata(&resource.path)?;
+            index.files.insert(
+                FileIdentity {
+                    dev: metadata.dev(),
+                    ino: metadata.ino(),
+                },
+                resource.clone(),
+            );
+            index.ssh_paths.insert(resource.path.clone(), resource);
+        }
+        Ok(index)
+    }
+
     pub fn concrete(&self, identity: FileIdentity) -> Option<&ProtectedResource> {
         self.files.get(&identity)
     }
@@ -87,6 +110,9 @@ impl MacResourceIndex {
         identity: FileIdentity,
     ) -> Option<ProtectedResource> {
         if let Some(resource) = self.concrete(identity) {
+            return Some(resource.clone());
+        }
+        if let Some(resource) = self.ssh_paths.get(path) {
             return Some(resource.clone());
         }
         self.tree_roots
@@ -122,6 +148,15 @@ impl MacResourceIndex {
 
     pub fn tree_root_count(&self) -> usize {
         self.tree_roots.len()
+    }
+
+    pub fn ssh_key_count(&self) -> usize {
+        self.ssh_paths.len()
+    }
+
+    pub fn is_configured_ssh_resource(&self, resource: &ProtectedResource) -> bool {
+        resource.kind == ProtectedResourceKind::SshPrivateKey
+            && self.ssh_paths.get(&resource.path) == Some(resource)
     }
 }
 
@@ -397,5 +432,48 @@ mod tests {
                 FileIdentity { dev: 3, ino: 4 },
             )
             .is_none());
+    }
+
+    #[test]
+    fn ssh_key_is_classified_by_inode_alias_and_enrolled_path_after_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let key = temp.path().join("id_ed25519");
+        std::fs::write(&key, b"synthetic ephemeral key").unwrap();
+        let key = std::fs::canonicalize(key).unwrap();
+        let index = MacResourceIndex::from_enrollments(&[], std::slice::from_ref(&key)).unwrap();
+        assert_eq!(index.ssh_key_count(), 1);
+
+        let alias = temp.path().join("alias");
+        std::fs::hard_link(&key, &alias).unwrap();
+        let alias_metadata = std::fs::metadata(&alias).unwrap();
+        let alias_resource = index
+            .classify(
+                &alias,
+                FileIdentity {
+                    dev: alias_metadata.dev(),
+                    ino: alias_metadata.ino(),
+                },
+            )
+            .unwrap();
+        assert_eq!(alias_resource.kind, ProtectedResourceKind::SshPrivateKey);
+        assert_eq!(alias_resource.path, key);
+
+        std::fs::rename(&key, temp.path().join("old-key")).unwrap();
+        std::fs::write(&key, b"replacement synthetic key").unwrap();
+        let replacement_metadata = std::fs::metadata(&key).unwrap();
+        let replacement_resource = index
+            .classify(
+                &key,
+                FileIdentity {
+                    dev: replacement_metadata.dev(),
+                    ino: replacement_metadata.ino(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            replacement_resource.kind,
+            ProtectedResourceKind::SshPrivateKey
+        );
+        assert!(index.is_configured_ssh_resource(&replacement_resource));
     }
 }

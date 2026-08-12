@@ -419,6 +419,13 @@ mod tests {
                         SshReadResolutionAction::Block => SshReadResolutionInfo::Blocked,
                     })
                 }
+                RequestOp::SshProtect { path } => {
+                    ResponseBody::SshProtected(guard_ipc::SshProtectedInfo {
+                        resource_id: path.clone(),
+                        path,
+                        owner_uid: 501,
+                    })
+                }
                 _ => return Err(anyhow::anyhow!("unexpected fake operation")),
             };
             Ok(serde_json::to_vec(&Response::ok(body))?)
@@ -542,6 +549,23 @@ mod tests {
         assert!(matches!(
             requests.lock().unwrap().as_slice(),
             [RequestOp::PendingHelperPoll]
+        ));
+    }
+
+    #[test]
+    fn ssh_protect_authenticates_before_sending_path_metadata() {
+        let (client, requests, calls) = client(Ok(()));
+        let protected = client
+            .protect_ssh_key(
+                "/synthetic/id_ed25519",
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap();
+        assert_eq!(protected.path, "/synthetic/id_ed25519");
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        assert!(matches!(
+            requests.lock().unwrap().as_slice(),
+            [RequestOp::SshProtect { path }] if path == "/synthetic/id_ed25519"
         ));
     }
 

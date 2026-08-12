@@ -84,6 +84,20 @@ if rg -n '\.(allow_migration|allow_ssh_read|block_migration|block_ssh_read)\(' \
     echo "macOS boundary violation: pending helper contains a policy resolver" >&2
     failed=1
 fi
+if rg -n 'NetworkExtension|NEFilter|BPF|agent_socket|SO_PEERCRED' \
+    "$repo_dir/apps/guard-es/src" "$repo_dir/crates/platform-macos/src"; then
+    echo "macOS boundary violation: SSH policy contains Linux/network-correlation machinery" >&2
+    failed=1
+fi
+if ! rg -q 'ssh_load_not_supported_on_macos' "$repo_dir/apps/guard-es/src/service.rs"; then
+    echo "macOS boundary violation: specialized SSH load shortcut is not explicitly unsupported" >&2
+    failed=1
+fi
+if ! rg -q 'resource_dev' "$repo_dir/apps/guard-es/src/policy.rs" || \
+   ! rg -q 'resource_ino' "$repo_dir/apps/guard-es/src/policy.rs"; then
+    echo "macOS boundary violation: SSH approval does not bind current file identity" >&2
+    failed=1
+fi
 if rg -n 'authenticated[[:space:]_-]*=[[:space:]]*true|GUARD_.*AUTH.*BYPASS' \
     "$repo_dir/crates/platform-macos" "$repo_dir/crates/guard-client" \
     "$repo_dir/apps/guard-ui" "$repo_dir/apps/guardctl"; then
