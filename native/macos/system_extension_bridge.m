@@ -197,7 +197,16 @@ int guard_system_extension_status(const char *identifier, char *diagnostic, size
     }
 }
 
-int guard_has_endpoint_security_entitlement(char *error, size_t error_len) {
+int guard_has_entitlement(const char *entitlement, char *error, size_t error_len) {
+    if (entitlement == NULL) {
+        GuardCopyCString(@"missing entitlement name", error, error_len);
+        return -1;
+    }
+    NSString *entitlementName = [NSString stringWithUTF8String:entitlement];
+    if (entitlementName.length == 0) {
+        GuardCopyCString(@"invalid entitlement name", error, error_len);
+        return -1;
+    }
     SecTaskRef task = SecTaskCreateFromSelf(kCFAllocatorDefault);
     if (task == NULL) {
         GuardCopyCString(@"SecTaskCreateFromSelf returned NULL", error, error_len);
@@ -205,7 +214,7 @@ int guard_has_endpoint_security_entitlement(char *error, size_t error_len) {
     }
     CFErrorRef entitlementError = NULL;
     CFTypeRef value = SecTaskCopyValueForEntitlement(
-        task, CFSTR("com.apple.developer.endpoint-security.client"), &entitlementError);
+        task, (__bridge CFStringRef)entitlementName, &entitlementError);
     CFRelease(task);
     if (entitlementError != NULL) {
         NSString *message = CFBridgingRelease(CFErrorCopyDescription(entitlementError));

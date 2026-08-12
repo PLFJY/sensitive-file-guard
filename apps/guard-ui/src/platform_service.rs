@@ -113,6 +113,13 @@ pub struct PlatformOverview {
     pub helper_state: String,
 }
 
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MacSetupReadiness {
+    pub can_request_extension_install: bool,
+    pub explanation: String,
+}
+
 pub fn overview_detail(
     daemon: Option<&guard_ipc::StatusInfo>,
     overview: &PlatformOverview,
@@ -121,13 +128,13 @@ pub fn overview_detail(
         return daemon.map_or_else(
             || {
                 format!(
-                    "Endpoint Security XPC is unavailable · extension: {} · Full Disk Access: {} · pending helper: {}",
+                    "保护尚未运行 · 防护扩展：{} · 完全磁盘访问：{} · 确认助手：{}",
                     overview.extension_state, overview.full_disk_access, overview.helper_state
                 )
             },
             |status| {
                 format!(
-                    "Backend: {} · extension: {} · Full Disk Access: {} · policy: {} · migration read-only: {} · pending helper: {} · allowed: {} · denied: {}",
+                    "后端：{} · 防护扩展：{} · 完全磁盘访问：{} · 策略：{} · 迁移只读：{} · 确认助手：{} · 已允许：{} · 已拒绝：{}",
                     status.backend_kind,
                     overview.extension_state,
                     overview.full_disk_access,
@@ -192,10 +199,52 @@ pub const fn protection_switch_title() -> &'static str {
 
 pub const fn protection_switch_subtitle() -> &'static str {
     if cfg!(target_os = "macos") {
-        "Enables policy inside the active Endpoint Security extension; extension installation remains unchanged."
+        "请先在“Protection”页面完成扩展安装和权限授权。"
     } else {
         "Controls guardd.service and guard-notify.service together; turning it off makes protected files accessible normally."
     }
+}
+
+#[cfg(target_os = "macos")]
+pub fn mac_setup_readiness() -> MacSetupReadiness {
+    match platform_macos::system_extension::host_install_entitlement_present() {
+        Ok(true) => MacSetupReadiness {
+            can_request_extension_install: true,
+            explanation: "此应用已具备请求 macOS 安装防护扩展的签名权限。点击“安装防护扩展”后，按 macOS 弹窗或系统设置中的提示批准即可。".into(),
+        },
+        Ok(false) => MacSetupReadiness {
+            can_request_extension_install: false,
+            explanation: "这是本地测试包：它只能打开 Guard 窗口，Apple 尚未授权它安装防护扩展。因此不能真正开启保护，也不是你的权限操作错误。请安装带有 Apple Endpoint Security 授权描述文件的正式包后再继续。".into(),
+        },
+        Err(error) => MacSetupReadiness {
+            can_request_extension_install: false,
+            explanation: format!("Guard 无法检查自身的安装授权：{error}"),
+        },
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn request_system_extension_install() -> anyhow::Result<String> {
+    let readiness = mac_setup_readiness();
+    anyhow::ensure!(
+        readiness.can_request_extension_install,
+        "{}",
+        readiness.explanation
+    );
+    let controller = platform_macos::system_extension::SystemExtensionController::new(
+        platform_macos::DEFAULT_EXTENSION_BUNDLE_ID,
+    )?;
+    controller.activate()?;
+    Ok("macOS 已收到安装请求。如果出现批准提示，请在 macOS 弹窗或系统设置中选择“允许”，然后回到此页面；状态会自动刷新。接着点击“授予完全磁盘访问权限”。".into())
+}
+
+#[cfg(target_os = "macos")]
+pub fn open_full_disk_access_settings() -> anyhow::Result<()> {
+    let status = std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+        .status()?;
+    anyhow::ensure!(status.success(), "macOS 无法打开“完全磁盘访问”设置");
+    Ok(())
 }
 
 pub const fn apply_button_label() -> &'static str {

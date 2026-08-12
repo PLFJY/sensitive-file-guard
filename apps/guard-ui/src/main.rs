@@ -108,6 +108,7 @@ struct UiState {
     helper_syncing: Rc<Cell<bool>>,
     extension_status: adw::ActionRow,
     fda_status: adw::ActionRow,
+    mac_setup_message: gtk::Label,
     pending_dialogs: Rc<RefCell<PendingDialogController>>,
 }
 
@@ -167,11 +168,14 @@ fn build_ui(app: &adw::Application, pending_only: bool) {
     let events = gtk::ListBox::new();
     events.set_selection_mode(gtk::SelectionMode::None);
     let extension_status = adw::ActionRow::new();
-    extension_status.set_title("Endpoint Security extension");
-    extension_status.set_subtitle("Checking installation state…");
+    extension_status.set_title("防护扩展");
+    extension_status.set_subtitle("正在检查安装状态…");
     let fda_status = adw::ActionRow::new();
-    fda_status.set_title("Full Disk Access");
-    fda_status.set_subtitle("Checking permission state…");
+    fda_status.set_title("完全磁盘访问");
+    fda_status.set_subtitle("正在检查权限状态…");
+    let mac_setup_message = gtk::Label::new(None);
+    mac_setup_message.set_wrap(true);
+    mac_setup_message.set_xalign(0.0);
 
     let state = UiState {
         candidate: Rc::new(RefCell::new(None)),
@@ -193,6 +197,7 @@ fn build_ui(app: &adw::Application, pending_only: bool) {
         helper_syncing: Rc::new(Cell::new(false)),
         extension_status,
         fda_status,
+        mac_setup_message,
         pending_dialogs: Rc::new(RefCell::new(PendingDialogController::default())),
     };
     let overview = scroll_page(overview_page(&state));
@@ -314,17 +319,45 @@ fn protection_page(state: &UiState) -> gtk::Box {
             }
         });
     } else {
-        let heading = gtk::Label::new(Some("macOS protection status"));
+        let heading = gtk::Label::new(Some("保护设置"));
         heading.set_xalign(0.0);
         heading.add_css_class("title-2");
         page.append(&heading);
         let group = adw::PreferencesGroup::new();
+        group.set_title("请按以下顺序完成");
         group.add(&state.extension_status);
         group.add(&state.fda_status);
+        page.append(&group);
+        let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        actions.set_halign(gtk::Align::Start);
+        let install = gtk::Button::with_label("1. 安装防护扩展");
+        let fda = gtk::Button::with_label("2. 授予完全磁盘访问权限");
+        let readiness = platform_service::mac_setup_readiness();
+        install.set_sensitive(readiness.can_request_extension_install);
+        install.set_tooltip_text(Some(&readiness.explanation));
+        state.mac_setup_message.set_text(&readiness.explanation);
+        actions.append(&install);
+        actions.append(&fda);
+        page.append(&actions);
+        page.append(&state.mac_setup_message);
+        let setup_message = state.mac_setup_message.clone();
+        install.connect_clicked(move |button| {
+            spawn_system_extension_install(button.clone(), setup_message.clone());
+        });
+        fda.connect_clicked(
+            |button| match platform_service::open_full_disk_access_settings() {
+                Ok(()) => button.set_tooltip_text(None),
+                Err(error) => {
+                    button.set_tooltip_text(Some(&format!("Could not open settings: {error}")))
+                }
+            },
+        );
+
+        let helper_group = adw::PreferencesGroup::new();
+        helper_group.set_title("可选：需要确认时自动打开 Guard");
         let helper = adw::SwitchRow::new();
-        helper.set_title("Pending authorization helper");
-        helper
-            .set_subtitle("Starts in this user session and opens Guard only for pending prompts.");
+        helper.set_title("遇到确认请求时自动打开 Guard");
+        helper.set_subtitle("建议开启。这只是一个登录项，用于显示浏览器迁移或 SSH 密钥确认；它不会安装扩展，也不会授予权限。");
         helper.set_active(false);
         let helper_row = helper.clone();
         let helper_syncing = state.helper_syncing.clone();
@@ -336,12 +369,12 @@ fn protection_page(state: &UiState) -> gtk::Box {
             spawn_user_agent_change(row.is_active(), helper_row.clone(), helper_syncing.clone());
         });
         *state.helper.borrow_mut() = Some(helper.clone());
-        group.add(&helper);
-        let settings = gtk::Button::with_label("Open Login Items Settings");
+        helper_group.add(&helper);
+        let settings = gtk::Button::with_label("管理登录项");
         settings.set_halign(gtk::Align::Start);
         settings.connect_clicked(|_| platform_service::open_user_agent_settings());
-        group.add(&settings);
-        page.append(&group);
+        helper_group.add(&settings);
+        page.append(&helper_group);
     }
     let browsers_heading = gtk::Label::new(Some("Protected browsers"));
     browsers_heading.set_xalign(0.0);
@@ -1923,6 +1956,29 @@ fn spawn_user_agent_change(enabled: bool, row: adw::SwitchRow, syncing: Rc<Cell<
             }
         }
         syncing.set(false);
+    });
+}
+
+fn spawn_system_extension_install(button: gtk::Button, message: gtk::Label) {
+    button.set_sensitive(false);
+    message.set_text("正在请求 macOS 安装防护扩展…");
+    glib::MainContext::default().spawn_local(async move {
+        let result = gio::spawn_blocking(platform_service::request_system_extension_install).await;
+        button.set_sensitive(true);
+        match result {
+            Ok(Ok(explanation)) => {
+                message.set_text(&explanation);
+                button.set_tooltip_text(None);
+            }
+            Ok(Err(error)) => {
+                message.set_text(&format!("无法安装防护扩展：{error}"));
+                button.set_tooltip_text(Some(&error.to_string()));
+            }
+            Err(error) => {
+                message.set_text("安装请求意外停止，请重试。");
+                button.set_tooltip_text(Some(&format!("安装任务停止：{error:?}")));
+            }
+        }
     });
 }
 

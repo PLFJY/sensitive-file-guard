@@ -115,12 +115,28 @@ impl SystemExtensionController {
 }
 
 #[cfg(target_os = "macos")]
+pub fn host_install_entitlement_present() -> anyhow::Result<bool> {
+    entitlement_present("com.apple.developer.system-extension.install")
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn host_install_entitlement_present() -> anyhow::Result<bool> {
+    anyhow::bail!("system-extension entitlement inspection is available only on macOS")
+}
+
+#[cfg(target_os = "macos")]
 pub fn endpoint_security_entitlement_present() -> anyhow::Result<bool> {
+    entitlement_present("com.apple.developer.endpoint-security.client")
+}
+
+#[cfg(target_os = "macos")]
+fn entitlement_present(entitlement: &str) -> anyhow::Result<bool> {
+    let entitlement = CString::new(entitlement)?;
     let mut error = vec![0_i8; 1024];
     // SAFETY: the bridge receives only a writable diagnostic buffer and does
     // not retain it after returning.
     let result =
-        unsafe { guard_has_endpoint_security_entitlement(error.as_mut_ptr(), error.len()) };
+        unsafe { guard_has_entitlement(entitlement.as_ptr(), error.as_mut_ptr(), error.len()) };
     match result {
         0 => Ok(false),
         1 => Ok(true),
@@ -173,7 +189,8 @@ extern "C" {
         diagnostic: *mut std::ffi::c_char,
         diagnostic_len: usize,
     ) -> i32;
-    fn guard_has_endpoint_security_entitlement(
+    fn guard_has_entitlement(
+        entitlement: *const std::ffi::c_char,
         error: *mut std::ffi::c_char,
         error_len: usize,
     ) -> i32;
