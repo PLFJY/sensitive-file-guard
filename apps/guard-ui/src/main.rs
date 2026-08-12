@@ -115,8 +115,17 @@ fn main() {
     if let Some(exit_code) = platform_service::handle_system_extension_command() {
         std::process::exit(exit_code);
     }
+    if let Err(error) = platform_service::configure_bundled_runtime() {
+        eprintln!("Guard bundled GTK runtime is invalid: {error}");
+        std::process::exit(78);
+    }
     let pending_only = std::env::args().any(|arg| arg == PENDING_ONLY_ARG);
+    let packaging_smoke = std::env::args().any(|arg| arg == "--packaging-smoke");
     adw::init().expect("libadwaita initialization");
+    if packaging_smoke {
+        println!("Guard bundled GTK runtime initialized");
+        return;
+    }
     // Let libadwaita own the color preference instead of inheriting the
     // deprecated GtkSettings dark-theme toggle from the desktop session.
     adw::StyleManager::default().set_color_scheme(adw::ColorScheme::Default);

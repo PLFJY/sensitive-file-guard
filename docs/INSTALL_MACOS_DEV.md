@@ -4,6 +4,9 @@ The development `Guard.app` contains the Endpoint Security extension, GTK
 control center, authenticated XPC clients, pending helper, and browser/SSH
 policy runtime. It is not distributable packaging. Live enforcement still requires
 Apple-approved Endpoint Security provisioning and Full Disk Access.
+It intentionally may retain Homebrew GTK dependencies and is not the release
+artifact. See [the macOS release guide](INSTALL_MACOS_RELEASE.md) for the
+self-contained hardened-runtime/notarization path.
 
 Requirements:
 

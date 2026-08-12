@@ -6,6 +6,72 @@ use guard_platform::{ServiceOperation, ServiceStatus};
 
 use crate::pending_dialog::PromptKind;
 
+/// Configure relocatable GTK data before libadwaita starts. Development builds
+/// have no runtime marker and retain pkg-config/Homebrew behavior.
+pub fn configure_bundled_runtime() -> anyhow::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let executable = std::env::current_exe()?;
+        let contents = executable
+            .parent()
+            .and_then(std::path::Path::parent)
+            .ok_or_else(|| anyhow::anyhow!("bundle executable has no Contents directory"))?;
+        let resources = contents.join("Resources");
+        let marker = resources.join("guard-release-runtime");
+        if !marker.is_file() {
+            return Ok(());
+        }
+        let app = contents
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("bundle Contents has no app parent"))?;
+        let template = std::fs::read_to_string(resources.join("gdk-pixbuf/loaders.cache.in"))?;
+        let rendered = render_loader_cache(&template, app);
+        let cache_root = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| anyhow::anyhow!("HOME is unavailable for GTK runtime cache"))?
+            .join("Library/Caches/io.github.plfjy.SensitiveFileGuard");
+        std::fs::create_dir_all(&cache_root)?;
+        let cache = cache_root.join("gdk-pixbuf-loaders.cache");
+        let temporary = cache_root.join(format!(
+            ".gdk-pixbuf-loaders.cache.{}.tmp",
+            std::process::id()
+        ));
+        std::fs::write(&temporary, rendered)?;
+        std::fs::rename(&temporary, &cache)?;
+
+        // This runs before GTK/libadwaita initialization and before worker
+        // threads exist. Values point only at signed bundle resources and the
+        // generated metadata-only cache.
+        std::env::set_var("GDK_PIXBUF_MODULE_FILE", &cache);
+        std::env::set_var("GDK_PIXBUF_MODULEDIR", resources.join("gdk-pixbuf/loaders"));
+        std::env::set_var(
+            "GSETTINGS_SCHEMA_DIR",
+            resources.join("share/glib-2.0/schemas"),
+        );
+        let bundled_data = resources.join("share");
+        let data_dirs = match std::env::var_os("XDG_DATA_DIRS") {
+            Some(existing) => {
+                let mut combined = bundled_data.into_os_string();
+                combined.push(":");
+                combined.push(existing);
+                combined
+            }
+            None => bundled_data.into_os_string(),
+        };
+        std::env::set_var("XDG_DATA_DIRS", data_dirs);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn render_loader_cache(template: &str, app: &std::path::Path) -> String {
+    let escaped = app
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    template.replace("@GUARD_APP@", &escaped)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum LinuxEnforcementMode {
@@ -433,6 +499,18 @@ pub fn handle_system_extension_command() -> Option<i32> {
     {
         return Some(pending_helper_status());
     }
+    if arguments
+        .iter()
+        .any(|argument| argument == "--register-pending-helper")
+    {
+        return Some(pending_helper_mutation(true));
+    }
+    if arguments
+        .iter()
+        .any(|argument| argument == "--unregister-pending-helper")
+    {
+        return Some(pending_helper_mutation(false));
+    }
     let action = std::env::args().find(|argument| {
         matches!(
             argument.as_str(),
@@ -529,6 +607,35 @@ fn pending_helper_status() -> i32 {
 }
 
 #[cfg(target_os = "macos")]
+fn pending_helper_mutation(register: bool) -> i32 {
+    let result =
+        platform_macos::user_agent::UserAgentController::bundled().and_then(|controller| {
+            if register {
+                controller.register()
+            } else {
+                controller.unregister()
+            }
+        });
+    match result {
+        Ok(()) => {
+            println!(
+                "pending helper {}",
+                if register {
+                    "registered"
+                } else {
+                    "unregistered"
+                }
+            );
+            0
+        }
+        Err(error) => {
+            eprintln!("guard-ui: pending helper mutation failed: {error:#}");
+            1
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn discover_macos_browsers(arguments: &[String]) -> i32 {
     use std::sync::Arc;
 
@@ -580,6 +687,8 @@ pub fn handle_system_extension_command() -> Option<i32> {
                 | "--discover-macos-browsers"
                 | "--xpc-status"
                 | "--pending-helper-status"
+                | "--register-pending-helper"
+                | "--unregister-pending-helper"
         )
     });
     if requested {
@@ -891,4 +1000,19 @@ pub fn migration_pending() -> anyhow::Result<Vec<guard_ipc::MigrationPendingInfo
 #[cfg(target_os = "macos")]
 pub fn migration_pending() -> anyhow::Result<Vec<guard_ipc::MigrationPendingInfo>> {
     guard_client::macos::MacGuardClient::for_current_process()?.migration_pending()
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod bundled_runtime_tests {
+    use super::render_loader_cache;
+
+    #[test]
+    fn loader_cache_is_relocated_and_escaped() {
+        let rendered = render_loader_cache(
+            "\"@GUARD_APP@/Contents/Resources/gdk-pixbuf/loaders/module.so\"",
+            std::path::Path::new("/Applications/Guard \"QA\".app"),
+        );
+        assert!(!rendered.contains("@GUARD_APP@"));
+        assert!(rendered.contains(r#"/Applications/Guard \"QA\".app/Contents"#));
+    }
 }

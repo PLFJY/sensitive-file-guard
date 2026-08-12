@@ -14,6 +14,10 @@
 > Phase 09 mediates hardlink/rename namespace changes, keeps aliases protected
 > by kernel file identity, detects ES sequence gaps, bounds hot-path state, and
 > exposes semantic enforcement/FDA/approval health with lifecycle counters.
+> Phase 10 adds a self-contained arm64 release-bundle path, explicit inside-out
+> hardened-runtime signing, external-credential notarization, update/recovery,
+> and GTK runtime/license verification. Provisioned activation/notarization is
+> still an external acceptance gate, not a claimed pass.
 > Live entitled ES acceptance remains
 > externally blocked until an Apple-provisioned test host is available.
 
