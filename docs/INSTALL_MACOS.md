@@ -15,6 +15,30 @@ Apple Development identity, lacks matching Apple Endpoint Security provisioning
 profiles/notary credentials, has no active FDA-authorized extension, and SIP is
 currently disabled.
 
+## 先在本机打开
+
+如果目标只是打开 macOS 界面，在仓库根目录复制执行：
+
+```sh
+SIGNING_IDENTITY='Apple Development: zero_plfjy@icloud.com (ZN9S86U87M)' \
+DEVELOPMENT_TEAM='YSGFZUQGW6' \
+LOCAL_SIGNING_ONLY=1 CODESIGN_TIMESTAMP=none \
+scripts/macos/build-release-app.sh
+
+open build/macos-release/Guard.app
+```
+
+如果提示无法打开，运行：
+
+```sh
+VERIFY_SIGNING_MODE=local \
+scripts/macos/verify-bundle.sh build/macos-release/Guard.app
+```
+
+必须看到 `PASS: self-contained local-signed Guard.app verified`。请打开
+`build/macos-release/Guard.app`，不要直接打开 zip。这个本地包只验证 GTK/UI
+启动，不能激活 Endpoint Security 或代表正式安全验收。
+
 ## Choose the build path
 
 - [Development build](INSTALL_MACOS_DEV.md): may resolve GTK from Homebrew and
