@@ -6,12 +6,18 @@ if [ "$(uname -s)" != "Darwin" ]; then
     exit 2
 fi
 
-: "${APP_BUNDLE_ID:?approved APP_BUNDLE_ID is required}"
-: "${SYSTEM_EXTENSION_BUNDLE_ID:?approved SYSTEM_EXTENSION_BUNDLE_ID is required}"
-: "${DEVELOPMENT_TEAM:?DEVELOPMENT_TEAM is required}"
-: "${SIGNING_IDENTITY:?SIGNING_IDENTITY is required}"
-: "${HOST_PROVISIONING_PROFILE:?HOST_PROVISIONING_PROFILE is required}"
-: "${EXTENSION_PROVISIONING_PROFILE:?EXTENSION_PROVISIONING_PROFILE is required}"
+self_use=${SELF_USE_SIP_OFF:-0}
+case "$self_use" in 0|1) ;; *) echo "SELF_USE_SIP_OFF must be 0 or 1" >&2; exit 2 ;; esac
+if [ "$self_use" = 1 ]; then
+    : "${SELF_USE_SIGNING_IDENTITY:?SELF_USE_SIGNING_IDENTITY is required for SELF_USE_SIP_OFF=1}"
+else
+    : "${APP_BUNDLE_ID:?approved APP_BUNDLE_ID is required}"
+    : "${SYSTEM_EXTENSION_BUNDLE_ID:?approved SYSTEM_EXTENSION_BUNDLE_ID is required}"
+    : "${DEVELOPMENT_TEAM:?DEVELOPMENT_TEAM is required}"
+    : "${SIGNING_IDENTITY:?SIGNING_IDENTITY is required}"
+    : "${HOST_PROVISIONING_PROFILE:?HOST_PROVISIONING_PROFILE is required}"
+    : "${EXTENSION_PROVISIONING_PROFILE:?EXTENSION_PROVISIONING_PROFILE is required}"
+fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH= cd -- "$script_dir/../.." && pwd)
@@ -20,11 +26,13 @@ fixture="$fixture_dir/protected-synthetic.txt"
 deny_output="$fixture_dir/deny-output.txt"
 canary="SDF_CANARY_MAC_ES_PHASE03"
 activated=0
+app_root=${MACOS_ES_POC_ROOT:-"$repo_dir/build/macos-es-poc"}
+app="$app_root/Guard.app"
 
 cleanup() {
     if [ "$activated" -eq 1 ]; then
         echo "PoC cleanup: requesting explicit system-extension deactivation" >&2
-        "$repo_dir/build/macos/Guard.app/Contents/MacOS/Guard" \
+        "$app/Contents/MacOS/Guard" \
             --deactivate-system-extension || true
     fi
     rm -rf -- "$fixture_dir"
@@ -36,13 +44,22 @@ cd "$repo_dir"
 cargo build -p guard-test-probe
 probe=$(cd target/debug && pwd)/guard-test-probe
 
-GUARD_ES_POC=1 \
+if [ "$self_use" = 1 ]; then
+    GUARD_ES_POC=1 GUARD_ES_POC_FILE="$fixture" GUARD_ES_POC_ALLOW_EXE="$probe" \
+        SELF_USE_SIP_OFF=1 SELF_USE_SIGNING_IDENTITY="$SELF_USE_SIGNING_IDENTITY" \
+        MACOS_RELEASE_ROOT="$app_root" CODESIGN_TIMESTAMP=none \
+        scripts/macos/build-release-app.sh
+    scripts/macos/self-use-preflight.sh "$app"
+else
+    GUARD_ES_POC=1 \
 GUARD_ES_POC_FILE="$fixture" \
 GUARD_ES_POC_ALLOW_EXE="$probe" \
 scripts/macos/build-dev-app.sh
-scripts/macos/inspect-signing.sh
+    app="$repo_dir/build/macos/Guard.app"
+    scripts/macos/inspect-signing.sh "$app"
+fi
 
-host="$repo_dir/build/macos/Guard.app/Contents/MacOS/Guard"
+host="$app/Contents/MacOS/Guard"
 "$host" --activate-system-extension
 activated=1
 
