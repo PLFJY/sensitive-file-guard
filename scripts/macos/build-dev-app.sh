@@ -45,8 +45,10 @@ if [ "$self_use" = 1 ]; then
         exit 2
     }
     if [ -n "$self_use_keychain" ]; then
-        keychain_password=$(security find-generic-password -a "$USER" \
-            -s top.plfjy.SensitiveFileGuard.self-use-keychain -w 2>/dev/null) || {
+        keychain_password=$(security find-generic-password -a "$self_use_keychain" \
+            -s top.plfjy.SensitiveFileGuard.self-use-keychain -w 2>/dev/null || \
+            security find-generic-password -a "$USER" \
+                -s top.plfjy.SensitiveFileGuard.self-use-keychain -w 2>/dev/null) || {
             echo "cannot unlock SELF_USE_SIGNING_KEYCHAIN: local keychain password is unavailable" >&2
             exit 2
         }

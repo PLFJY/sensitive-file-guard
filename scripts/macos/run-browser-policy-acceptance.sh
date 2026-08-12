@@ -19,7 +19,8 @@ status=$($guardctl --json status 2>&1) || {
     printf '%s\n' "$status" >&2
     exit 77
 }
-printf '%s\n' "$status" | grep -q '"read_only_guaranteed":true'
+printf '%s\n' "$status" | grep -Eq \
+    '"read_only_guaranteed"[[:space:]]*:[[:space:]]*true'
 
 test_root=$(mktemp -d "${TMPDIR:-/tmp}/guard-phase07-live.XXXXXX")
 chrome_pid=''
@@ -76,8 +77,10 @@ printf 'Press Return after the disposable policy is active: '
 read -r _answer
 
 status=$($guardctl --json status)
-printf '%s\n' "$status" | grep -q '"enforcement_active":true'
-printf '%s\n' "$status" | grep -q '"read_only_guaranteed":true'
+printf '%s\n' "$status" | grep -Eq \
+    '"enforcement_active"[[:space:]]*:[[:space:]]*true'
+printf '%s\n' "$status" | grep -Eq \
+    '"read_only_guaranteed"[[:space:]]*:[[:space:]]*true'
 
 MACOSX_DEPLOYMENT_TARGET=13.0 cargo build --manifest-path "$repo_dir/Cargo.toml" \
     -p guard-test-probe >/dev/null

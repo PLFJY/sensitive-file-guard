@@ -48,8 +48,10 @@ key="$fixture_root/id_ed25519"
 ssh-keygen -q -t ed25519 -N '' -C guard-phase08-live-ephemeral -f "$key"
 "$guardctl" ssh protect "$key"
 status=$("$guardctl" --json status)
-printf '%s\n' "$status" | grep -q '"enforcement_active":true'
-printf '%s\n' "$status" | grep -Eq '"ssh_protected_keys":[1-9]'
+printf '%s\n' "$status" | grep -Eq \
+    '"enforcement_active"[[:space:]]*:[[:space:]]*true'
+printf '%s\n' "$status" | grep -Eq \
+    '"ssh_protected_keys"[[:space:]]*:[[:space:]]*[1-9]'
 
 cat <<INSTRUCTIONS
 Only this ephemeral key is in scope:
@@ -74,7 +76,8 @@ INSTRUCTIONS
 reader_pid=$!
 wait "$reader_pid"
 reader_pid=''
-grep -q '"descendant_read":true' "$fixture_root/tree.json"
+grep -Eq '"descendant_read"[[:space:]]*:[[:space:]]*true' \
+    "$fixture_root/tree.json"
 echo "PASS: approved root and verified descendant read under the short lease"
 
 cat <<INSTRUCTIONS

@@ -30,6 +30,22 @@ cookies, passwords, sessions, or SSH keys for acceptance.
    scripts/macos/create-self-use-signing-identity.sh
    ```
 
+   `GuardSelfUse.keychain` uses a generated random password stored in the login
+   Keychain; it is deliberately not the macOS login password. The helper also
+   configures the dedicated private key for non-interactive `/usr/bin/codesign`.
+   If an old "codesign wants to use GuardSelfUse keychain" prompt remains from
+   an interrupted build, cancel it and rerun the helper. Never paste either
+   password into a terminal command or chat.
+
+   If the helper reports that stored credentials cannot unlock an existing
+   dedicated Keychain, preserve that file and create a replacement at a new
+   explicit path; use the same path for later builds:
+
+   ```sh
+   SELF_USE_SIGNING_KEYCHAIN="$HOME/Library/Keychains/GuardSelfUse-v2.keychain-db" \
+   scripts/macos/create-self-use-signing-identity.sh
+   ```
+
 2. Build the entitlement-bearing app. The build automatically runs macOS tests
    and clippy before it is allowed to write the current self-use safety marker:
 

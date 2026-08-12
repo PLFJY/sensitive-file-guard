@@ -9,6 +9,7 @@ fi
 identity=${SELF_USE_SIGNING_IDENTITY:-Guard Local Development Certificate}
 keychain=${SELF_USE_SIGNING_KEYCHAIN:-"$HOME/Library/Keychains/GuardSelfUse.keychain-db"}
 password_service=top.plfjy.SensitiveFileGuard.self-use-keychain
+password_account=$keychain
 # Read-only compatibility for a keychain created before the product identifier
 # moved to top.plfjy. New and updated credentials are stored only under the new
 # service name.
@@ -21,28 +22,63 @@ for command_name in openssl security; do
     }
 done
 
+store_password() {
+    if security find-generic-password -a "$password_account" \
+        -s "$password_service" >/dev/null 2>&1; then
+        security add-generic-password -U -a "$password_account" \
+            -s "$password_service" -w "$password"
+    else
+        security add-generic-password -a "$password_account" \
+            -s "$password_service" -w "$password"
+    fi
+}
+
 resolved=$("$(dirname "$0")/resolve-self-use-signing-identity.sh" \
     "$identity" "$keychain" 2>/dev/null || true)
 
 if [ -f "$keychain" ]; then
-    password=$(security find-generic-password -a "$USER" -s "$password_service" -w 2>/dev/null) || {
-        password=$(security find-generic-password -a "$USER" \
-            -s "$legacy_password_service" -w 2>/dev/null) || {
-            echo "existing self-use keychain password is unavailable from the login keychain: $keychain" >&2
-            exit 2
-        }
-        security add-generic-password -U -a "$USER" -s "$password_service" -w "$password"
-        echo "migrated self-use Keychain service identifier to $password_service"
+    password=
+    credential_source=
+    for candidate in \
+        "$password_service|$password_account" \
+        "$password_service|$USER" \
+        "$legacy_password_service|$USER"
+    do
+        service=${candidate%%|*}
+        account=${candidate#*|}
+        candidate_password=$(security find-generic-password \
+            -a "$account" -s "$service" -w 2>/dev/null || true)
+        if [ -n "$candidate_password" ] && \
+            security unlock-keychain -p "$candidate_password" "$keychain" \
+                >/dev/null 2>&1; then
+            password=$candidate_password
+            credential_source=$candidate
+            break
+        fi
+    done
+    unset candidate_password
+    test -n "$password" || {
+        echo "stored credentials cannot unlock the existing self-use keychain: $keychain" >&2
+        echo "Do not enter the macOS login password. Preserve this keychain and create a new one at a different path." >&2
+        exit 2
     }
+    if [ "$credential_source" != "$password_service|$password_account" ]; then
+        store_password
+        echo "migrated self-use Keychain credential to its path-scoped account"
+    fi
 else
     password=$(openssl rand -hex 32)
     security create-keychain -p "$password" "$keychain"
     security set-keychain-settings -lut 21600 "$keychain"
-    security add-generic-password -U -a "$USER" -s "$password_service" -w "$password"
+    store_password
 fi
-security unlock-keychain -p "$password" "$keychain"
+security unlock-keychain -p "$password" "$keychain" >/dev/null
 
 if [ -n "$resolved" ]; then
+    # The dedicated keychain has a generated password, not the user's login
+    # password. Refresh codesign's non-interactive ACL for an existing key.
+    security set-key-partition-list -S apple-tool:,apple: -s \
+        -k "$password" "$keychain" >/dev/null
     unset password
     echo "existing self-use signing identity: $identity ($resolved)"
     exit 0
@@ -61,7 +97,8 @@ openssl pkcs12 -export -legacy -passout pass:guard-local-import -name "$identity
 security import "$work/identity.p12" -k "$keychain" -f pkcs12 \
     -P guard-local-import -T /usr/bin/codesign
 security add-trusted-cert -r trustRoot -p codeSign -k "$keychain" "$work/certificate.pem"
-security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain"
+security set-key-partition-list -S apple-tool:,apple: -s \
+    -k "$password" "$keychain" >/dev/null
 security list-keychains -d user -s "$keychain" "$HOME/Library/Keychains/login.keychain-db"
 identity_line=$(security find-identity -v -p codesigning "$keychain" | grep -F "\"$identity\"" || true)
 test -n "$identity_line" || {

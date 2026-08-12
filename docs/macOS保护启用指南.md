@@ -36,6 +36,19 @@ CODESIGN_TIMESTAMP=none \
 scripts/macos/build-release-app.sh
 ```
 
+`GuardSelfUse.keychain` 的密码是脚本生成并保存在登录 Keychain 中的随机密码，不是 macOS
+登录密码。脚本会为这个专用私钥配置 `/usr/bin/codesign` 的非交互权限。若中断过的旧签名
+任务仍留下“codesign wants to use GuardSelfUse keychain”弹窗，直接取消并重新运行证书创建
+脚本；不要反复尝试登录密码，也不要把任何密码贴进命令或聊天。
+
+若脚本明确报告已有专用 Keychain 的保存凭据无法解锁，应保留旧文件并指定一个新的路径；
+后续构建也必须继续使用同一路径：
+
+```sh
+SELF_USE_SIGNING_KEYCHAIN="$HOME/Library/Keychains/GuardSelfUse-v2.keychain-db" \
+scripts/macos/create-self-use-signing-identity.sh
+```
+
 构建必须显示安全门、测试、clippy 和 `VERIFY_SIGNING_MODE=self-use` 验证通过。最终包内
 主程序应有 `com.apple.developer.system-extension.install`，扩展应有
 `com.apple.developer.endpoint-security.client`；本地证书和私钥只留在 Keychain，不能

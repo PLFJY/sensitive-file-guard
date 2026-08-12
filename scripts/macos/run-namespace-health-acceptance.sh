@@ -18,7 +18,8 @@ status=$($guardctl --json status 2>&1) || {
     printf '%s\n' "$status" >&2
     exit 77
 }
-printf '%s\n' "$status" | grep -q '"backend_state":"ACTIVE"\|"backend_state":"DEGRADED"'
+printf '%s\n' "$status" | grep -Eq \
+    '"backend_state"[[:space:]]*:[[:space:]]*"(ACTIVE|DEGRADED)"'
 
 test_root=$(mktemp -d "${TMPDIR:-/tmp}/guard-phase09-live.XXXXXX")
 chrome_pid=''
@@ -71,7 +72,8 @@ INSTRUCTIONS
 read -r _answer
 
 status=$($guardctl --json status)
-printf '%s\n' "$status" | grep -q '"enforcement_active":true'
+printf '%s\n' "$status" | grep -Eq \
+    '"enforcement_active"[[:space:]]*:[[:space:]]*true'
 printf '%s\n' "$status" | grep -q '"mac_health"'
 
 MACOSX_DEPLOYMENT_TARGET=13.0 cargo build --manifest-path "$repo_dir/Cargo.toml" \
