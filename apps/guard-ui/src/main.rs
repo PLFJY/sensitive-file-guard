@@ -113,6 +113,7 @@ struct UiState {
     events: gtk::ListBox,
     event_data: Rc<RefCell<Vec<guard_ipc::EventInfo>>>,
     browser_sources: Rc<RefCell<Vec<BrowserSource>>>,
+    unsupported_browsers: Rc<RefCell<Vec<guard_platform::config::UnsupportedSandboxedBrowser>>>,
     ssh_sources: Rc<RefCell<Vec<SshSource>>>,
     /// Last daemon-reported SSH resources. This is a display cache refreshed
     /// from IPC, not a second enrollment registry.
@@ -240,6 +241,7 @@ fn build_ui(app: &adw::Application, pending_only: bool, layout_smoke_page: Optio
         events: events.clone(),
         event_data: Rc::new(RefCell::new(Vec::new())),
         browser_sources: Rc::new(RefCell::new(Vec::new())),
+        unsupported_browsers: Rc::new(RefCell::new(Vec::new())),
         ssh_sources: Rc::new(RefCell::new(Vec::new())),
         active_ssh_keys: Rc::new(RefCell::new(HashSet::new())),
         poll_in_flight: Rc::new(Cell::new(false)),
@@ -660,6 +662,7 @@ fn refresh_browser_sources(state: &UiState) {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/nonexistent"));
     let discovered = platform_service::discover_native_browsers(&home);
+    *state.unsupported_browsers.borrow_mut() = discovered.unsupported_sandboxed.clone();
     let discovered = discovered
         .browsers
         .into_iter()
@@ -871,6 +874,18 @@ fn render_objects(state: &UiState, cfg: &platform_service::EditableConfiguration
         }
         state.browsers.append(&row);
     }
+    for browser in state.unsupported_browsers.borrow().iter() {
+        let row = adw::ActionRow::new();
+        row.set_title(&browser_display_name(&browser.kind));
+        row.set_subtitle(&format!(
+            "Detected — not protected · {} · {}",
+            browser.profile_root.display(),
+            browser.reason
+        ));
+        row.set_title_lines(2);
+        row.set_subtitle_lines(STATUS_SUBTITLE_LINES);
+        state.browsers.append(&row);
+    }
     while let Some(child) = state.keys.first_child() {
         state.keys.remove(&child);
     }
@@ -954,6 +969,8 @@ fn browser_display_name(id: &str) -> String {
         "firefox-esr" => "Firefox ESR",
         "google-chrome" => "Google Chrome",
         "microsoft-edge" => "Microsoft Edge",
+        "edge" => "Microsoft Edge",
+        "safari" => "Safari",
         "zen" => "Zen Browser",
         "brave" => "Brave",
         "opera" => "Opera",

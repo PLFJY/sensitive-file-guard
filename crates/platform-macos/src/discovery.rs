@@ -119,6 +119,8 @@ impl MacBrowserDiscovery {
             }
         }
 
+        detect_unsupported_safari_at(home, &mut unsupported);
+
         MacBrowserDiscoveryResult {
             enrollments,
             review,
@@ -359,6 +361,24 @@ const CHROMIUM_HELPERS: &[BrowserExecutableDefinition] = &[
     },
 ];
 
+const EDGE_HELPERS: &[BrowserExecutableDefinition] = &[
+    BrowserExecutableDefinition {
+        role: BrowserExecutableRole::Helper,
+        relative_path: "Contents/Frameworks/Microsoft Edge Framework.framework/Versions/Current/Helpers/Microsoft Edge Helper.app/Contents/MacOS/Microsoft Edge Helper",
+        signing_ids: &["com.microsoft.edgemac.helper"],
+    },
+    BrowserExecutableDefinition {
+        role: BrowserExecutableRole::Helper,
+        relative_path: "Contents/Frameworks/Microsoft Edge Framework.framework/Versions/Current/Helpers/Microsoft Edge Helper (GPU).app/Contents/MacOS/Microsoft Edge Helper (GPU)",
+        signing_ids: &["com.microsoft.edgemac.helper"],
+    },
+    BrowserExecutableDefinition {
+        role: BrowserExecutableRole::Helper,
+        relative_path: "Contents/Frameworks/Microsoft Edge Framework.framework/Versions/Current/Helpers/Microsoft Edge Helper (Renderer).app/Contents/MacOS/Microsoft Edge Helper (Renderer)",
+        signing_ids: &["com.microsoft.edgemac.helper.renderer"],
+    },
+];
+
 const FIREFOX_HELPERS: &[BrowserExecutableDefinition] = &[
     BrowserExecutableDefinition {
         role: BrowserExecutableRole::Helper,
@@ -406,6 +426,19 @@ const BROWSERS: &[BrowserDefinition] = &[
         helpers: CHROMIUM_HELPERS,
     },
     BrowserDefinition {
+        id: "edge",
+        family: BrowserFamily::Chromium,
+        app_name: "Microsoft Edge.app",
+        profile_relative: "Library/Application Support/Microsoft Edge",
+        team_id: "UBF8T346G9",
+        main: BrowserExecutableDefinition {
+            role: BrowserExecutableRole::Main,
+            relative_path: "Contents/MacOS/Microsoft Edge",
+            signing_ids: &["com.microsoft.edgemac"],
+        },
+        helpers: EDGE_HELPERS,
+    },
+    BrowserDefinition {
         id: "firefox",
         family: BrowserFamily::Firefox,
         app_name: "Firefox.app",
@@ -419,6 +452,30 @@ const BROWSERS: &[BrowserDefinition] = &[
         helpers: FIREFOX_HELPERS,
     },
 ];
+
+fn detect_unsupported_safari_at(home: &Path, unsupported: &mut Vec<UnsupportedSandboxedBrowser>) {
+    let profile_root = home.join("Library/Safari");
+    if !profile_root.is_dir() {
+        return;
+    }
+    let profile_root = std::fs::canonicalize(&profile_root).unwrap_or(profile_root);
+    let safari_app_exists = [
+        Path::new("/System/Applications/Safari.app"),
+        Path::new("/Applications/Safari.app"),
+    ]
+    .iter()
+    .any(|path| path.is_dir());
+    unsupported.push(UnsupportedSandboxedBrowser {
+        kind: "safari".to_owned(),
+        profile_root,
+        reason: if safari_app_exists {
+            "Safari is detected but not protected: Guard does not yet have a Safari resource classifier or trusted WebKit process enrollment."
+        } else {
+            "Safari data is detected but the Safari app was not found in a standard location; Guard also does not yet have a Safari resource classifier or trusted WebKit process enrollment."
+        }
+        .to_owned(),
+    });
+}
 
 #[cfg(test)]
 mod tests {
@@ -470,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn discovers_verified_chrome_chromium_and_firefox_synthetic_layouts() {
+    fn discovers_verified_chrome_chromium_edge_and_firefox_synthetic_layouts() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");
         let applications = temp.path().join("Applications");
@@ -488,11 +545,27 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             ids,
-            vec!["chrome", "chromium", "firefox"],
+            vec!["chrome", "chromium", "edge", "firefox"],
             "unsupported: {:?}",
             result.portable.unsupported_sandboxed
         );
         assert!(result.portable.unsupported_sandboxed.is_empty());
+    }
+
+    #[test]
+    fn safari_is_reported_as_detected_but_not_enrolled() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let safari = home.join("Library/Safari");
+        std::fs::create_dir_all(&safari).unwrap();
+
+        // Safari discovery deliberately never creates an enrollment until a
+        // dedicated classifier exists.
+        let mut unsupported = Vec::new();
+        detect_unsupported_safari_at(&home, &mut unsupported);
+        assert_eq!(unsupported.len(), 1);
+        assert_eq!(unsupported[0].kind, "safari");
+        assert!(unsupported[0].reason.contains("not protected"));
     }
 
     #[test]

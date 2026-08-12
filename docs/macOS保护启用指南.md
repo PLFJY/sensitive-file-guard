@@ -111,6 +111,23 @@ macOS 图标由 Linux 使用的同一个
 `data/io.github.plfjy.SensitiveFileGuard.svg` 确定性生成 `Guard.icns`。最终 bundle 验证会
 同时检查 `CFBundleIconFile` 和 ICNS 文件，避免再次产生 Finder/Dock 空白图标。
 
+## 浏览器扫描与迁移确认
+
+Protection 页面只会把已核验签名和可识别资料目录的浏览器显示为可开启的开关。当前原生
+扫描支持 Chrome、Chromium、Firefox 和 Microsoft Edge。扫描到 Edge 后，先打开它的开关，
+再点击 Apply configuration；仅“扫描到”不会自动信任或自动保护它。
+
+迁移确认不是所有被拒绝访问都会弹出：它只发生在**已开启保护且已核验的浏览器 B**读取
+**另一个已开启保护的浏览器 A**资料时。例如已配置的 Edge 导入已配置 Chrome 的资料，
+系统会挂起这一笔 `AUTH_OPEN` 并显示确认；允许后才给该次导入的精确进程树一个限时、只读
+租约。未知程序、伪造浏览器、未配置的 Edge 或跨用户访问均会立即拒绝，故意不弹窗，避免
+把“是否允许读取 Cookie”变成任意程序的自我授权通道。
+
+Safari 的资料目录会显示为“Detected — not protected”，没有开关。这是诚实的能力边界：Safari
+使用 WebKit 和不同的资料布局；在专用的资源分类和可信 WebKit 进程核验完成前，Guard 不会
+把它误当 Chromium 保护，也不会声称能对它迁移挂起或确认。Safari 显示出来是为了让用户知道
+它被发现了，但当前版本尚未纳入保护范围。
+
 ## 紧急恢复
 
 如果启用扩展后普通软件无法打开：

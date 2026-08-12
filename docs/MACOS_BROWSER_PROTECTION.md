@@ -19,6 +19,14 @@ storage/session trees. The hot path does not rescan a profile. It uses:
 The dynamic classifier covers the same explicit resource set as the portable
 registry. It does not classify browser cache directories.
 
+Native discovery verifies and can enroll Chrome, Chromium, Firefox, and
+Microsoft Edge. Edge is a Chromium-family enrollment, but its Microsoft Team
+ID and each expected Edge signing identifier are checked independently; it is
+not trusted merely because it has a Chromium-style profile. Safari data is
+reported to the UI as detected but unsupported. Guard currently has neither a
+Safari resource classifier nor a trusted WebKit process enrollment, so it must
+not be represented as protected or as eligible for migration confirmation.
+
 Policy is disabled when no valid authoritative configuration is loaded. A
 normal Protection switch changes only `policy_enabled`; the active ES client
 then takes the unprotected fast path without changing extension lifecycle.
