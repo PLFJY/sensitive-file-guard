@@ -614,6 +614,11 @@ pub fn editable_from_metadata(info: guard_ipc::ConfigurationInfo) -> Option<Edit
             exe_paths: browser.exe_paths.into_iter().map(Into::into).collect(),
         });
     }
+    #[cfg(target_os = "macos")]
+    let current_uid = unsafe { libc::geteuid() };
+    #[cfg(not(target_os = "macos"))]
+    let current_uid = 0;
+
     Some(EditableConfiguration {
         enforcement_mode,
         policy_enabled: info.policy_enabled.unwrap_or(cfg!(target_os = "linux")),
@@ -649,7 +654,7 @@ pub fn editable_from_metadata(info: guard_ipc::ConfigurationInfo) -> Option<Edit
                     ino: rule.ino,
                     team_id: rule.team_id,
                     signing_id: rule.signing_id,
-                    owner_uid: 501,
+                    owner_uid: current_uid,
                 })
                 .collect(),
         },

@@ -27,3 +27,7 @@ git diff --check                                        PASS
 ## 状态
 
 阶段通过。逐次人工确认 pending IPC 尚未新增；因此没有把第三方工具伪装成浏览器迁移请求，也没有提供永久关键数据放行。
+
+## 质量门说明
+
+macOS 主机无法运行仓库全量 Linux 质量门：`platform-linux` 使用 fanotify/inotify 和 Linux libc 符号，在 Darwin 上编译失败。该失败与本阶段 macOS 代码无关；macOS 相关 workspace 子集的测试、clippy 和 `git diff --check` 均通过。
