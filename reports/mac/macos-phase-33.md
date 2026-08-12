@@ -36,7 +36,9 @@ build 33 使用现有 self-use 本地证书和 `SELF_USE_SIP_OFF=1`。没有读�
 
 ## SYSTEM EXTENSION ACTIVATION
 
-本阶段没有请求 activation 或更新当前运行的 extension。
+本阶段没有请求 activation 或更新当前运行的 extension。build 33 安装和 notification helper
+重新注册后，`top.plfjy.SensitiveFileGuard.guard-es (0.1.0/31)` 仍为
+`[activated enabled]`。
 
 ## FULL DISK ACCESS
 
@@ -83,7 +85,14 @@ Safari 的 namespace gate 只接受 `Library/Safari` 与 `Library/Containers/com
 
 ## RESTART / UPDATE
 
-build 33 仅在 `build/macos-release-v2/Guard.app` 中验证；本报告提交时尚未替换 `/Applications/Guard.app`，因而当前 build 31 extension 与已工作的 live 防护未受影响。
+build 33 先在 `build/macos-release-v2/Guard.app` 中验证，随后以可恢复方式安装：原 build 32
+App 已移入废纸篓中的 `Guard.app.build32.phase33-backup`，build 33 已复制到
+`/Applications/Guard.app`，`CFBundleVersion=33` 和 deep strict codesign 均通过。
+
+新 App 没有被打开，也没有调用 `OSSystemExtensionRequest`；当前 live extension 因而继续保持
+build 31。为使新通知逻辑立即生效，已通过 Guard 的受限 SMAppService 操作依次 unregister / register
+pending helper。LaunchAgent 现为 running，parent bundle version 为 33，实际运行的是
+`Contents/MacOS/guard-notify`；这不改变 Endpoint Security 扩展或保护策略。
 
 ## FALLBACK STATUS
 
@@ -111,4 +120,6 @@ build 33 仅在 `build/macos-release-v2/Guard.app` 中验证；本报告提交�
 - final build 33 UI layout smoke: PASS（Overview / Protection 均为 `800 × 560`）
 - final build 33 `guard-notify --once` authenticated XPC poll: PASS
 - one harmless macOS system-notification delivery call: PASS（exit 0）
+- `/Applications/Guard.app` staged build 33: PASS（`CFBundleVersion=33`、deep strict codesign）
+- pending helper re-registered from build 33: PASS（LaunchAgent running；没有 extension activation）
 - workspace-wide Linux gate: BLOCKED by pre-existing macOS-host Linux libc/fanotify/inotify incompatibility
