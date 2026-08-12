@@ -263,7 +263,7 @@ echo "==> Test 12: open-before-mark race (documented limitation)"
 # An fd opened BEFORE the daemon applies the fanotify mark is not intercepted.
 # This is a fundamental fanotify limitation (it intercepts future opens, not
 # already-open fds). We document it rather than claim race-free coverage.
-note_blocked "open-before-mark: fundamental fanotify limitation (documented in SECURITY_MODEL.md)"
+note_blocked "open-before-mark：fanotify 的已知限制（详见 docs/安全模型.md）"
 
 # ===========================================================================
 # Test 13: inherited fd => DOCUMENTED limitation
@@ -272,7 +272,7 @@ echo "==> Test 13: inherited fd (documented limitation)"
 # A child process that inherits an already-open fd from a parent that opened
 # it before the mark was applied can read via the inherited fd. This is the
 # same fundamental limitation as Test 12.
-note_blocked "inherited fd: fundamental fanotify limitation (documented in SECURITY_MODEL.md)"
+note_blocked "inherited fd：fanotify 的已知限制（详见 docs/安全模型.md）"
 
 # ===========================================================================
 # Test 14: FAN_Q_OVERFLOW => logged, no crash
@@ -354,6 +354,6 @@ fi
 
 echo
 echo "==> Phase 13 root bypass summary: PASS=$PASS FAIL=$FAIL BLOCKED=$BLOCKED"
-echo "    (BLOCKED items are documented fanotify limitations — see docs/SECURITY_MODEL.md)"
+echo "    （BLOCKED 项是 fanotify 已知限制，详见 docs/安全模型.md）"
 echo "    (see $WORK/guardd.log for daemon decision log)"
 exit $FAIL

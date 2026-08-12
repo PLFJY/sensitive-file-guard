@@ -70,8 +70,8 @@ package() {
   # user, UID, profile, or SSH key and must be deliberately copied and edited.
   install -Dm644 deploy/guardd-config.example.json \
     "$pkgdir/usr/share/guardd/guardd-config.example.json"
-  for document in README.md docs/INSTALL_LINUX.md docs/SECURITY_MODEL.md \
-    docs/SSH_ACCESS_MODEL.md; do
+  for document in README.md docs/Linux安装指南.md docs/安全模型.md \
+    docs/SSH访问模型.md; do
     install -Dm644 "$document" "$pkgdir/usr/share/doc/sensitive-file-guard/$(basename "$document")"
   done
   install -Dm644 LICENSE-MIT "$pkgdir/usr/share/licenses/$pkgname/LICENSE-MIT"

@@ -11,7 +11,7 @@
 # Fail-open note: if guardd crashes, the fanotify group fd closes and all
 # marks are removed. Files become unprotected until the daemon restarts.
 # Restart=always with RestartSec=2 minimizes (but does not eliminate) the
-# window. See docs/SECURITY_MODEL.md §Fail-open on daemon close.
+# window. See docs/安全模型.md 的“守护进程退出”说明。
 [Unit]
 Description=Sensitive Data Firewall daemon (guardd)
 After=local-fs.target

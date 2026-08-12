@@ -15,9 +15,9 @@ macOS 自用路径是当前首选开发路径，故意不等待 Apple provisioni
 
 - [中文文档目录](docs/README.md)
 - [构建与部署总手册](docs/构建与部署手册.md)
-- [macOS 自用保护启用指南](docs/INSTALL_MACOS.md)
-- [Linux 安装指南](docs/INSTALL_LINUX.md)
-- [安全模型](docs/SECURITY_MODEL.md)
+- [macOS 自用保护启用指南](docs/macOS安装指南.md)
+- [Linux 安装指南](docs/Linux安装指南.md)
+- [安全模型](docs/安全模型.md)
 - [macOS 阶段报告](reports/mac/)
 
 ## 一键流程
@@ -70,4 +70,4 @@ macOS 主机运行 Linux-only crate 可能因本机缺少 fanotify/inotify libc 
 
 ## 许可与贡献
 
-请先阅读 [安全模型](docs/SECURITY_MODEL.md) 和 [平台架构](docs/PLATFORM_ARCHITECTURE.md)。提交 macOS 改动时附上对应的 `reports/mac/macos-phase-*.md` 测试报告，并明确区分离线测试、人工验收和阻塞项。
+请先阅读[安全模型](docs/安全模型.md)和[平台架构](docs/平台架构.md)。提交 macOS 改动时附上对应的 `reports/mac/` 测试报告，并明确区分离线测试、人工验收和阻塞项。

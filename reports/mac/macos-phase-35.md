@@ -12,7 +12,7 @@
 
 - 新增 `scripts/build-deploy-linux.sh`：普通用户编译，安装阶段才使用 `sudo`；已有配置不覆盖；支持 `--build-only`、`--no-start`、`--yes`。
 - 新增 `scripts/macos/build-deploy-self-use.sh`：检查 SIP、复用/创建本地 Keychain 身份、构建并验证 entitlement-bearing 包，将旧 app 移到废纸篓备份，再安装新包和注册可选 helper。
-- 重写中文主入口：根目录 `README.md`、`docs/README.md`、`docs/构建与部署手册.md`、`docs/打包与部署指南.md`、`docs/INSTALL_MACOS.md`、`docs/INSTALL_LINUX.md`。
+- 重写中文主入口：根目录 `README.md`、`docs/README.md`、`docs/构建与部署手册.md`、`docs/macOS安装指南.md`、`docs/Linux安装指南.md`。
 - 历史报告和 ADR 保留为证据，不再作为安装入口。
 
 ## TESTS
