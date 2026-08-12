@@ -227,6 +227,7 @@ impl MacBackendConfig {
                         guard_core::resource::BrowserFamily::Chromium => "chromium",
                         guard_core::resource::BrowserFamily::Firefox => "firefox",
                         guard_core::resource::BrowserFamily::Zen => "zen",
+                        guard_core::resource::BrowserFamily::Safari => "safari",
                     }
                     .into(),
                     profile_root: browser.profile_root.to_string_lossy().into_owned(),

@@ -55,6 +55,9 @@ pub enum BrowserFamily {
     /// Firefox-derived (e.g. Zen).
     #[serde(alias = "zen")]
     Zen,
+    /// Safari is macOS-only and uses a dedicated WebKit data layout.
+    #[serde(alias = "safari")]
+    Safari,
 }
 
 /// Stable identifier for a browser install/profile family (e.g. "chrome",

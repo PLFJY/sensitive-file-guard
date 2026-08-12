@@ -235,6 +235,10 @@ pub fn family_name(family: BrowserFamily) -> &'static str {
         BrowserFamily::Firefox => "Firefox",
         BrowserFamily::Zen => "Zen",
         BrowserFamily::Chromium => "Chromium",
+        // Safari is discovered only by the macOS adapter. Keeping this label
+        // exhaustive preserves portable config decoding without adding any
+        // Linux discovery or enforcement behavior.
+        BrowserFamily::Safari => "Safari",
     }
 }
 

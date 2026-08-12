@@ -8,6 +8,7 @@
 pub mod chromium;
 pub mod firefox;
 pub mod registry;
+pub mod safari;
 
 pub use chromium::discover as discover_chromium;
 pub use firefox::discover as discover_firefox;
@@ -37,6 +38,7 @@ impl CustomProfile {
             BrowserFamily::Firefox | BrowserFamily::Zen => {
                 discover_firefox(&self.browser, &self.root, self.owner_uid)?
             }
+            BrowserFamily::Safari => safari::discover(&self.browser, &self.root, self.owner_uid)?,
         };
         for f in files {
             registry.enroll_file(f);

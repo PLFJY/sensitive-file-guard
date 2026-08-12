@@ -608,6 +608,7 @@ pub fn editable_from_metadata(info: guard_ipc::ConfigurationInfo) -> Option<Edit
             "Chromium" | "chromium" => guard_core::BrowserFamily::Chromium,
             "Firefox" | "firefox" => guard_core::BrowserFamily::Firefox,
             "Zen" | "zen" => guard_core::BrowserFamily::Zen,
+            "Safari" | "safari" => guard_core::BrowserFamily::Safari,
             _ => return None,
         };
         browsers.push(guard_platform::config::BrowserEnrollmentConfig {

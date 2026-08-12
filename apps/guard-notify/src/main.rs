@@ -15,6 +15,8 @@ use std::time::Duration;
 use clap::Parser;
 #[cfg(target_os = "linux")]
 use guard_client::transport::IpcClient;
+#[cfg(target_os = "macos")]
+use guard_ipc::EventInfo;
 #[cfg(target_os = "linux")]
 use guard_ipc::{EventInfo, Request, RequestOp, Response, ResponseBody, PROTOCOL_VERSION};
 
@@ -130,15 +132,36 @@ fn run_macos(cli: &Cli) -> ExitCode {
         }
     };
     let mut observer = PendingObserver::default();
+    let mut events = MacEventObserver::default();
     let normal_delay = Duration::from_millis(cli.poll_ms.clamp(100, 1_000));
     let mut delay = normal_delay;
     loop {
-        let succeeded = match fetch_macos_pending(&client) {
+        let events_ok = match client.events_cursor(Some(100), None, events.last_seen()) {
+            Ok(snapshot) => {
+                for event in events.observe(snapshot) {
+                    let (title, body) = mac_notification_text(&event);
+                    if let Err(error) = notify_macos(&title, &body) {
+                        eprintln!("guard-notify: macOS system notification failed: {error:#}");
+                    }
+                }
+                true
+            }
+            Err(error) => {
+                eprintln!("guard-notify: event poll failed: {error:#}");
+                false
+            }
+        };
+        let pending_ok = match fetch_macos_pending(&client) {
             Ok(pending) => {
                 if observer.observe(pending) {
+                    if let Err(error) = notify_macos(
+                        "Sensitive File Guard confirmation required",
+                        "A protected browser-data or SSH-key access request is waiting for your decision.",
+                    ) {
+                        eprintln!("guard-notify: macOS system notification failed: {error:#}");
+                    }
                     activate_guard_ui_macos();
                 }
-                delay = normal_delay;
                 true
             }
             Err(error) => {
@@ -147,6 +170,10 @@ fn run_macos(cli: &Cli) -> ExitCode {
                 false
             }
         };
+        let succeeded = events_ok && pending_ok;
+        if succeeded {
+            delay = normal_delay;
+        }
         if cli.once {
             return if succeeded {
                 ExitCode::SUCCESS
@@ -156,6 +183,75 @@ fn run_macos(cli: &Cli) -> ExitCode {
         }
         std::thread::sleep(delay);
     }
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct MacEventObserver {
+    last_seen: Option<i64>,
+}
+
+#[cfg(target_os = "macos")]
+impl MacEventObserver {
+    fn last_seen(&self) -> Option<i64> {
+        self.last_seen
+    }
+
+    /// The initial event cursor is a baseline, so enabling the helper never
+    /// spams a user with historical records. Subsequent denied events are
+    /// delivered exactly once by monotonically increasing audit ID.
+    fn observe(&mut self, events: Vec<EventInfo>) -> Vec<EventInfo> {
+        let newest = events.iter().map(|event| event.id).max();
+        let Some(previous) = self.last_seen else {
+            self.last_seen = newest;
+            return Vec::new();
+        };
+        self.last_seen = newest.map_or(Some(previous), |id| Some(id.max(previous)));
+        events
+            .into_iter()
+            .filter(|event| event.id > previous && event.decision.contains("Deny"))
+            .collect()
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn mac_notification_text(event: &EventInfo) -> (String, String) {
+    let executable = Path::new(&event.exe)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "A process".into());
+    (
+        "Sensitive File Guard blocked access".into(),
+        format!(
+            "{executable} was blocked from accessing protected {}.",
+            event.resource_kind_code
+        ),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn notify_macos(title: &str, body: &str) -> anyhow::Result<()> {
+    // Pass metadata through the environment, not through an AppleScript
+    // literal. This avoids code injection through a process name and never
+    // includes a protected resource path or file contents in a notification.
+    const SCRIPT: &str = r#"
+ObjC.import('stdlib');
+const app = Application.currentApplication();
+app.includeStandardAdditions = true;
+app.displayNotification(ObjC.unwrap($.getenv('GUARD_NOTIFY_BODY')), {
+  withTitle: ObjC.unwrap($.getenv('GUARD_NOTIFY_TITLE'))
+});
+"#;
+    let status = Command::new("/usr/bin/osascript")
+        .args(["-l", "JavaScript", "-e", SCRIPT])
+        .env("GUARD_NOTIFY_TITLE", title)
+        .env("GUARD_NOTIFY_BODY", body)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    anyhow::ensure!(status.success(), "osascript exited with {status}");
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -400,7 +496,7 @@ fn activate_guard_ui() {
 mod tests {
     use super::*;
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn event(pid: u32, path: &str) -> EventInfo {
         EventInfo {
             id: 1,
@@ -497,6 +593,41 @@ mod tests {
         assert!(!mac_section.contains("allow_ssh_read"));
         assert!(!mac_section.contains("block_migration"));
         assert!(!mac_section.contains("block_ssh_read"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_event_observer_baselines_then_notifies_new_denials_once() {
+        let mut observer = MacEventObserver::default();
+        let first = event(7, "/synthetic/Cookies");
+        assert!(observer.observe(vec![first.clone()]).is_empty());
+        assert_eq!(observer.last_seen(), Some(first.id));
+
+        let mut denied = event(8, "/synthetic/Cookies");
+        denied.id = 2;
+        assert_eq!(
+            observer
+                .observe(vec![denied])
+                .iter()
+                .map(|event| event.id)
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+
+        let mut allowed = event(9, "/synthetic/Cookies");
+        allowed.id = 3;
+        allowed.decision = "Allow".into();
+        assert!(observer.observe(vec![allowed]).is_empty());
+        assert_eq!(observer.last_seen(), Some(3));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_notification_does_not_include_the_resource_path() {
+        let event = event(7, "/synthetic/secret/Cookies");
+        let (_, body) = mac_notification_text(&event);
+        assert!(!body.contains("/synthetic/secret/Cookies"));
+        assert!(body.contains("test-probe"));
     }
 
     #[cfg(target_os = "macos")]

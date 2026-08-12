@@ -123,10 +123,16 @@ Protection 页面只会把已核验签名和可识别资料目录的浏览器显
 租约。未知程序、伪造浏览器、未配置的 Edge 或跨用户访问均会立即拒绝，故意不弹窗，避免
 把“是否允许读取 Cookie”变成任意程序的自我授权通道。
 
-Safari 的资料目录会显示为“Detected — not protected”，没有开关。这是诚实的能力边界：Safari
-使用 WebKit 和不同的资料布局；在专用的资源分类和可信 WebKit 进程核验完成前，Guard 不会
-把它误当 Chromium 保护，也不会声称能对它迁移挂起或确认。Safari 显示出来是为了让用户知道
-它被发现了，但当前版本尚未纳入保护范围。
+Safari 是 macOS 专用来源，会显示为可开关的 Safari 项。它不会套用 Chromium 规则：仅保护
+`~/Library` 下明确的 Safari Cookies、HTTP storage、标签/会话与 History 路径，绝不会因
+Safari 开关而把整个 `~/Library`、Chrome 或其他 App 资料目录纳入保护。Safari 的 Apple 平台
+签名没有第三方 Team ID，所以当前 Safari 可执行文件同时被精确哈希钉住；macOS 更新 Safari
+后会 fail-closed，用户应重新打开 Guard 并 Apply configuration 以重新审核该变更。
+
+如果开启“遇到确认请求时自动打开 Guard”，macOS `guard-notify` 会通过已认证 XPC 轮询自己
+UID 的审计事件：新发生的拒绝会显示系统通知；浏览器迁移或 SSH 读取等待确认时，会先显示
+系统通知，再打开 Guard 的确认窗口。通知只包含进程 basename 和资源类别，不包含浏览器资料
+路径、Cookie、密码或其他秘密内容。首次启动以当前审计记录为基线，不会弹出历史通知。
 
 ## 紧急恢复
 

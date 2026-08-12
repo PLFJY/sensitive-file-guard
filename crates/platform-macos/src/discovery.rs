@@ -89,11 +89,9 @@ impl MacBrowserDiscovery {
                 .map(|root| root.join(definition.app_name))
                 .find(|path| path.is_dir())
             else {
-                unsupported.push(unsupported_browser(
-                    definition,
-                    profile_root,
-                    "profile root exists but the verified native app is not installed",
-                ));
+                // A leftover data directory is not a browser enrollment. In
+                // particular, do not display it as a protectable Chromium
+                // source when the verified app is absent.
                 continue;
             };
             match self.enroll_known(definition, &app, &profile_root, owner_uid) {
@@ -119,7 +117,28 @@ impl MacBrowserDiscovery {
             }
         }
 
-        detect_unsupported_safari_at(home, &mut unsupported);
+        match self.enroll_safari(home, owner_uid) {
+            Ok(Some((enrollment, browser_review))) => {
+                suggestions.push(BrowserSuggestion {
+                    id: enrollment.browser_id.0.clone(),
+                    family: enrollment.family,
+                    profile_root: enrollment.profile_root.clone(),
+                    exe_paths: enrollment
+                        .executables
+                        .iter()
+                        .map(|executable| executable.path().to_path_buf())
+                        .collect(),
+                });
+                enrollments.push(enrollment);
+                review.push(browser_review);
+            }
+            Ok(None) => {}
+            Err(error) => unsupported.push(UnsupportedSandboxedBrowser {
+                kind: "safari".to_owned(),
+                profile_root: home.join("Library"),
+                reason: format!("Safari is detected but cannot be safely enrolled: {error}"),
+            }),
+        }
 
         MacBrowserDiscoveryResult {
             enrollments,
@@ -245,6 +264,62 @@ impl MacBrowserDiscovery {
             executables: executable_review,
         };
         Ok((enrollment, review))
+    }
+
+    fn enroll_safari(
+        &self,
+        home: &Path,
+        owner_uid: u32,
+    ) -> anyhow::Result<Option<(MacBrowserEnrollment, MacBrowserReview)>> {
+        let library = home.join("Library");
+        let safari_data = library.join("Safari");
+        let container_data = library.join("Containers/com.apple.Safari/Data/Library");
+        if !safari_data.is_dir() && !container_data.is_dir() {
+            return Ok(None);
+        }
+        let library = std::fs::canonicalize(library)?;
+        let app = self
+            .application_roots
+            .iter()
+            .map(|root| root.join("Safari.app"))
+            .find(|path| path.is_dir())
+            .ok_or_else(|| anyhow::anyhow!("Safari.app is not installed in /Applications"))?;
+        let app = std::fs::canonicalize(app)?;
+        let executable = std::fs::canonicalize(app.join("Contents/MacOS/Safari"))?;
+        let signature = self.signatures.inspect(&executable)?;
+        anyhow::ensure!(signature.valid, "Safari code signature validation failed");
+        anyhow::ensure!(
+            signature.signing_id.as_deref() == Some("com.apple.Safari"),
+            "unexpected Safari signing identifier"
+        );
+
+        // Apple platform binaries have no third-party Team ID. Pin the exact
+        // root-owned executable hash instead of treating an identifier alone
+        // as trusted. A macOS Safari update therefore fails closed until the
+        // user explicitly reapplies this reviewed enrollment.
+        let enrollment = MacBrowserEnrollment {
+            browser_id: BrowserId("safari".to_owned()),
+            family: BrowserFamily::Safari,
+            profile_root: library.clone(),
+            owner_uid,
+            app_bundle: None,
+            executables: vec![enroll_custom_executable(&executable)?],
+        };
+        let review = MacBrowserReview {
+            browser_id: enrollment.browser_id.clone(),
+            family: enrollment.family,
+            app_bundle: app,
+            profile_root: library,
+            owner_uid,
+            executables: vec![BrowserExecutableReview {
+                role: BrowserExecutableRole::Main,
+                path: executable,
+                team_id: signature.team_id.unwrap_or_default(),
+                signing_id: signature.signing_id.unwrap_or_default(),
+                cdhash_hex: hex(&signature.cdhash),
+            }],
+        };
+        Ok(Some((enrollment, review)))
     }
 }
 
@@ -453,30 +528,6 @@ const BROWSERS: &[BrowserDefinition] = &[
     },
 ];
 
-fn detect_unsupported_safari_at(home: &Path, unsupported: &mut Vec<UnsupportedSandboxedBrowser>) {
-    let profile_root = home.join("Library/Safari");
-    if !profile_root.is_dir() {
-        return;
-    }
-    let profile_root = std::fs::canonicalize(&profile_root).unwrap_or(profile_root);
-    let safari_app_exists = [
-        Path::new("/System/Applications/Safari.app"),
-        Path::new("/Applications/Safari.app"),
-    ]
-    .iter()
-    .any(|path| path.is_dir());
-    unsupported.push(UnsupportedSandboxedBrowser {
-        kind: "safari".to_owned(),
-        profile_root,
-        reason: if safari_app_exists {
-            "Safari is detected but not protected: Guard does not yet have a Safari resource classifier or trusted WebKit process enrollment."
-        } else {
-            "Safari data is detected but the Safari app was not found in a standard location; Guard also does not yet have a Safari resource classifier or trusted WebKit process enrollment."
-        }
-        .to_owned(),
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -553,19 +604,64 @@ mod tests {
     }
 
     #[test]
-    fn safari_is_reported_as_detected_but_not_enrolled() {
+    fn safari_without_a_verified_app_is_not_a_protectable_source() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");
         let safari = home.join("Library/Safari");
         std::fs::create_dir_all(&safari).unwrap();
 
-        // Safari discovery deliberately never creates an enrollment until a
-        // dedicated classifier exists.
-        let mut unsupported = Vec::new();
-        detect_unsupported_safari_at(&home, &mut unsupported);
-        assert_eq!(unsupported.len(), 1);
-        assert_eq!(unsupported[0].kind, "safari");
-        assert!(unsupported[0].reason.contains("not protected"));
+        let applications = temp.path().join("Applications");
+        std::fs::create_dir_all(&applications).unwrap();
+        let discovery =
+            MacBrowserDiscovery::new(vec![applications], Arc::new(FakeSignatures::default()));
+        let result = discovery.discover_verified(&home);
+        assert!(result.enrollments.is_empty());
+        assert!(result
+            .portable
+            .unsupported_sandboxed
+            .iter()
+            .any(|browser| browser.kind == "safari"));
+    }
+
+    #[test]
+    fn discovers_verified_safari_as_a_user_switchable_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let applications = temp.path().join("Applications");
+        let executable = applications.join("Safari.app/Contents/MacOS/Safari");
+        std::fs::create_dir_all(home.join("Library/Safari")).unwrap();
+        std::fs::create_dir_all(
+            home.join("Library/Containers/com.apple.Safari/Data/Library/Cookies"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, b"synthetic Safari executable").unwrap();
+        let executable = std::fs::canonicalize(executable).unwrap();
+        let signatures = Arc::new(FakeSignatures::default());
+        signatures.values.lock().unwrap().insert(
+            executable,
+            SignatureInspection {
+                valid: true,
+                team_id: None,
+                signing_id: Some("com.apple.Safari".into()),
+                leaf_certificate_sha1: None,
+                cdhash: vec![7; 20],
+                diagnostic: None,
+            },
+        );
+        let result =
+            MacBrowserDiscovery::new(vec![applications], signatures).discover_verified(&home);
+        assert_eq!(result.portable.browsers.len(), 1);
+        assert_eq!(result.portable.browsers[0].id, "safari");
+        assert_eq!(result.portable.browsers[0].family, BrowserFamily::Safari);
+        assert_eq!(
+            result.enrollments[0].profile_root,
+            std::fs::canonicalize(home.join("Library")).unwrap()
+        );
+        assert!(matches!(
+            result.enrollments[0].executables.as_slice(),
+            [MacExecutableEnrollment::ExplicitHash { .. }]
+        ));
     }
 
     #[test]

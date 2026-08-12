@@ -328,6 +328,11 @@ impl MacResourceIndex {
 impl MacProfileScope {
     fn scope(&self, path: &std::path::Path) -> Option<NamespaceScope> {
         let relative = path.strip_prefix(&self.root).ok()?;
+        if self.family == BrowserFamily::Safari
+            && !guard_browser::safari::is_safari_namespace_path(relative)
+        {
+            return None;
+        }
         let profile = match self.family {
             BrowserFamily::Chromium => {
                 if relative == std::path::Path::new("Local State") {
@@ -367,6 +372,7 @@ impl MacProfileScope {
                     ))
                 }
             }
+            BrowserFamily::Safari => Some(ProfileId(guard_browser::safari::PROFILE_ID.into())),
         };
         Some(NamespaceScope {
             browser: self.browser.clone(),
@@ -380,6 +386,7 @@ impl MacProfileScope {
         let (profile, kind) = match self.family {
             BrowserFamily::Chromium => self.classify_chromium(relative)?,
             BrowserFamily::Firefox | BrowserFamily::Zen => self.classify_firefox(relative)?,
+            BrowserFamily::Safari => self.classify_safari(relative)?,
         };
         Some(ProtectedResource {
             id: ProtectedResourceId(path.to_string_lossy().into_owned()),
@@ -439,6 +446,14 @@ impl MacProfileScope {
         };
         classify_firefox_profile_path(profile_relative).map(|kind| (profile, kind))
     }
+
+    fn classify_safari(
+        &self,
+        relative: &std::path::Path,
+    ) -> Option<(String, ProtectedResourceKind)> {
+        classify_safari_library_path(relative)
+            .map(|kind| (guard_browser::safari::PROFILE_ID.into(), kind))
+    }
 }
 
 fn classify_chromium_profile_path(path: &std::path::Path) -> Option<ProtectedResourceKind> {
@@ -465,6 +480,21 @@ fn classify_firefox_profile_path(path: &std::path::Path) -> Option<ProtectedReso
         Classified::Tree(kind) => Some(kind),
         Classified::None => path.ancestors().skip(1).find_map(|ancestor| {
             if let Classified::Tree(kind) = classify_profile_relative(ancestor) {
+                Some(kind)
+            } else {
+                None
+            }
+        }),
+    }
+}
+
+fn classify_safari_library_path(path: &std::path::Path) -> Option<ProtectedResourceKind> {
+    use guard_browser::safari::{classify_library_relative, Classified};
+
+    match classify_library_relative(path) {
+        Classified::File(kind) | Classified::Tree(kind) => Some(kind),
+        Classified::None => path.ancestors().skip(1).find_map(|ancestor| {
+            if let Classified::Tree(kind) = classify_library_relative(ancestor) {
                 Some(kind)
             } else {
                 None
@@ -645,6 +675,49 @@ mod tests {
                 &chromium_root.join("Default/Cache/cache-entry"),
                 FileIdentity { dev: 3, ino: 4 },
             )
+            .is_none());
+    }
+
+    #[test]
+    fn safari_profile_scope_classifies_only_safari_library_paths() {
+        use guard_core::resource::{BrowserFamily, BrowserId};
+
+        let temp = tempfile::tempdir().unwrap();
+        let library = temp.path().join("Library");
+        std::fs::create_dir_all(
+            library.join("Containers/com.apple.Safari/Data/Library/HTTPStorages"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(library.join("Application Support/Google/Chrome")).unwrap();
+        let index = MacResourceIndex::from_browser_enrollments(&[MacBrowserEnrollment {
+            browser_id: BrowserId("safari".into()),
+            family: BrowserFamily::Safari,
+            profile_root: library.clone(),
+            owner_uid: 501,
+            app_bundle: None,
+            executables: vec![],
+        }])
+        .unwrap();
+
+        let cookie =
+            library.join("Containers/com.apple.Safari/Data/Library/Cookies/Cookies.binarycookies");
+        std::fs::create_dir_all(cookie.parent().unwrap()).unwrap();
+        std::fs::write(&cookie, b"synthetic Safari cookie marker").unwrap();
+        assert_eq!(
+            index
+                .classify(&cookie, FileIdentity { dev: 7, ino: 8 })
+                .unwrap()
+                .kind,
+            ProtectedResourceKind::CookieStore
+        );
+        assert!(index
+            .classify(
+                &library.join("Application Support/Google/Chrome/Cookies"),
+                FileIdentity { dev: 9, ino: 10 },
+            )
+            .is_none());
+        assert!(index
+            .namespace_scope(&library.join("Application Support/Google/Chrome"))
             .is_none());
     }
 

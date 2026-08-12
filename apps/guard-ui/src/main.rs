@@ -767,6 +767,7 @@ fn browser_family_name(family: guard_core::BrowserFamily) -> &'static str {
         guard_core::BrowserFamily::Firefox => "Firefox",
         guard_core::BrowserFamily::Zen => "Zen",
         guard_core::BrowserFamily::Chromium => "Chromium",
+        guard_core::BrowserFamily::Safari => "Safari",
     }
 }
 
@@ -1036,6 +1037,8 @@ fn show_add_browser_dialog(state: &UiState) {
     family.append(Some("firefox"), "Firefox");
     family.append(Some("zen"), "Zen Browser");
     family.append(Some("chromium"), "Chromium family");
+    #[cfg(target_os = "macos")]
+    family.append(Some("safari"), "Safari (macOS)");
     family.set_active_id(Some("chromium"));
     let profile = gtk::Entry::new();
     profile.set_placeholder_text(Some("Profile root, e.g. /home/me/.config/chromium"));
@@ -1116,6 +1119,7 @@ fn custom_browser_from_entries(
     let browser_family = match family.active_id().as_deref() {
         Some("firefox") => guard_core::resource::BrowserFamily::Firefox,
         Some("zen") => guard_core::resource::BrowserFamily::Zen,
+        Some("safari") => guard_core::resource::BrowserFamily::Safari,
         _ => guard_core::resource::BrowserFamily::Chromium,
     };
     Ok(guard_platform::config::BrowserEnrollmentConfig {

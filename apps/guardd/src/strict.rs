@@ -283,6 +283,10 @@ impl StrictClassifier {
                         )
                     })
                 }
+                // Safari has no Linux discovery/classifier. A manually
+                // supplied Safari family must not acquire Chromium/Firefox
+                // semantics on this backend.
+                BrowserFamily::Safari => true,
             }
         })
     }
@@ -331,6 +335,7 @@ impl StrictClassifier {
             let classified = match namespace.family {
                 BrowserFamily::Chromium => classify_chromium(relative),
                 BrowserFamily::Firefox | BrowserFamily::Zen => classify_firefox(relative),
+                BrowserFamily::Safari => None,
             };
             if let Some((kind, profile)) = classified {
                 return Some(resource(

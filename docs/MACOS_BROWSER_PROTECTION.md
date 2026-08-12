@@ -19,13 +19,18 @@ storage/session trees. The hot path does not rescan a profile. It uses:
 The dynamic classifier covers the same explicit resource set as the portable
 registry. It does not classify browser cache directories.
 
-Native discovery verifies and can enroll Chrome, Chromium, Firefox, and
-Microsoft Edge. Edge is a Chromium-family enrollment, but its Microsoft Team
-ID and each expected Edge signing identifier are checked independently; it is
-not trusted merely because it has a Chromium-style profile. Safari data is
-reported to the UI as detected but unsupported. Guard currently has neither a
-Safari resource classifier nor a trusted WebKit process enrollment, so it must
-not be represented as protected or as eligible for migration confirmation.
+Native discovery verifies and can enroll Chrome, Chromium, Firefox, Microsoft
+Edge, and macOS Safari. Edge is a Chromium-family enrollment, but its Microsoft
+Team ID and each expected Edge signing identifier are checked independently; it
+is not trusted merely because it has a Chromium-style profile. A data directory
+without its verified native app is not shown as a protectable browser source.
+
+Safari is a dedicated macOS family. Its switch covers only explicitly classified
+Safari Cookies, HTTP storage, tab/session, and history paths below `~/Library`;
+it does not classify the rest of Library. The current root-owned Safari binary
+must be valid `com.apple.Safari` and is exact-hash enrolled because Apple system
+binaries do not carry a third-party Team ID. A Safari update therefore fails
+closed until the user reapplies the reviewed configuration.
 
 Policy is disabled when no valid authoritative configuration is loaded. A
 normal Protection switch changes only `policy_enabled`; the active ES client
