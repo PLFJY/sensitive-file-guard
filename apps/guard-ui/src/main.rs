@@ -20,6 +20,18 @@ const APP_ID: &str = platform_macos::DEFAULT_APP_BUNDLE_ID;
 #[cfg(not(target_os = "macos"))]
 const APP_ID: &str = "io.github.plfjy.SensitiveFileGuard";
 const PENDING_ONLY_ARG: &str = "--pending-only";
+const DEFAULT_WINDOW_WIDTH: i32 = 800;
+const DEFAULT_WINDOW_HEIGHT: i32 = 560;
+const SIDEBAR_WIDTH: i32 = 176;
+const SIDEBAR_POSITION: i32 = 192;
+const SUMMARY_WIDTH_CHARS: i32 = 72;
+const _: () = {
+    assert!(DEFAULT_WINDOW_WIDTH <= 800);
+    assert!(DEFAULT_WINDOW_HEIGHT <= 600);
+    assert!(SIDEBAR_POSITION < DEFAULT_WINDOW_WIDTH / 3);
+    assert!(SIDEBAR_WIDTH <= SIDEBAR_POSITION);
+    assert!(SUMMARY_WIDTH_CHARS <= 72);
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Health {
@@ -155,10 +167,14 @@ fn build_ui(app: &adw::Application, pending_only: bool) {
 
     let status = gtk::Label::new(Some("Connecting to guardd…"));
     status.add_css_class("title-3");
+    status.set_xalign(0.0);
     let detail = gtk::Label::new(Some(
         "Live protection, notification, and daemon health are required for a green state.",
     ));
     detail.set_wrap(true);
+    detail.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    detail.set_max_width_chars(SUMMARY_WIDTH_CHARS);
+    detail.set_hexpand(true);
     detail.set_xalign(0.0);
     let apply = gtk::Button::with_label(platform_service::apply_button_label());
     apply.set_sensitive(false);
@@ -246,12 +262,12 @@ fn build_ui(app: &adw::Application, pending_only: bool) {
             });
         }
     });
-    nav.set_width_request(220);
+    nav.set_width_request(SIDEBAR_WIDTH);
     nav.add_css_class("navigation-sidebar");
     let split = gtk::Paned::new(gtk::Orientation::Horizontal);
     split.set_start_child(Some(&nav));
     split.set_end_child(Some(&stack));
-    split.set_position(260);
+    split.set_position(SIDEBAR_POSITION);
     split.set_resize_start_child(false);
     split.set_shrink_start_child(false);
     stack.set_hexpand(true);
@@ -265,7 +281,7 @@ fn build_ui(app: &adw::Application, pending_only: bool) {
     root.append(&split);
     let window = adw::ApplicationWindow::new(app);
     window.set_title(Some("Sensitive File Guard"));
-    window.set_default_size(980, 680);
+    window.set_default_size(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT);
     window.set_content(Some(&root));
     window.present();
 
