@@ -29,9 +29,17 @@ pub fn console_user_uid() -> anyhow::Result<u32> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SigningRequirements {
-    pub team_id: String,
+    pub identity: MacSigningIdentity,
     pub client_requirement: String,
     pub server_requirement: String,
+}
+
+/// The only two signing models accepted by Guard's macOS control plane.
+/// Neither admits an arbitrary process merely because it has the same UID.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MacSigningIdentity {
+    AppleTeam { team_id: String },
+    LocalCertificate { leaf_certificate_sha1: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +48,7 @@ pub struct PeerSigningFacts<'a> {
     pub code_valid: bool,
     pub team_id: Option<&'a str>,
     pub signing_id: Option<&'a str>,
+    pub leaf_certificate_sha1: Option<&'a str>,
 }
 
 /// Executable form of the same exact identity rule installed on each native
@@ -48,17 +57,17 @@ pub struct PeerSigningFacts<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientSigningPolicy {
     expected_euids: BTreeSet<u32>,
-    team_id: String,
+    identity: MacSigningIdentity,
     signing_ids: BTreeSet<String>,
 }
 
 impl ClientSigningPolicy {
     pub fn new(
         expected_euids: impl IntoIterator<Item = u32>,
-        team_id: &str,
+        identity: MacSigningIdentity,
         app_bundle_id: &str,
     ) -> anyhow::Result<Self> {
-        validate_requirement_atom("Team ID", team_id)?;
+        validate_signing_identity(&identity)?;
         validate_requirement_atom("app bundle ID", app_bundle_id)?;
         let expected_euids = expected_euids.into_iter().collect::<BTreeSet<_>>();
         anyhow::ensure!(
@@ -67,7 +76,7 @@ impl ClientSigningPolicy {
         );
         Ok(Self {
             expected_euids,
-            team_id: team_id.into(),
+            identity,
             signing_ids: BTreeSet::from([
                 app_bundle_id.into(),
                 format!("{app_bundle_id}.guardctl"),
@@ -79,7 +88,7 @@ impl ClientSigningPolicy {
     pub fn allows(&self, peer: &PeerSigningFacts<'_>) -> bool {
         peer.code_valid
             && self.expected_euids.contains(&peer.euid)
-            && peer.team_id == Some(self.team_id.as_str())
+            && signing_identity_matches(&self.identity, peer)
             && peer
                 .signing_id
                 .is_some_and(|identifier| self.signing_ids.contains(identifier))
@@ -92,29 +101,65 @@ impl SigningRequirements {
         app_bundle_id: &str,
         extension_bundle_id: &str,
     ) -> anyhow::Result<Self> {
-        validate_requirement_atom("Team ID", team_id)?;
+        Self::for_identity(
+            MacSigningIdentity::AppleTeam {
+                team_id: team_id.into(),
+            },
+            app_bundle_id,
+            extension_bundle_id,
+        )
+    }
+
+    pub fn for_local_certificate(
+        leaf_certificate_sha1: &str,
+        app_bundle_id: &str,
+        extension_bundle_id: &str,
+    ) -> anyhow::Result<Self> {
+        Self::for_identity(
+            MacSigningIdentity::LocalCertificate {
+                leaf_certificate_sha1: leaf_certificate_sha1.into(),
+            },
+            app_bundle_id,
+            extension_bundle_id,
+        )
+    }
+
+    pub fn for_identity(
+        identity: MacSigningIdentity,
+        app_bundle_id: &str,
+        extension_bundle_id: &str,
+    ) -> anyhow::Result<Self> {
+        validate_signing_identity(&identity)?;
         validate_requirement_atom("app bundle ID", app_bundle_id)?;
         validate_requirement_atom("extension bundle ID", extension_bundle_id)?;
         let guardctl = format!("{app_bundle_id}.guardctl");
         let notify = format!("{app_bundle_id}.guard-notify");
-        let identity = |identifier: &str| {
-            format!(
+        let requirement_identity = |identifier: &str| match &identity {
+            MacSigningIdentity::AppleTeam { team_id } => format!(
                 "(identifier \"{identifier}\" and certificate leaf[subject.OU] = \"{team_id}\")"
-            )
+            ),
+            MacSigningIdentity::LocalCertificate {
+                leaf_certificate_sha1,
+            } => format!(
+                "(identifier \"{identifier}\" and certificate leaf = H\"{leaf_certificate_sha1}\")"
+            ),
         };
         let client_requirement = format!(
-            "anchor apple generic and ({} or {} or {})",
-            identity(app_bundle_id),
-            identity(&guardctl),
-            identity(&notify)
+            "{} and ({} or {} or {})",
+            signing_anchor(&identity),
+            requirement_identity(app_bundle_id),
+            requirement_identity(&guardctl),
+            requirement_identity(&notify)
         );
         let server_requirement = format!(
-            "anchor apple generic and identifier \"{extension_bundle_id}\" and certificate leaf[subject.OU] = \"{team_id}\""
+            "{} and {}",
+            signing_anchor(&identity),
+            requirement_identity(extension_bundle_id)
         );
         validate_requirement_syntax(&client_requirement)?;
         validate_requirement_syntax(&server_requirement)?;
         Ok(Self {
-            team_id: team_id.into(),
+            identity,
             client_requirement,
             server_requirement,
         })
@@ -124,14 +169,54 @@ impl SigningRequirements {
         let executable = std::env::current_exe()?;
         let signature = NativeCodeSignatureInspector.inspect(&executable)?;
         anyhow::ensure!(signature.valid, "current process code signature is invalid");
-        let team_id = signature
-            .team_id
-            .as_deref()
-            .filter(|team| !team.is_empty())
-            .ok_or_else(|| {
-                anyhow::anyhow!("ad-hoc signing has no Team ID; authenticated XPC is unavailable")
-            })?;
-        Self::new(team_id, DEFAULT_APP_BUNDLE_ID, DEFAULT_EXTENSION_BUNDLE_ID)
+        if let Some(team_id) = signature.team_id.as_deref().filter(|team| !team.is_empty()) {
+            return Self::new(team_id, DEFAULT_APP_BUNDLE_ID, DEFAULT_EXTENSION_BUNDLE_ID);
+        }
+        let certificate = signature.leaf_certificate_sha1.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("ad-hoc signing has no Team ID or local certificate; authenticated XPC is unavailable")
+        })?;
+        Self::for_local_certificate(
+            certificate,
+            DEFAULT_APP_BUNDLE_ID,
+            DEFAULT_EXTENSION_BUNDLE_ID,
+        )
+    }
+}
+
+fn signing_anchor(identity: &MacSigningIdentity) -> &'static str {
+    match identity {
+        MacSigningIdentity::AppleTeam { .. } => "anchor apple generic",
+        // `certificate leaf = H"…"` below pins the complete local
+        // certificate. Requiring `anchor trusted` would force users to alter
+        // global trust policy for a private self-signed identity.
+        MacSigningIdentity::LocalCertificate { .. } => "true",
+    }
+}
+
+fn validate_signing_identity(identity: &MacSigningIdentity) -> anyhow::Result<()> {
+    match identity {
+        MacSigningIdentity::AppleTeam { team_id } => validate_requirement_atom("Team ID", team_id),
+        MacSigningIdentity::LocalCertificate {
+            leaf_certificate_sha1,
+        } => {
+            anyhow::ensure!(
+                leaf_certificate_sha1.len() == 40
+                    && leaf_certificate_sha1
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit()),
+                "local certificate SHA-1 must be exactly 40 hexadecimal characters"
+            );
+            Ok(())
+        }
+    }
+}
+
+fn signing_identity_matches(identity: &MacSigningIdentity, peer: &PeerSigningFacts<'_>) -> bool {
+    match identity {
+        MacSigningIdentity::AppleTeam { team_id } => peer.team_id == Some(team_id),
+        MacSigningIdentity::LocalCertificate {
+            leaf_certificate_sha1,
+        } => peer.leaf_certificate_sha1 == Some(leaf_certificate_sha1),
     }
 }
 
@@ -602,36 +687,82 @@ mod tests {
 
     #[test]
     fn same_uid_or_same_team_alone_cannot_self_approve() {
-        let policy = ClientSigningPolicy::new([502], "ABCDE12345", "io.example.Guard").unwrap();
+        let policy = ClientSigningPolicy::new(
+            [502],
+            MacSigningIdentity::AppleTeam {
+                team_id: "ABCDE12345".into(),
+            },
+            "io.example.Guard",
+        )
+        .unwrap();
         assert!(policy.allows(&PeerSigningFacts {
             euid: 502,
             code_valid: true,
             team_id: Some("ABCDE12345"),
             signing_id: Some("io.example.Guard"),
+            leaf_certificate_sha1: None,
         }));
         assert!(!policy.allows(&PeerSigningFacts {
             euid: 502,
             code_valid: false,
             team_id: None,
             signing_id: None,
+            leaf_certificate_sha1: None,
         }));
         assert!(!policy.allows(&PeerSigningFacts {
             euid: 502,
             code_valid: true,
             team_id: Some("WRONG12345"),
             signing_id: Some("io.example.Guard"),
+            leaf_certificate_sha1: None,
         }));
         assert!(!policy.allows(&PeerSigningFacts {
             euid: 502,
             code_valid: true,
             team_id: Some("ABCDE12345"),
             signing_id: Some("io.example.UnlistedHelper"),
+            leaf_certificate_sha1: None,
         }));
         assert!(!policy.allows(&PeerSigningFacts {
             euid: 501,
             code_valid: true,
             team_id: Some("ABCDE12345"),
             signing_id: Some("io.example.Guard"),
+            leaf_certificate_sha1: None,
+        }));
+    }
+
+    #[test]
+    fn local_certificate_still_requires_exact_certificate_and_identifier() {
+        let certificate = "0123456789ABCDEF0123456789ABCDEF01234567";
+        let policy = ClientSigningPolicy::new(
+            [502],
+            MacSigningIdentity::LocalCertificate {
+                leaf_certificate_sha1: certificate.into(),
+            },
+            "io.example.Guard",
+        )
+        .unwrap();
+        assert!(policy.allows(&PeerSigningFacts {
+            euid: 502,
+            code_valid: true,
+            team_id: None,
+            signing_id: Some("io.example.Guard.guardctl"),
+            leaf_certificate_sha1: Some(certificate),
+        }));
+        assert!(!policy.allows(&PeerSigningFacts {
+            euid: 502,
+            code_valid: true,
+            team_id: None,
+            signing_id: Some("io.example.Guard.guardctl"),
+            leaf_certificate_sha1: Some("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"),
+        }));
+        assert!(!policy.allows(&PeerSigningFacts {
+            euid: 502,
+            code_valid: true,
+            team_id: None,
+            signing_id: Some("io.example.UnlistedHelper"),
+            leaf_certificate_sha1: Some(certificate),
         }));
     }
 }

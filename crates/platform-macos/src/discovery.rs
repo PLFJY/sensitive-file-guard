@@ -462,6 +462,7 @@ mod tests {
                 valid: true,
                 team_id: Some(definition.team_id.to_owned()),
                 signing_id: Some(definition.main.signing_ids[0].to_owned()),
+                leaf_certificate_sha1: None,
                 cdhash: vec![1; 20],
                 diagnostic: None,
             },

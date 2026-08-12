@@ -9,6 +9,7 @@ typedef struct {
     bool valid;
     char team_id[128];
     char signing_id[256];
+    char leaf_certificate_sha1[41];
     uint8_t cdhash[20];
     size_t cdhash_len;
 } guard_code_signature_info_t;

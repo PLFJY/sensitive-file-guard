@@ -4,6 +4,8 @@
 #import <Security/SecCode.h>
 #import <Security/SecStaticCode.h>
 
+#import <CommonCrypto/CommonDigest.h>
+
 #include <string.h>
 
 static void GuardSignatureCopyString(CFStringRef value, char *buffer, size_t length) {
@@ -21,6 +23,23 @@ static void GuardSignatureError(OSStatus status, char *error, size_t errorLength
     GuardSignatureCopyString(message, error, errorLength);
     if (message != NULL) {
         CFRelease(message);
+    }
+}
+
+static void GuardSignatureCopyCertificateSha1(SecCertificateRef certificate,
+                                              char *buffer, size_t length) {
+    if (certificate == NULL || buffer == NULL || length < CC_SHA1_DIGEST_LENGTH * 2 + 1) {
+        return;
+    }
+    CFDataRef data = SecCertificateCopyData(certificate);
+    if (data == NULL) {
+        return;
+    }
+    unsigned char digest[CC_SHA1_DIGEST_LENGTH];
+    CC_SHA1(CFDataGetBytePtr(data), (CC_LONG)CFDataGetLength(data), digest);
+    CFRelease(data);
+    for (size_t index = 0; index < sizeof(digest); index++) {
+        snprintf(buffer + index * 2, length - index * 2, "%02X", digest[index]);
     }
 }
 
@@ -62,8 +81,14 @@ int guard_code_signature_inspect(
     CFStringRef team = CFDictionaryGetValue(signingInformation, kSecCodeInfoTeamIdentifier);
     CFStringRef signing = CFDictionaryGetValue(signingInformation, kSecCodeInfoIdentifier);
     CFDataRef cdhash = CFDictionaryGetValue(signingInformation, kSecCodeInfoUnique);
+    CFArrayRef certificates = CFDictionaryGetValue(signingInformation, kSecCodeInfoCertificates);
     GuardSignatureCopyString(team, info->team_id, sizeof(info->team_id));
     GuardSignatureCopyString(signing, info->signing_id, sizeof(info->signing_id));
+    if (certificates != NULL && CFArrayGetCount(certificates) > 0) {
+        SecCertificateRef leaf = (SecCertificateRef)CFArrayGetValueAtIndex(certificates, 0);
+        GuardSignatureCopyCertificateSha1(leaf, info->leaf_certificate_sha1,
+                                          sizeof(info->leaf_certificate_sha1));
+    }
     if (cdhash != NULL) {
         CFIndex length = CFDataGetLength(cdhash);
         if (length > 0 && length <= (CFIndex)sizeof(info->cdhash)) {

@@ -5,6 +5,10 @@ pub struct SignatureInspection {
     pub valid: bool,
     pub team_id: Option<String>,
     pub signing_id: Option<String>,
+    /// SHA-1 of the leaf signing certificate. This is a stable local
+    /// code-signing identity used in Security.framework requirements, not a
+    /// per-build cdhash.
+    pub leaf_certificate_sha1: Option<String>,
     pub cdhash: Vec<u8>,
     pub diagnostic: Option<String>,
 }
@@ -27,6 +31,7 @@ impl CodeSignatureInspector for NativeCodeSignatureInspector {
             valid: false,
             team_id: [0; 128],
             signing_id: [0; 256],
+            leaf_certificate_sha1: [0; 41],
             cdhash: [0; 20],
             cdhash_len: 0,
         };
@@ -49,6 +54,7 @@ impl CodeSignatureInspector for NativeCodeSignatureInspector {
             valid: raw.valid,
             team_id: c_string(&raw.team_id),
             signing_id: c_string(&raw.signing_id),
+            leaf_certificate_sha1: c_string(&raw.leaf_certificate_sha1),
             cdhash: raw.cdhash[..raw.cdhash_len].to_vec(),
             diagnostic: c_string(&error),
         })
@@ -84,6 +90,7 @@ struct RawSignatureInfo {
     valid: bool,
     team_id: [std::ffi::c_char; 128],
     signing_id: [std::ffi::c_char; 256],
+    leaf_certificate_sha1: [std::ffi::c_char; 41],
     cdhash: [u8; 20],
     cdhash_len: usize,
 }

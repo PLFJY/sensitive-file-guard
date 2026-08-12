@@ -13,8 +13,8 @@ expected_arch=${EXPECTED_ARCH:-$(uname -m)}
 signing_mode=${VERIFY_SIGNING_MODE:-release}
 
 case "$signing_mode" in
-    release|local) ;;
-    *) echo "VERIFY_SIGNING_MODE must be release or local" >&2; exit 2 ;;
+    release|local|self-use) ;;
+    *) echo "VERIFY_SIGNING_MODE must be release, local, or self-use" >&2; exit 2 ;;
 esac
 
 for required in \
@@ -54,6 +54,15 @@ if [ "$signing_mode" = release ]; then
     ! grep -q 'com.apple.developer.endpoint-security.client' "$work/host.entitlements"
     grep -q 'com.apple.developer.endpoint-security.client' "$work/extension.entitlements"
     ! grep -q 'com.apple.developer.system-extension.install' "$work/extension.entitlements"
+elif [ "$signing_mode" = self-use ]; then
+    test ! -f "$app/Contents/embedded.provisionprofile"
+    test ! -f "$extension/Contents/embedded.provisionprofile"
+    grep -q 'com.apple.developer.system-extension.install' "$work/host.entitlements"
+    ! grep -q 'com.apple.developer.endpoint-security.client' "$work/host.entitlements"
+    grep -q 'com.apple.developer.endpoint-security.client' "$work/extension.entitlements"
+    ! grep -q 'com.apple.developer.system-extension.install' "$work/extension.entitlements"
+    test -f "$app/Contents/Resources/SELF_USE_SIP_OFF.txt"
+    grep -q 'SELF-USE / SIP-OFF' "$app/Contents/Resources/SELF_USE_SIP_OFF.txt"
 else
     ! grep -q 'com.apple.developer.system-extension.install' "$work/host.entitlements"
     ! grep -q 'com.apple.developer.endpoint-security.client' "$work/host.entitlements"

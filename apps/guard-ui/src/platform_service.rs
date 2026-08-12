@@ -120,6 +120,26 @@ pub struct MacSetupReadiness {
     pub explanation: String,
 }
 
+#[cfg(target_os = "macos")]
+fn self_use_bundle_marker_present() -> bool {
+    std::env::current_exe().ok().is_some_and(|executable| {
+        executable
+            .parent()
+            .and_then(std::path::Path::parent)
+            .is_some_and(|contents| contents.join("Resources/SELF_USE_SIP_OFF.txt").is_file())
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn sip_is_disabled() -> anyhow::Result<bool> {
+    let output = std::process::Command::new("csrutil")
+        .arg("status")
+        .output()?;
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .to_ascii_lowercase()
+        .contains("disabled"))
+}
+
 pub fn overview_detail(
     daemon: Option<&guard_ipc::StatusInfo>,
     overview: &PlatformOverview,
@@ -207,10 +227,21 @@ pub const fn protection_switch_subtitle() -> &'static str {
 
 #[cfg(target_os = "macos")]
 pub fn mac_setup_readiness() -> MacSetupReadiness {
+    let self_use = self_use_bundle_marker_present();
+    if self_use && !sip_is_disabled().unwrap_or(false) {
+        return MacSetupReadiness {
+            can_request_extension_install: false,
+            explanation: "这是 SIP-off 自用构建，但当前 SIP 仍处于开启状态。请在 macOS Recovery 中手动执行 csrutil disable，重启后再回来安装扩展；Guard 不会也不能替你修改 SIP。".into(),
+        };
+    }
     match platform_macos::system_extension::host_install_entitlement_present() {
         Ok(true) => MacSetupReadiness {
             can_request_extension_install: true,
-            explanation: "此应用已具备请求 macOS 安装防护扩展的签名权限。点击“安装防护扩展”后，按 macOS 弹窗或系统设置中的提示批准即可。".into(),
+            explanation: if self_use {
+                "SIP-off 自用模式已就绪：SIP 已关闭且防护扩展安装 entitlement 存在。点击“安装防护扩展”后，按 macOS 弹窗或系统设置提示批准。还需要手动运行一次：sudo systemextensionsctl developer on。".into()
+            } else {
+                "此应用已具备请求 macOS 安装防护扩展的签名权限。点击“安装防护扩展”后，按 macOS 弹窗或系统设置中的提示批准即可。".into()
+            },
         },
         Ok(false) => MacSetupReadiness {
             can_request_extension_install: false,

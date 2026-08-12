@@ -10,15 +10,30 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH= cd -- "$script_dir/../.." && pwd)
 build_root=${MACOS_RELEASE_ROOT:-"$repo_dir/build/macos-release"}
 app="$build_root/Guard.app"
-identity=${SIGNING_IDENTITY:?SIGNING_IDENTITY is required}
-team=${DEVELOPMENT_TEAM:?DEVELOPMENT_TEAM is required}
 version=${GUARD_VERSION:-0.1.0}
 architecture=$(uname -m)
 local_only=${LOCAL_SIGNING_ONLY:-0}
+self_use=${SELF_USE_SIP_OFF:-0}
 
 case "$local_only" in 0|1) ;; *) echo "LOCAL_SIGNING_ONLY must be 0 or 1" >&2; exit 2 ;; esac
+case "$self_use" in 0|1) ;; *) echo "SELF_USE_SIP_OFF must be 0 or 1" >&2; exit 2 ;; esac
+if [ "$local_only" = 1 ] && [ "$self_use" = 1 ]; then
+    echo "LOCAL_SIGNING_ONLY and SELF_USE_SIP_OFF are mutually exclusive" >&2
+    exit 2
+fi
+if [ "$self_use" = 1 ]; then
+    identity=${SELF_USE_SIGNING_IDENTITY:?SELF_USE_SIGNING_IDENTITY is required for SELF_USE_SIP_OFF=1}
+    signing_mode=self-use
+elif [ "$local_only" = 1 ]; then
+    identity=${SIGNING_IDENTITY:?SIGNING_IDENTITY is required}
+    signing_mode=local
+else
+    identity=${SIGNING_IDENTITY:?SIGNING_IDENTITY is required}
+    team=${DEVELOPMENT_TEAM:?DEVELOPMENT_TEAM is required}
+    signing_mode=release
+fi
 case "$build_root" in /|"$repo_dir") echo "unsafe MACOS_RELEASE_ROOT: $build_root" >&2; exit 2 ;; esac
-if [ "$local_only" != 1 ]; then
+if [ "$signing_mode" = release ]; then
     : "${HOST_PROVISIONING_PROFILE:?HOST_PROVISIONING_PROFILE is required}"
     : "${EXTENSION_PROVISIONING_PROFILE:?EXTENSION_PROVISIONING_PROFILE is required}"
     test -f "$HOST_PROVISIONING_PROFILE" || {
@@ -29,6 +44,11 @@ if [ "$local_only" != 1 ]; then
         echo "extension provisioning profile not found: $EXTENSION_PROVISIONING_PROFILE" >&2
         exit 2
     }
+fi
+
+if [ "$signing_mode" = self-use ]; then
+    printf '%s\n' 'SELF-USE / SIP-OFF: local entitlement-bearing build; not notarized or distributable' \
+        >"$app/Contents/Resources/SELF_USE_SIP_OFF.txt"
 fi
 for command_name in codesign ditto file; do
     command -v "$command_name" >/dev/null 2>&1 || {
@@ -45,7 +65,7 @@ extension=$(find "$app/Contents/Library/SystemExtensions" -maxdepth 1 \
     -type d -name '*.systemextension' -print | head -n 1)
 test -n "$extension" || { echo "system extension is missing" >&2; exit 2; }
 
-if [ "$local_only" != 1 ]; then
+if [ "$signing_mode" = release ]; then
     cp "$HOST_PROVISIONING_PROFILE" "$app/Contents/embedded.provisionprofile"
     cp "$EXTENSION_PROVISIONING_PROFILE" \
         "$extension/Contents/embedded.provisionprofile"
@@ -75,7 +95,7 @@ codesign --force --sign "$identity" --options runtime $timestamp_flag \
     --identifier "$app_id.guardctl" "$app/Contents/MacOS/guardctl"
 codesign --force --sign "$identity" --options runtime $timestamp_flag \
     --identifier "$app_id.guard-notify" "$app/Contents/MacOS/guard-notify"
-if [ "$local_only" = 1 ]; then
+if [ "$signing_mode" = local ]; then
     # Restricted system-extension and Endpoint Security entitlements require
     # matching provisioning profiles. Omitting them makes this explicitly
     # local-only artifact executable for runtime/upgrade smoke tests.
@@ -87,15 +107,17 @@ else
         --entitlements "$repo_dir/packaging/macos/GuardES.entitlements" "$extension"
     codesign --force --sign "$identity" --options runtime $timestamp_flag \
         --entitlements "$repo_dir/packaging/macos/Guard.entitlements" "$app"
-    verify_signing_mode=release
+    verify_signing_mode=$signing_mode
 fi
 
 VERIFY_SIGNING_MODE="$verify_signing_mode" "$script_dir/verify-bundle.sh" "$app"
-signed_team=$(codesign -dvv "$app" 2>&1 | sed -n 's/^TeamIdentifier=//p')
-test "$signed_team" = "$team" || {
-    echo "signed TeamIdentifier '$signed_team' does not match '$team'" >&2
-    exit 2
-}
+if [ "$signing_mode" = release ]; then
+    signed_team=$(codesign -dvv "$app" 2>&1 | sed -n 's/^TeamIdentifier=//p')
+    test "$signed_team" = "$team" || {
+        echo "signed TeamIdentifier '$signed_team' does not match '$team'" >&2
+        exit 2
+    }
+fi
 
 archive="$build_root/Guard-$version-$architecture.zip"
 rm -f -- "$archive"
@@ -103,6 +125,8 @@ ditto -c -k --keepParent "$app" "$archive"
 echo "release bundle: $app"
 echo "release archive: $archive"
 echo "tested architecture claim: $architecture only"
-if [ "$local_only" = 1 ]; then
+if [ "$signing_mode" = local ]; then
     echo "LOCAL SIGNING ONLY: provisioning, activation, notarization, and distribution remain BLOCKED"
+elif [ "$signing_mode" = self-use ]; then
+    echo "SELF-USE SIP-OFF: entitlement-bearing local build created; run scripts/macos/self-use-preflight.sh before activation"
 fi
