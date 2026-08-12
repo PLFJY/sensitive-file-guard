@@ -1,4 +1,6 @@
-# macOS Endpoint Security authorization backend
+# macOS Endpoint Security 授权后端（技术参考）
+
+> macOS 自用安装请阅读[中文 macOS 指南](INSTALL_MACOS.md)。
 
 Phase 03 implements the narrow `ES_EVENT_TYPE_AUTH_OPEN` authorization
 primitive. Phase 04 additionally subscribes to `NOTIFY_FORK`, `NOTIFY_EXEC`,

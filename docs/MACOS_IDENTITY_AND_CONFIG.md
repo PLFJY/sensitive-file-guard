@@ -1,4 +1,6 @@
-# macOS process identity, browser trust, and configuration
+# macOS 进程身份、浏览器信任与配置（技术参考）
+
+> macOS 自用安装请阅读[中文 macOS 指南](INSTALL_MACOS.md)。
 
 Phase 04 maps Endpoint Security facts to the existing portable process model.
 The authorization path never uses a process basename. Its stable identity is

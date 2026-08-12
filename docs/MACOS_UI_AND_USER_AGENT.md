@@ -1,4 +1,6 @@
-# macOS GTK control center and pending helper
+# macOS GTK 控制中心与待处理 helper（技术参考）
+
+> macOS 自用安装请阅读[中文 macOS 指南](INSTALL_MACOS.md)。
 
 The macOS product keeps the existing GTK4/libadwaita control center. Native
 code is limited to operating-system boundaries: Endpoint Security,

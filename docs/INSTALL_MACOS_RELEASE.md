@@ -1,4 +1,6 @@
-# macOS Alpha release, update, and recovery
+# macOS Alpha 发布、更新与恢复（历史参考）
+
+> 当前自用实验请阅读[中文 macOS 指南](INSTALL_MACOS.md)；本文件不是自用部署入口。
 
 This is the release packaging path. The development bundle remains separate and
 may resolve GTK from Homebrew. A release bundle copies only recursively reached

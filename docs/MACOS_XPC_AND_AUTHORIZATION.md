@@ -1,4 +1,6 @@
-# macOS authenticated XPC and human authorization
+# macOS authenticated XPC 与人工授权（技术参考）
+
+> macOS 自用安装请阅读[中文 macOS 指南](INSTALL_MACOS.md)。
 
 The macOS control channel is a single NSXPC method that exchanges bounded
 `Data` values containing the existing versioned `guard-ipc` JSON envelope. It

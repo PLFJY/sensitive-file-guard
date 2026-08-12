@@ -1,4 +1,6 @@
-# macOS development build
+# macOS 开发构建（历史参考）
+
+> 当前构建和部署请先阅读[中文构建与部署手册](构建与部署手册.md)；本文件不是安装入口。
 
 The development `Guard.app` contains the Endpoint Security extension, GTK
 control center, authenticated XPC clients, pending helper, and browser/SSH

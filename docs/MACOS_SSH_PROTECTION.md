@@ -1,4 +1,6 @@
-# macOS SSH private-key protection
+# macOS SSH 私钥保护（技术参考）
+
+> macOS 自用安装请阅读[中文 macOS 指南](INSTALL_MACOS.md)。
 
 The macOS Endpoint Security backend treats an explicitly enrolled SSH private
 key as an `AUTH_OPEN` disclosure gate. The core invariant is that a process

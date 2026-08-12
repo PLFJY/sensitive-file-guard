@@ -1,4 +1,6 @@
-# macOS namespace mediation and enforcement health
+# macOS 命名空间调解与防护健康（技术参考）
+
+> macOS 自用安装请阅读[中文 macOS 指南](INSTALL_MACOS.md)。
 
 The macOS extension subscribes to `AUTH_OPEN`, `AUTH_LINK`, and `AUTH_RENAME`.
 All authorization responses use Endpoint Security with caching disabled.

@@ -1,4 +1,6 @@
-# Platform boundary architecture
+# 平台边界架构（技术参考）
+
+> 用户流程请阅读[中文构建与部署手册](构建与部署手册.md)。本文件集中说明跨平台边界。
 
 ## Purpose
 

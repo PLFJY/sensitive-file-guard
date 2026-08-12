@@ -1,4 +1,6 @@
-# macOS browser protection and migration
+# macOS 浏览器保护与迁移（技术参考）
+
+> macOS 自用安装请阅读[中文 macOS 指南](INSTALL_MACOS.md)。
 
 The macOS Endpoint Security extension classifies configured browser resources
 before each protected `AUTH_OPEN`, resolves the opener from ES audit/process

@@ -1,4 +1,6 @@
-# Browser migration model
+# 浏览器迁移模型（技术参考）
+
+> 中文构建、部署和用户操作以[中文文档目录](README.md)为准。本文件不是安装教程。
 
 Browser profile protection is a pre-open firewall. The outcome depends on the
 daemon-verified executable identity of the opener, not its basename, command

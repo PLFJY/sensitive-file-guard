@@ -1,4 +1,6 @@
-# SSH private-key access model
+# SSH 私钥访问模型（技术参考）
+
+> 中文构建、部署和用户操作以[中文文档目录](README.md)为准。本文件不是安装教程。
 
 Both backends mediate an enrolled SSH private key before a new reader receives
 file data. Policy uses exact key identity, owner UID, reader PID/start token,

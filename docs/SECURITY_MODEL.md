@@ -1,4 +1,6 @@
-# Sensitive Data Firewall — V1 Security Model
+# 敏感文件防火墙 V1 安全模型（技术参考）
+
+> 用户流程请阅读[中文文档目录](README.md)。新的用户可见命令以中文主线为准。
 
 This document defines the guarantees, non-goals, and known limitations of the
 Sensitive Data Firewall. Shared policy invariants apply to both platform
