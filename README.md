@@ -17,6 +17,7 @@ macOS 自用路径是当前首选开发路径，故意不等待 Apple provisioni
 - [构建与部署总手册](docs/构建与部署手册.md)
 - [macOS 自用保护启用指南](docs/macOS安装指南.md)
 - [Linux 安装指南](docs/Linux安装指南.md)
+- [Linux 技术说明](docs/Linux技术说明.md)
 - [安全模型](docs/安全模型.md)
 - [macOS 阶段报告](reports/mac/)
 

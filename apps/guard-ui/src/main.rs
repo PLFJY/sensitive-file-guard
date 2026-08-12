@@ -271,6 +271,17 @@ fn build_ui(app: &adw::Application, pending_only: bool, layout_smoke_page: Optio
     stack.add_titled(&overview, Some("overview"), "Overview");
     stack.add_titled(&protection, Some("protection"), "Protection");
     stack.add_titled(&log, Some("log"), "Security Log");
+    let refresh_status = gtk::Button::with_label("刷新状态");
+    refresh_status.set_tooltip_text(Some(
+        "刷新防护设置、权限、浏览器保护、SSH Key 保护和服务健康状态",
+    ));
+    refresh_status.add_css_class("suggested-action");
+    refresh_status.set_halign(gtk::Align::End);
+    refresh_status.set_valign(gtk::Align::End);
+    refresh_status.set_margin_end(18);
+    refresh_status.set_margin_bottom(18);
+    refresh_status.set_visible(false);
+
     let nav = gtk::ListBox::new();
     nav.set_selection_mode(gtk::SelectionMode::Single);
     for title in ["Overview", "Protection", "Security Log"] {
@@ -278,13 +289,16 @@ fn build_ui(app: &adw::Application, pending_only: bool, layout_smoke_page: Optio
     }
     nav.select_row(nav.row_at_index(0).as_ref());
     let stack_for_nav = stack.clone();
+    let refresh_for_nav = refresh_status.clone();
     nav.connect_row_selected(move |_, row| {
         if let Some(row) = row {
-            stack_for_nav.set_visible_child_name(match row.index() {
+            let page = match row.index() {
                 1 => "protection",
                 2 => "log",
                 _ => "overview",
-            });
+            };
+            stack_for_nav.set_visible_child_name(page);
+            refresh_for_nav.set_visible(page == "protection");
         }
     });
     nav.set_width_request(SIDEBAR_WIDTH);
@@ -304,10 +318,27 @@ fn build_ui(app: &adw::Application, pending_only: bool, layout_smoke_page: Optio
     header.set_title_widget(Some(&title));
     root.append(&header);
     root.append(&split);
+    let overlay = gtk::Overlay::new();
+    overlay.set_child(Some(&root));
+    overlay.add_overlay(&refresh_status);
     let window = adw::ApplicationWindow::new(app);
     window.set_title(Some("Sensitive File Guard"));
     window.set_default_size(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT);
-    window.set_content(Some(&root));
+    window.set_content(Some(&overlay));
+    let state_for_refresh = state.clone();
+    let refresh_window = window.clone();
+    refresh_status.connect_clicked(move |button| {
+        button.set_sensitive(false);
+        // This is a complete authoritative status refresh. It is deliberately
+        // separate from the inline native-browser discovery action.
+        refresh_browser_sources(&state_for_refresh);
+        refresh_state(&state_for_refresh, &refresh_window, false);
+        let button = button.clone();
+        glib::timeout_add_seconds_local(1, move || {
+            button.set_sensitive(true);
+            glib::ControlFlow::Break
+        });
+    });
     window.present();
 
     if let Some(page) = layout_smoke_page {
@@ -494,10 +525,6 @@ fn protection_page(state: &UiState) -> gtk::Box {
         });
         *state.helper.borrow_mut() = Some(helper.clone());
         helper_group.add(&helper);
-        let settings = gtk::Button::with_label("管理登录项");
-        settings.set_halign(gtk::Align::Start);
-        settings.connect_clicked(|_| platform_service::open_user_agent_settings());
-        helper_group.add(&settings);
         page.append(&helper_group);
     }
     let browsers_heading = gtk::Label::new(Some("Protected browsers"));

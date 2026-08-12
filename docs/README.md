@@ -10,6 +10,7 @@
 ## 平台参考
 
 - [平台架构](平台架构.md)
+- [Linux 技术说明](Linux技术说明.md)
 - [macOS Endpoint Security 技术说明](macOS技术说明.md)
 - [SSH 访问模型](SSH访问模型.md)
 
