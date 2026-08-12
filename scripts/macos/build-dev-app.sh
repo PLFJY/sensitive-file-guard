@@ -131,6 +131,10 @@ render_plist packaging/macos/Guard.Info.plist.in "$app_bundle/Contents/Info.plis
 render_plist packaging/macos/GuardES.Info.plist.in "$extension_bundle/Contents/Info.plist"
 render_plist packaging/macos/GuardNotify.LaunchAgent.plist.in \
     "$app_bundle/Contents/Library/LaunchAgents/$user_agent_plist_name"
+mkdir -p "$app_bundle/Contents/Resources"
+"$script_dir/build-app-icon.sh" \
+    "$repo_dir/data/io.github.plfjy.SensitiveFileGuard.svg" \
+    "$app_bundle/Contents/Resources/Guard.icns"
 
 if [ -n "${HOST_PROVISIONING_PROFILE:-}" ] || [ -n "${EXTENSION_PROVISIONING_PROFILE:-}" ]; then
     : "${HOST_PROVISIONING_PROFILE:?both host and extension provisioning profiles are required}"
@@ -148,7 +152,6 @@ if [ -n "${HOST_PROVISIONING_PROFILE:-}" ] || [ -n "${EXTENSION_PROVISIONING_PRO
 fi
 
 if [ "$self_use" = 1 ]; then
-    mkdir -p "$app_bundle/Contents/Resources"
     printf '%s\n%s\n' \
         'SELF-USE / SIP-OFF development bundle; not notarized or distributable' \
         'SAFETY_GATE=mac-auth-scope-v1' \

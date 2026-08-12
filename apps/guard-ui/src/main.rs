@@ -25,6 +25,7 @@ const DEFAULT_WINDOW_HEIGHT: i32 = 560;
 const SIDEBAR_WIDTH: i32 = 176;
 const SIDEBAR_POSITION: i32 = 192;
 const SUMMARY_WIDTH_CHARS: i32 = 72;
+const STATUS_SUBTITLE_LINES: i32 = 3;
 const _: () = {
     assert!(DEFAULT_WINDOW_WIDTH <= 800);
     assert!(DEFAULT_WINDOW_HEIGHT <= 600);
@@ -141,6 +142,13 @@ fn main() {
     }
     let pending_only = std::env::args().any(|arg| arg == PENDING_ONLY_ARG);
     let packaging_smoke = std::env::args().any(|arg| arg == "--packaging-smoke");
+    let layout_smoke_page = if std::env::args().any(|arg| arg == "--ui-layout-smoke-protection") {
+        Some("protection")
+    } else if std::env::args().any(|arg| arg == "--ui-layout-smoke") {
+        Some("overview")
+    } else {
+        None
+    };
     adw::init().expect("libadwaita initialization");
     if packaging_smoke {
         println!("Guard bundled GTK runtime initialized");
@@ -150,12 +158,12 @@ fn main() {
     // deprecated GtkSettings dark-theme toggle from the desktop session.
     adw::StyleManager::default().set_color_scheme(adw::ColorScheme::Default);
     let app = adw::Application::new(Some(APP_ID), gio::ApplicationFlags::empty());
-    app.connect_activate(move |app| build_ui(app, pending_only));
+    app.connect_activate(move |app| build_ui(app, pending_only, layout_smoke_page));
     let process_name = std::env::args().next().unwrap_or_else(|| "guard-ui".into());
     app.run_with_args(&[process_name]);
 }
 
-fn build_ui(app: &adw::Application, pending_only: bool) {
+fn build_ui(app: &adw::Application, pending_only: bool, layout_smoke_page: Option<&'static str>) {
     // `guard-notify` can activate the application more than once while an
     // import is pending. GApplication routes those activations to this primary
     // process, so creating another UiState here would poll the same pending ID
@@ -191,25 +199,34 @@ fn build_ui(app: &adw::Application, pending_only: bool) {
     let events = gtk::ListBox::new();
     events.set_selection_mode(gtk::SelectionMode::None);
     let extension_status = adw::ActionRow::new();
+    configure_status_row(&extension_status);
     extension_status.set_title("防护扩展");
     extension_status.set_subtitle("正在检查安装状态…");
     let fda_status = adw::ActionRow::new();
+    configure_status_row(&fda_status);
     fda_status.set_title("完全磁盘访问");
     fda_status.set_subtitle("正在检查权限状态…");
     let sip_status = adw::ActionRow::new();
+    configure_status_row(&sip_status);
     sip_status.set_title("SIP");
     sip_status.set_subtitle("正在检查…");
     let developer_mode_status = adw::ActionRow::new();
+    configure_status_row(&developer_mode_status);
     developer_mode_status.set_title("System Extension developer mode");
     developer_mode_status.set_subtitle("正在检查…");
     let host_entitlement_status = adw::ActionRow::new();
+    configure_status_row(&host_entitlement_status);
     host_entitlement_status.set_title("宿主安装 entitlement");
     host_entitlement_status.set_subtitle("正在检查最终签名…");
     let endpoint_security_entitlement_status = adw::ActionRow::new();
+    configure_status_row(&endpoint_security_entitlement_status);
     endpoint_security_entitlement_status.set_title("Endpoint Security entitlement");
     endpoint_security_entitlement_status.set_subtitle("正在检查包内扩展的最终签名…");
     let mac_setup_message = gtk::Label::new(None);
     mac_setup_message.set_wrap(true);
+    mac_setup_message.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    mac_setup_message.set_max_width_chars(SUMMARY_WIDTH_CHARS);
+    mac_setup_message.set_hexpand(true);
     mac_setup_message.set_xalign(0.0);
 
     let state = UiState {
@@ -243,6 +260,10 @@ fn build_ui(app: &adw::Application, pending_only: bool) {
     let protection = scroll_page(protection_page(&state));
     let log = scroll_page(log_page(&state));
     let stack = gtk::Stack::new();
+    // A hidden page must not enlarge the whole control center when a long
+    // extension diagnostic arrives after activation.
+    stack.set_hhomogeneous(false);
+    stack.set_vhomogeneous(false);
     stack.add_titled(&overview, Some("overview"), "Overview");
     stack.add_titled(&protection, Some("protection"), "Protection");
     stack.add_titled(&log, Some("log"), "Security Log");
@@ -285,8 +306,32 @@ fn build_ui(app: &adw::Application, pending_only: bool) {
     window.set_content(Some(&root));
     window.present();
 
-    load_configuration(&state);
-    start_polling(state, window, pending_only);
+    if let Some(page) = layout_smoke_page {
+        apply_layout_smoke_state(&state);
+        stack.set_visible_child_name(page);
+    } else {
+        load_configuration(&state);
+        start_polling(state, window, pending_only);
+    }
+}
+
+fn configure_status_row(row: &adw::ActionRow) {
+    row.set_title_lines(2);
+    row.set_subtitle_lines(STATUS_SUBTITLE_LINES);
+}
+
+fn apply_layout_smoke_state(state: &UiState) {
+    let long_status = "Active — system extension activation completed; authenticated control channel responsive; Endpoint Security AUTH_OPEN, AUTH_LINK, and AUTH_RENAME subscriptions active";
+    state.status.set_text("PROTECTED");
+    state.detail.set_text(long_status);
+    state.extension_status.set_subtitle(long_status);
+    state.fda_status.set_subtitle(long_status);
+    state.developer_mode_status.set_subtitle(long_status);
+    state.host_entitlement_status.set_subtitle(long_status);
+    state
+        .endpoint_security_entitlement_status
+        .set_subtitle(long_status);
+    state.mac_setup_message.set_text(long_status);
 }
 
 fn scroll_page(content: gtk::Box) -> gtk::ScrolledWindow {
@@ -399,6 +444,7 @@ fn protection_page(state: &UiState) -> gtk::Box {
         let helper_group = adw::PreferencesGroup::new();
         helper_group.set_title("可选：需要确认时自动打开 Guard");
         let helper = adw::SwitchRow::new();
+        helper.set_subtitle_lines(STATUS_SUBTITLE_LINES);
         helper.set_title("遇到确认请求时自动打开 Guard");
         helper.set_subtitle("建议开启。这只是一个登录项，用于显示浏览器迁移或 SSH 密钥确认；它不会安装扩展，也不会授予权限。");
         helper.set_active(false);

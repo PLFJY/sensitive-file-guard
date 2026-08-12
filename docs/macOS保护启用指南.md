@@ -100,6 +100,17 @@ LIVE_ES_ACCEPTANCE=I_ACCEPT_SYSTEM_EXTENSION_RISK
 中的长状态摘要会按内容区宽度自动换行。若仍看到旧的大窗口，说明打开的不是最新构建，
 先退出所有 Guard 进程，再确认 `/Applications/Guard.app` 已被最新验收包替换。
 
+扩展激活后出现的长状态不会让隐藏的 Protection 页面参与整个窗口的最小宽度计算；动态
+subtitle 最多显示三行。可在不连接或激活扩展的情况下运行回归测试：
+
+```sh
+scripts/macos/test-ui-layout.sh build/macos-release/Guard.app
+```
+
+macOS 图标由 Linux 使用的同一个
+`data/io.github.plfjy.SensitiveFileGuard.svg` 确定性生成 `Guard.icns`。最终 bundle 验证会
+同时检查 `CFBundleIconFile` 和 ICNS 文件，避免再次产生 Finder/Dock 空白图标。
+
 ## 紧急恢复
 
 如果启用扩展后普通软件无法打开：

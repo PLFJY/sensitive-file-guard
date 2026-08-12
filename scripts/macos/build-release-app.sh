@@ -74,6 +74,9 @@ done
 SELF_USE_SIP_OFF=0 MACOS_BUILD_ROOT="$build_root" BUILD_PROFILE=release SKIP_SIGNING=1 \
     "$script_dir/build-dev-app.sh"
 "$script_dir/bundle-gtk-runtime.sh" "$app"
+"$script_dir/build-app-icon.sh" \
+    "$repo_dir/data/io.github.plfjy.SensitiveFileGuard.svg" \
+    "$app/Contents/Resources/Guard.icns"
 
 if [ "$signing_mode" = self-use ]; then
     printf '%s\n%s\n' \

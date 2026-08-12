@@ -8,6 +8,8 @@
     <string>Guard</string>
     <key>CFBundleIdentifier</key>
     <string>@APP_BUNDLE_ID@</string>
+    <key>CFBundleIconFile</key>
+    <string>Guard.icns</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>

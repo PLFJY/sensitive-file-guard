@@ -23,6 +23,7 @@ for required in \
     "$app/Contents/MacOS/guard-notify" \
     "$app/Contents/Frameworks" \
     "$app/Contents/Resources/guard-release-runtime" \
+    "$app/Contents/Resources/Guard.icns" \
     "$app/Contents/Resources/gdk-pixbuf/loaders.cache.in" \
     "$app/Contents/Resources/share/glib-2.0/schemas/gschemas.compiled" \
     "$app/Contents/Resources/THIRD_PARTY_NOTICES.md"; do
@@ -37,6 +38,8 @@ agent=$(find "$app/Contents/Library/LaunchAgents" -maxdepth 1 -type f \
 test -n "$agent" || { echo "embedded LaunchAgent is missing" >&2; exit 2; }
 
 plutil -lint "$app/Contents/Info.plist" "$extension/Contents/Info.plist" "$agent" >/dev/null
+test "$(plutil -extract CFBundleIconFile raw "$app/Contents/Info.plist")" = Guard.icns
+file "$app/Contents/Resources/Guard.icns" | grep -q 'Mac OS X icon'
 codesign --verify --strict --verbose=2 "$extension"
 codesign --verify --strict --verbose=2 "$app/Contents/MacOS/guardctl"
 codesign --verify --strict --verbose=2 "$app/Contents/MacOS/guard-notify"
