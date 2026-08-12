@@ -12,13 +12,18 @@ if rg -n 'NetworkExtension|NEFilter|systemextensionsctl' \
 fi
 if rg -n 'ES_EVENT_TYPE_(AUTH|NOTIFY)_[A-Z_]+' \
     "$repo_dir/native/macos/endpoint_security_bridge.c" \
-    | rg -v 'ES_EVENT_TYPE_(AUTH_OPEN|NOTIFY_FORK|NOTIFY_EXEC|NOTIFY_EXIT)'; then
+    | rg -v 'ES_EVENT_TYPE_(AUTH_OPEN|AUTH_LINK|AUTH_RENAME|NOTIFY_FORK|NOTIFY_EXEC|NOTIFY_EXIT)'; then
     echo "macOS boundary violation: unsupported Endpoint Security event subscription" >&2
     failed=1
 fi
-if rg -n 'es_respond_auth_result|es_copy_message|es_free_message' \
+if rg -n 'es_copy_message|es_free_message' \
     "$repo_dir/native/macos/endpoint_security_bridge.c"; then
     echo "macOS boundary violation: wrong or deprecated Endpoint Security response/lifetime API" >&2
+    failed=1
+fi
+if ! rg -U -q 'es_respond_auth_result\([^;]*false' \
+    "$repo_dir/native/macos/endpoint_security_bridge.c"; then
+    echo "macOS boundary violation: namespace response must hardcode cache=false" >&2
     failed=1
 fi
 if rg -n 'O_RDONLY|O_RDWR|O_WRONLY' \

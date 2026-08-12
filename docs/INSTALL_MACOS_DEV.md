@@ -80,6 +80,9 @@ and FREAD-only lease behavior are described in
 SSH private-key enrollment, manual read approval, short process-tree leases,
 and the deliberately unsupported specialized agent shortcut are described in
 [the macOS SSH-protection guide](MACOS_SSH_PROTECTION.md).
+Hardlink/rename mediation, bounded alias repair, ES sequence-gap handling, and
+semantic health counters are described in
+[the macOS namespace/health guide](MACOS_NAMESPACE_AND_HEALTH.md).
 
 Entitlement-independent SSH fixture validation uses a newly generated key only:
 
@@ -92,3 +95,8 @@ On an installed, activated, provisioned test host, run
 `scripts/macos/run-ssh-policy-acceptance.sh build/macos/Guard.app` for the real
 Block/Allow/process-tree flow. The script refuses to continue when authenticated
 XPC/Endpoint Security is unavailable and never selects a key from `~/.ssh`.
+
+Run `scripts/macos/run-namespace-health-acceptance.sh` for disposable Chrome
+hardlink, symlink, rename-out, parent-rename, status-counter, and real-browser
+atomic-update regression checks. It has the same provisioned-host prerequisite
+and exits 77 before fixture creation when that prerequisite is absent.

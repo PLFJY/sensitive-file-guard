@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{mpsc, Arc, Mutex, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -34,14 +34,53 @@ pub(crate) trait ResponseSink: Send + Sync {
 
 pub(crate) struct HealthTracker {
     active: AtomicBool,
+    degraded: AtomicBool,
     diagnostic: Mutex<Option<String>>,
+    sequence_gaps: AtomicU64,
+    global_sequence_gaps: AtomicU64,
+    pending_created: AtomicU64,
+    pending_resolved_allow: AtomicU64,
+    pending_resolved_deny: AtomicU64,
+    pending_timed_out: AtomicU64,
+    insufficient_deadline: AtomicU64,
+    late_responses: AtomicU64,
+    namespace_allowed: AtomicU64,
+    namespace_denied: AtomicU64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct HealthSnapshot {
+    pub active: bool,
+    pub degraded: bool,
+    pub diagnostic: Option<String>,
+    pub sequence_gaps: u64,
+    pub global_sequence_gaps: u64,
+    pub pending_created: u64,
+    pub pending_resolved_allow: u64,
+    pub pending_resolved_deny: u64,
+    pub pending_timed_out: u64,
+    pub insufficient_deadline: u64,
+    pub late_responses: u64,
+    pub namespace_allowed: u64,
+    pub namespace_denied: u64,
 }
 
 impl HealthTracker {
     pub(crate) fn active(diagnostic: impl Into<String>) -> Self {
         Self {
             active: AtomicBool::new(true),
+            degraded: AtomicBool::new(false),
             diagnostic: Mutex::new(Some(diagnostic.into())),
+            sequence_gaps: AtomicU64::new(0),
+            global_sequence_gaps: AtomicU64::new(0),
+            pending_created: AtomicU64::new(0),
+            pending_resolved_allow: AtomicU64::new(0),
+            pending_resolved_deny: AtomicU64::new(0),
+            pending_timed_out: AtomicU64::new(0),
+            insufficient_deadline: AtomicU64::new(0),
+            late_responses: AtomicU64::new(0),
+            namespace_allowed: AtomicU64::new(0),
+            namespace_denied: AtomicU64::new(0),
         }
     }
 
@@ -50,22 +89,54 @@ impl HealthTracker {
     }
 
     pub(crate) fn degrade(&self, diagnostic: impl Into<String>) {
-        self.active.store(false, Ordering::Release);
+        self.degraded.store(true, Ordering::Release);
         self.note(diagnostic);
     }
 
     pub(crate) fn stop(&self, diagnostic: impl Into<String>) {
-        self.degrade(diagnostic);
+        self.active.store(false, Ordering::Release);
+        self.note(diagnostic);
     }
 
-    pub(crate) fn snapshot(&self) -> (bool, Option<String>) {
-        (
-            self.active.load(Ordering::Acquire),
-            self.diagnostic
+    pub(crate) fn snapshot(&self) -> HealthSnapshot {
+        HealthSnapshot {
+            active: self.active.load(Ordering::Acquire),
+            degraded: self.degraded.load(Ordering::Acquire),
+            diagnostic: self
+                .diagnostic
                 .lock()
                 .expect("health diagnostic lock")
                 .clone(),
-        )
+            sequence_gaps: self.sequence_gaps.load(Ordering::Acquire),
+            global_sequence_gaps: self.global_sequence_gaps.load(Ordering::Acquire),
+            pending_created: self.pending_created.load(Ordering::Acquire),
+            pending_resolved_allow: self.pending_resolved_allow.load(Ordering::Acquire),
+            pending_resolved_deny: self.pending_resolved_deny.load(Ordering::Acquire),
+            pending_timed_out: self.pending_timed_out.load(Ordering::Acquire),
+            insufficient_deadline: self.insufficient_deadline.load(Ordering::Acquire),
+            late_responses: self.late_responses.load(Ordering::Acquire),
+            namespace_allowed: self.namespace_allowed.load(Ordering::Acquire),
+            namespace_denied: self.namespace_denied.load(Ordering::Acquire),
+        }
+    }
+
+    pub(crate) fn sequence_gap(&self, global: bool, count: u64) {
+        self.sequence_gaps.fetch_add(count, Ordering::AcqRel);
+        if global {
+            self.global_sequence_gaps.fetch_add(count, Ordering::AcqRel);
+        }
+    }
+
+    pub(crate) fn insufficient_deadline(&self) {
+        self.insufficient_deadline.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub(crate) fn namespace_decision(&self, allow: bool) {
+        if allow {
+            self.namespace_allowed.fetch_add(1, Ordering::AcqRel);
+        } else {
+            self.namespace_denied.fetch_add(1, Ordering::AcqRel);
+        }
     }
 }
 
@@ -87,6 +158,7 @@ impl MacPendingPermission {
         responder: Box<dyn ResponseSink>,
         health: Arc<HealthTracker>,
     ) -> (Self, Weak<PendingInner>) {
+        health.pending_created.fetch_add(1, Ordering::AcqRel);
         let inner = Arc::new(PendingInner {
             terminal: AtomicU8::new(0),
             requested_flags,
@@ -125,7 +197,7 @@ pub struct ReadOnlyMacPendingPermission(MacPendingPermission);
 
 impl PendingPermission for ReadOnlyMacPendingPermission {
     fn allow(self: Box<Self>) -> anyhow::Result<()> {
-        self.0.inner.resolve_flags(ES_FFLAG_READ)
+        self.0.inner.resolve_flags(ES_FFLAG_READ, false)
     }
 
     fn deny(self: Box<Self>) -> anyhow::Result<()> {
@@ -154,10 +226,10 @@ impl Drop for MacPendingPermission {
 impl PendingInner {
     pub(crate) fn resolve(&self, allow: bool) -> anyhow::Result<()> {
         let authorized_flags = if allow { self.requested_flags } else { 0 };
-        self.resolve_flags(authorized_flags)
+        self.resolve_flags(authorized_flags, false)
     }
 
-    fn resolve_flags(&self, authorized_flags: u32) -> anyhow::Result<()> {
+    fn resolve_flags(&self, authorized_flags: u32, timed_out: bool) -> anyhow::Result<()> {
         anyhow::ensure!(
             authorized_flags & !self.requested_flags == 0,
             "Endpoint Security response attempted to authorize unrequested FFLAGS"
@@ -170,6 +242,18 @@ impl PendingInner {
         {
             anyhow::bail!("Endpoint Security permission was already resolved");
         }
+        if terminal == 1 {
+            self.health
+                .pending_resolved_allow
+                .fetch_add(1, Ordering::AcqRel);
+        } else {
+            self.health
+                .pending_resolved_deny
+                .fetch_add(1, Ordering::AcqRel);
+        }
+        if timed_out {
+            self.health.pending_timed_out.fetch_add(1, Ordering::AcqRel);
+        }
         let responder = self
             .responder
             .lock()
@@ -181,11 +265,16 @@ impl PendingInner {
         if result == ResponseCode::Success {
             Ok(())
         } else {
+            self.health.late_responses.fetch_add(1, Ordering::AcqRel);
             self.health.degrade(format!(
                 "Endpoint Security flags response failed: {result}; retained message was released"
             ));
             anyhow::bail!("Endpoint Security flags response failed: {result}")
         }
+    }
+
+    fn resolve_timeout(&self) -> anyhow::Result<()> {
+        self.resolve_flags(0, true)
     }
 
     pub(crate) fn is_terminal(&self) -> bool {
@@ -302,7 +391,7 @@ fn resolve_due(scheduled: &mut Vec<ScheduledPermission>) {
             let item = scheduled.swap_remove(index);
             if expired {
                 if let Some(permission) = item.permission.upgrade() {
-                    let _ = permission.resolve(false);
+                    let _ = permission.resolve_timeout();
                 }
             }
         } else {
@@ -410,9 +499,11 @@ mod tests {
         assert!(permission.deny().is_err());
         assert_eq!(*state.flags.lock().unwrap(), vec![0]);
         assert_eq!(state.releases.load(Ordering::Acquire), 1);
-        let (active, diagnostic) = health.snapshot();
-        assert!(!active);
-        assert!(diagnostic.unwrap().contains("Duplicate"));
+        let snapshot = health.snapshot();
+        assert!(snapshot.active);
+        assert!(snapshot.degraded);
+        assert!(snapshot.diagnostic.unwrap().contains("Duplicate"));
+        assert_eq!(snapshot.late_responses, 1);
     }
 
     #[test]
@@ -426,5 +517,27 @@ mod tests {
         Box::new(permission.into_read_only()).allow().unwrap();
         assert_eq!(*state.flags.lock().unwrap(), vec![ES_FFLAG_READ]);
         assert_eq!(state.releases.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn authorization_lifecycle_counters_are_semantic_and_race_safe() {
+        let state = Arc::new(FakeState::default());
+        let health = Arc::new(HealthTracker::active("test"));
+        let (permission, weak) = MacPendingPermission::new(
+            ES_FFLAG_READ,
+            Box::new(FakeSink(Arc::clone(&state))),
+            Arc::clone(&health),
+        );
+        assert_eq!(health.snapshot().pending_created, 1);
+        let (mut scheduler, handle) = DeadlineScheduler::start().unwrap();
+        handle.schedule(weak, Duration::ZERO).unwrap();
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(permission.allow().is_err());
+        scheduler.shutdown();
+        let snapshot = health.snapshot();
+        assert_eq!(snapshot.pending_timed_out, 1);
+        assert_eq!(snapshot.pending_resolved_deny, 1);
+        assert_eq!(snapshot.pending_resolved_allow, 0);
+        assert_eq!(state.flags.lock().unwrap().as_slice(), &[0]);
     }
 }

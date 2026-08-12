@@ -97,8 +97,24 @@ pub trait LocalTransport: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackendHealth {
     pub backend: String,
+    pub state: String,
     pub active: bool,
+    pub degraded: bool,
     pub diagnostic: Option<String>,
+    pub sequence_gaps: u64,
+    pub global_sequence_gaps: u64,
+    pub pending_created: u64,
+    pub pending_resolved_allow: u64,
+    pub pending_resolved_deny: u64,
+    pub pending_timed_out: u64,
+    pub insufficient_deadline: u64,
+    pub late_responses: u64,
+    pub namespace_allowed: u64,
+    pub namespace_denied: u64,
+    pub namespace_alias_entries: usize,
+    pub namespace_alias_capacity: usize,
+    pub namespace_index_saturated: bool,
+    pub process_graph_degraded: bool,
 }
 
 /// Portable artifact attribution input.  Quarantine mechanics remain an

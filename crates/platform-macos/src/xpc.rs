@@ -482,10 +482,11 @@ mod tests {
 
     impl XpcRequestHandler for StatusHandler {
         fn handle(&self, peer: AuthenticatedPeer, _request: Request) -> Response {
-            Response::ok(ResponseBody::Status(StatusInfo {
+            Response::ok(ResponseBody::Status(Box::new(StatusInfo {
                 version: "test".into(),
                 backend_kind: "macos-endpoint-security".into(),
                 backend_diagnostic: None,
+                backend_state: None,
                 enforcement_active: false,
                 read_only_guaranteed: Some(true),
                 status: "NOT_ENFORCING".into(),
@@ -501,6 +502,7 @@ mod tests {
                 strict_alias_scans: None,
                 strict_alias_matches: None,
                 topology_degraded: None,
+                mac_health: None,
                 protected_files: 0,
                 ssh_protected_keys: 0,
                 protected_trees: 0,
@@ -511,7 +513,7 @@ mod tests {
                 unclassified: 0,
                 audit_dropped: 0,
                 peer_uid: peer.euid,
-            }))
+            })))
         }
     }
 

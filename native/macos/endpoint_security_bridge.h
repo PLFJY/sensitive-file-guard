@@ -50,6 +50,28 @@ typedef struct {
     guard_es_process_facts_t process;
 } guard_es_auth_open_event_t;
 
+typedef struct {
+    uint32_t operation;
+    uint64_t deadline;
+    uint64_t source_dev;
+    uint64_t source_ino;
+    const uint8_t *source_path;
+    size_t source_path_len;
+    bool source_path_truncated;
+    bool destination_existing;
+    uint64_t destination_dev;
+    uint64_t destination_ino;
+    const uint8_t *destination_dir_path;
+    size_t destination_dir_path_len;
+    bool destination_dir_path_truncated;
+    const uint8_t *destination_name;
+    size_t destination_name_len;
+    const uint8_t *destination_existing_path;
+    size_t destination_existing_path_len;
+    bool destination_existing_path_truncated;
+    guard_es_process_facts_t process;
+} guard_es_namespace_event_t;
+
 typedef void (*guard_es_auth_open_callback_t)(
     void *context,
     const void *client,
@@ -62,10 +84,26 @@ typedef void (*guard_es_process_callback_t)(
     const guard_es_process_facts_t *process,
     const guard_es_process_facts_t *related_process);
 
+typedef void (*guard_es_namespace_callback_t)(
+    void *context,
+    const void *client,
+    const void *message,
+    const guard_es_namespace_event_t *event);
+
+typedef void (*guard_es_sequence_callback_t)(
+    void *context,
+    uint32_t event_kind,
+    bool has_sequence,
+    uint64_t sequence,
+    bool has_global_sequence,
+    uint64_t global_sequence);
+
 int guard_es_client_create(
     guard_es_client_t **client,
     guard_es_auth_open_callback_t callback,
     guard_es_process_callback_t process_callback,
+    guard_es_namespace_callback_t namespace_callback,
+    guard_es_sequence_callback_t sequence_callback,
     void *context);
 int guard_es_client_subscribe_required(guard_es_client_t *client);
 int guard_es_client_delete(guard_es_client_t *client);
@@ -76,6 +114,10 @@ int guard_es_respond_flags(
     const void *client,
     const void *message,
     uint32_t authorized_flags);
+int guard_es_respond_auth(
+    const void *client,
+    const void *message,
+    bool allow);
 
 uint64_t guard_mach_absolute_time(void);
 uint64_t guard_mach_ticks_to_nanos(uint64_t ticks);

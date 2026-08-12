@@ -1682,6 +1682,45 @@ mod tests {
     }
 
     #[test]
+    fn fresh_runtime_does_not_restore_pending_requests_or_memory_only_leases() {
+        let first = Fixture::new();
+        let importer = first.facts("browser-b", 70, None);
+        first.observe(importer.clone());
+        let (event, _) = first.event(
+            importer,
+            "browser-a",
+            ES_FFLAG_READ,
+            Some(Duration::from_secs(20)),
+        );
+        first.policy.handle_at(event, epoch_seconds());
+        let pending = first.policy.pending_for_uid(first.uid);
+        assert_eq!(pending.len(), 1);
+        first
+            .policy
+            .resolve_migration(&pending[0].id, first.uid, true)
+            .unwrap();
+        assert!(!first.policy.lease_infos_for_uid(first.uid).is_empty());
+
+        // A process restart constructs a new policy/runtime from configuration;
+        // only configuration is reloadable. Pending OS operations and leases
+        // are intentionally memory-only and fail closed with the old process.
+        let restarted = Fixture::new();
+        assert!(restarted.policy.pending_for_uid(restarted.uid).is_empty());
+        assert!(restarted
+            .policy
+            .ssh_pending_for_uid(restarted.uid)
+            .is_empty());
+        assert!(restarted
+            .policy
+            .lease_infos_for_uid(restarted.uid)
+            .is_empty());
+        assert_eq!(
+            restarted.policy.resource_counts(),
+            first.policy.resource_counts()
+        );
+    }
+
+    #[test]
     fn prompt_deadline_and_queue_limit_deny_fail_closed() {
         let fixture = Fixture::new();
         let now = 500;

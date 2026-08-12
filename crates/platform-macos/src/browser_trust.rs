@@ -78,7 +78,7 @@ pub struct MacBrowserTrustStore {
 
 pub struct MacProcessIdentityResolver {
     graph: std::sync::Arc<std::sync::Mutex<MacProcessGraph>>,
-    trust: std::sync::RwLock<MacBrowserTrustStore>,
+    trust: std::sync::Arc<std::sync::RwLock<MacBrowserTrustStore>>,
 }
 
 impl MacProcessIdentityResolver {
@@ -88,8 +88,15 @@ impl MacProcessIdentityResolver {
     ) -> Self {
         Self {
             graph,
-            trust: std::sync::RwLock::new(trust),
+            trust: std::sync::Arc::new(std::sync::RwLock::new(trust)),
         }
+    }
+
+    pub fn new_shared(
+        graph: std::sync::Arc<std::sync::Mutex<MacProcessGraph>>,
+        trust: std::sync::Arc<std::sync::RwLock<MacBrowserTrustStore>>,
+    ) -> Self {
+        Self { graph, trust }
     }
 
     pub fn replace_trust(&self, trust: MacBrowserTrustStore) -> anyhow::Result<()> {

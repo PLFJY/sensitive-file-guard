@@ -234,12 +234,15 @@ impl ControlHandler {
         let stats = self.policy.stats();
         let (protected_files, protected_trees) = self.policy.resource_counts();
         let enforcing = health.active && self.policy.enabled();
-        let degraded =
-            enforcing && (stats.classifier_failures > 0 || self.policy.audit_dropped() > 0);
-        Response::ok(ResponseBody::Status(StatusInfo {
+        let degraded = enforcing
+            && (health.degraded
+                || stats.classifier_failures > 0
+                || self.policy.audit_dropped() > 0);
+        Response::ok(ResponseBody::Status(Box::new(StatusInfo {
             version: env!("CARGO_PKG_VERSION").into(),
             backend_kind: "macos-endpoint-security".into(),
             backend_diagnostic: health.diagnostic,
+            backend_state: Some(health.state.clone()),
             enforcement_active: enforcing,
             read_only_guaranteed: Some(true),
             status: if !enforcing {
@@ -262,6 +265,22 @@ impl ControlHandler {
             strict_alias_scans: None,
             strict_alias_matches: None,
             topology_degraded: None,
+            mac_health: Some(Box::new(guard_ipc::MacHealthInfo {
+                es_sequence_gaps: health.sequence_gaps,
+                es_global_sequence_gaps: health.global_sequence_gaps,
+                pending_created: health.pending_created,
+                pending_resolved_allow: health.pending_resolved_allow,
+                pending_resolved_deny: health.pending_resolved_deny,
+                pending_timed_out: health.pending_timed_out,
+                insufficient_deadline: health.insufficient_deadline,
+                late_responses: health.late_responses,
+                namespace_allowed: health.namespace_allowed,
+                namespace_denied: health.namespace_denied,
+                namespace_alias_entries: health.namespace_alias_entries,
+                namespace_alias_capacity: health.namespace_alias_capacity,
+                namespace_index_saturated: health.namespace_index_saturated,
+                process_graph_degraded: health.process_graph_degraded,
+            })),
             protected_files,
             ssh_protected_keys: self.policy.ssh_key_count(),
             protected_trees,
@@ -272,7 +291,7 @@ impl ControlHandler {
             unclassified: 0,
             audit_dropped: self.policy.audit_dropped(),
             peer_uid: peer.euid,
-        }))
+        })))
     }
 }
 
@@ -317,12 +336,16 @@ pub fn run() -> ExitCode {
         }
     };
     let resources = Arc::new(MacProtectedResources::new(enabled, index));
+    let shared_trust = Arc::new(RwLock::new(trust));
+    let mut startup_error = None;
     let mut backend = match EndpointSecurityBackend::start(EndpointSecurityConfig::browser(
         Arc::clone(&resources),
+        Arc::clone(&shared_trust),
     )) {
         Ok(backend) => Some(backend),
         Err(error) => {
             eprintln!("guard-es: {error}; enforcement is not active");
+            startup_error = Some(error);
             None
         }
     };
@@ -330,7 +353,7 @@ pub fn run() -> ExitCode {
         .as_ref()
         .map(EndpointSecurityBackend::process_graph)
         .unwrap_or_else(|| Arc::new(Mutex::new(MacProcessGraph::default())));
-    let resolver = Arc::new(MacProcessIdentityResolver::new(graph, trust));
+    let resolver = Arc::new(MacProcessIdentityResolver::new_shared(graph, shared_trust));
     let audit = match open_audit_store() {
         Ok(audit) => Arc::new(audit),
         Err(error) if backend.is_none() => {
@@ -357,10 +380,44 @@ pub fn run() -> ExitCode {
     }
 
     let initial_health = backend.as_ref().map_or_else(
-        || BackendHealth {
-            backend: "endpoint-security".into(),
-            active: false,
-            diagnostic: Some("Endpoint Security client is unavailable".into()),
+        || {
+            let (state, diagnostic) = match startup_error {
+                Some(platform_macos::endpoint_security::ClientCreateError::NotPermitted) => (
+                    "REQUIRES_FULL_DISK_ACCESS",
+                    "Endpoint Security requires Full Disk Access in System Settings".to_owned(),
+                ),
+                Some(platform_macos::endpoint_security::ClientCreateError::NotEntitled)
+                | Some(platform_macos::endpoint_security::ClientCreateError::NotPrivileged) => (
+                    "REQUIRES_APPROVAL",
+                    startup_error.expect("matched above").to_string(),
+                ),
+                Some(error) => ("NOT_ENFORCING", error.to_string()),
+                None => (
+                    "NOT_ENFORCING",
+                    "Endpoint Security client is unavailable".to_owned(),
+                ),
+            };
+            BackendHealth {
+                backend: "endpoint-security".into(),
+                state: state.into(),
+                active: false,
+                degraded: false,
+                diagnostic: Some(diagnostic),
+                sequence_gaps: 0,
+                global_sequence_gaps: 0,
+                pending_created: 0,
+                pending_resolved_allow: 0,
+                pending_resolved_deny: 0,
+                pending_timed_out: 0,
+                insufficient_deadline: 0,
+                late_responses: 0,
+                namespace_allowed: 0,
+                namespace_denied: 0,
+                namespace_alias_entries: 0,
+                namespace_alias_capacity: 0,
+                namespace_index_saturated: false,
+                process_graph_degraded: false,
+            }
         },
         EndpointSecurityBackend::health,
     );
@@ -407,6 +464,9 @@ pub fn run() -> ExitCode {
             }
         }
         policy.maintenance();
+        if let Err(error) = backend.repair_if_needed() {
+            eprintln!("guard-es: bounded namespace repair failed: {error}");
+        }
         *backend_health
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = backend.health();

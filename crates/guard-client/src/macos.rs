@@ -87,7 +87,7 @@ impl<T: LocalTransport, A: DeviceOwnerAuthenticator> MacGuardClient<T, A> {
 
     pub fn status(&self) -> anyhow::Result<guard_ipc::StatusInfo> {
         self.metadata(RequestOp::Status, |body| match body {
-            ResponseBody::Status(value) => Some(value),
+            ResponseBody::Status(value) => Some(*value),
             _ => None,
         })
     }
@@ -394,7 +394,7 @@ mod tests {
             let request: Request = serde_json::from_slice(payload)?;
             self.requests.lock().unwrap().push(request.op.clone());
             let body = match request.op {
-                RequestOp::Status => ResponseBody::Status(status()),
+                RequestOp::Status => ResponseBody::Status(Box::new(status())),
                 RequestOp::PendingHelperStatus => {
                     ResponseBody::PendingHelper(guard_ipc::PendingHelperInfo {
                         running: true,
@@ -459,6 +459,7 @@ mod tests {
             version: "test".into(),
             backend_kind: "macos-endpoint-security".into(),
             backend_diagnostic: None,
+            backend_state: None,
             enforcement_active: false,
             read_only_guaranteed: Some(true),
             status: "NOT_ENFORCING".into(),
@@ -474,6 +475,7 @@ mod tests {
             strict_alias_scans: None,
             strict_alias_matches: None,
             topology_degraded: None,
+            mac_health: None,
             protected_files: 0,
             ssh_protected_keys: 0,
             protected_trees: 0,

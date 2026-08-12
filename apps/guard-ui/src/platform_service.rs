@@ -262,12 +262,9 @@ fn mac_extension_state(xpc_reachable: bool) -> String {
 
 #[cfg(target_os = "macos")]
 fn mac_full_disk_access(daemon: Option<&guard_ipc::StatusInfo>) -> String {
-    let diagnostic = daemon.and_then(|status| status.backend_diagnostic.as_deref());
-    match diagnostic {
-        Some(message) if message.contains("Full Disk Access") => "Required".into(),
-        Some(message) if message.contains("Endpoint Security client is available") => {
-            "Granted".into()
-        }
+    match daemon.and_then(|status| status.backend_state.as_deref()) {
+        Some("REQUIRES_FULL_DISK_ACCESS") => "Required".into(),
+        Some("ACTIVE" | "DEGRADED") => "Granted".into(),
         _ => "Unknown".into(),
     }
 }

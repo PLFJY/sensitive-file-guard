@@ -87,6 +87,7 @@ pub struct MacProcessGraph {
     current_by_pid: HashMap<u32, AuditProcessKey>,
     max_entries: usize,
     max_age: Duration,
+    degraded: bool,
 }
 
 impl Default for MacProcessGraph {
@@ -102,6 +103,7 @@ impl MacProcessGraph {
             current_by_pid: HashMap::new(),
             max_entries: max_entries.max(1),
             max_age,
+            degraded: false,
         }
     }
 
@@ -149,6 +151,10 @@ impl MacProcessGraph {
         key: AuditProcessKey,
         now: Instant,
     ) -> anyhow::Result<Vec<AncestorSummary>> {
+        anyhow::ensure!(
+            !self.degraded,
+            "process graph ancestry is uncertain after an Endpoint Security sequence gap"
+        );
         let current = self
             .entries
             .get(&key)
@@ -192,6 +198,14 @@ impl MacProcessGraph {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    pub fn mark_degraded(&mut self) {
+        self.degraded = true;
+    }
+
+    pub fn is_degraded(&self) -> bool {
+        self.degraded
     }
 
     fn evict(&mut self, now: Instant) {
@@ -289,6 +303,18 @@ mod tests {
         );
         graph.observe(child.clone(), now).unwrap();
         assert!(graph.ancestors(child.key, now).is_err());
+    }
+
+    #[test]
+    fn sequence_gap_disables_ancestry_without_removing_direct_identity() {
+        let now = Instant::now();
+        let mut graph = MacProcessGraph::default();
+        let direct = facts(11, 1, 101, None);
+        graph.observe(direct.clone(), now).unwrap();
+        graph.mark_degraded();
+        assert!(graph.current(direct.key.pid).is_some());
+        assert!(graph.ancestors(direct.key, now).is_err());
+        assert!(graph.is_degraded());
     }
 
     #[test]

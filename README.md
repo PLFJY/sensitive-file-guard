@@ -11,6 +11,9 @@
 > enrollment, deadline-bounded manual reads, and ten-second exact-key process-
 > tree leases. The specialized `guardctl ssh load` shortcut is intentionally
 > unsupported on macOS; ordinary `ssh-add` uses the same manual read flow.
+> Phase 09 mediates hardlink/rename namespace changes, keeps aliases protected
+> by kernel file identity, detects ES sequence gaps, bounds hot-path state, and
+> exposes semantic enforcement/FDA/approval health with lifecycle counters.
 > Live entitled ES acceptance remains
 > externally blocked until an Apple-provisioned test host is available.
 
@@ -242,6 +245,11 @@ RUST_LOG=info                    # env var (set in the unit file)
 ```
 
 ## Defensive browser adversarial acceptance
+
+For the macOS disposable namespace/health suite, use
+`scripts/macos/run-namespace-health-acceptance.sh`. It requires an activated,
+Apple-provisioned extension and uses only its own temporary Chrome profile; see
+[the macOS namespace/health guide](docs/MACOS_NAMESPACE_AND_HEALTH.md).
 
 Run this from the intended Arch desktop user's logged-in session. It builds
 unique disposable Firefox/Chromium profiles below `/tmp`, exercises ordinary

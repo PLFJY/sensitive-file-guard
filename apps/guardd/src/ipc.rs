@@ -212,6 +212,7 @@ fn handle_status(state: &IpcState, creds: PeerCreds) -> Response {
         version: state.version.clone(),
         backend_kind: "linux-fanotify".to_owned(),
         backend_diagnostic: Some("fanotify protected-file authorization".to_owned()),
+        backend_state: None,
         enforcement_active: state.group.is_some(),
         read_only_guaranteed: None,
         status: status.to_string(),
@@ -227,6 +228,7 @@ fn handle_status(state: &IpcState, creds: PeerCreds) -> Response {
         strict_alias_scans: Some(backend.strict_alias_scans),
         strict_alias_matches: Some(backend.strict_alias_matches),
         topology_degraded: Some(engine.topology_degraded),
+        mac_health: None,
         protected_files: engine.registry().file_count(),
         ssh_protected_keys: engine
             .registry()
@@ -242,7 +244,7 @@ fn handle_status(state: &IpcState, creds: PeerCreds) -> Response {
         audit_dropped,
         peer_uid: creds.uid,
     };
-    Response::ok(ResponseBody::Status(body))
+    Response::ok(ResponseBody::Status(Box::new(body)))
 }
 
 fn handle_resources_list(state: &IpcState, _creds: PeerCreds) -> Response {

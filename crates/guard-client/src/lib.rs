@@ -162,7 +162,7 @@ fn decode_response<T>(bytes: &[u8], take: fn(ResponseBody) -> Option<T>) -> anyh
 
 pub fn status(socket: &Path) -> anyhow::Result<guard_ipc::StatusInfo> {
     exchange(socket, RequestOp::Status, |b| match b {
-        ResponseBody::Status(v) => Some(v),
+        ResponseBody::Status(v) => Some(*v),
         _ => None,
     })
 }

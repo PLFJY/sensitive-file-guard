@@ -220,7 +220,7 @@ impl Response {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum ResponseBody {
-    Status(StatusInfo),
+    Status(Box<StatusInfo>),
     Resources(Vec<ResourceInfo>),
     Browsers(Vec<BrowserInfo>),
     Configuration(ConfigurationInfo),
@@ -362,6 +362,10 @@ pub struct StatusInfo {
     pub backend_kind: String,
     #[serde(default)]
     pub backend_diagnostic: Option<String>,
+    /// Stable macOS enforcement lifecycle category. This avoids parsing a
+    /// localized diagnostic to distinguish approval/FDA/install failures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_state: Option<String>,
     pub enforcement_active: bool,
     /// Whether migration-lease AUTH_OPEN responses are restricted to FREAD.
     /// `None` means the selected backend cannot make that guarantee.
@@ -399,6 +403,8 @@ pub struct StatusInfo {
     pub strict_alias_matches: Option<u64>,
     #[serde(default)]
     pub topology_degraded: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mac_health: Option<Box<MacHealthInfo>>,
     pub protected_files: usize,
     #[serde(default)]
     pub ssh_protected_keys: usize,
@@ -410,6 +416,24 @@ pub struct StatusInfo {
     pub unclassified: u64,
     pub audit_dropped: u64,
     pub peer_uid: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MacHealthInfo {
+    pub es_sequence_gaps: u64,
+    pub es_global_sequence_gaps: u64,
+    pub pending_created: u64,
+    pub pending_resolved_allow: u64,
+    pub pending_resolved_deny: u64,
+    pub pending_timed_out: u64,
+    pub insufficient_deadline: u64,
+    pub late_responses: u64,
+    pub namespace_allowed: u64,
+    pub namespace_denied: u64,
+    pub namespace_alias_entries: usize,
+    pub namespace_alias_capacity: usize,
+    pub namespace_index_saturated: bool,
+    pub process_graph_degraded: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -791,10 +815,11 @@ mod tests {
 
     #[test]
     fn response_ok_and_err_round_trip() {
-        let ok = Response::ok(ResponseBody::Status(StatusInfo {
+        let ok = Response::ok(ResponseBody::Status(Box::new(StatusInfo {
             version: "0.1.0".into(),
             backend_kind: "linux-fanotify".into(),
             backend_diagnostic: None,
+            backend_state: None,
             enforcement_active: true,
             read_only_guaranteed: None,
             status: "ACTIVE".into(),
@@ -810,6 +835,7 @@ mod tests {
             strict_alias_scans: Some(3),
             strict_alias_matches: Some(2),
             topology_degraded: Some(false),
+            mac_health: None,
             protected_files: 6,
             protected_trees: 2,
             browsers: 1,
@@ -820,7 +846,7 @@ mod tests {
             audit_dropped: 0,
             peer_uid: 1000,
             ssh_protected_keys: 0,
-        }));
+        })));
         let j = serde_json::to_string(&ok).unwrap();
         let back: Response = serde_json::from_str(&j).unwrap();
         assert!(back.ok);
@@ -848,5 +874,31 @@ mod tests {
         assert!(status.mode.is_none());
         assert!(status.marked_filesystems.is_none());
         assert!(status.fanotify_overflows.is_none());
+    }
+
+    #[test]
+    fn mac_health_is_typed_and_backward_optional() {
+        let json = r#"{
+            "version":"0.1.0","backend_kind":"macos-endpoint-security",
+            "backend_state":"DEGRADED","enforcement_active":true,
+            "status":"DEGRADED","protected_events":1,"protected_files":2,
+            "ssh_protected_keys":1,"protected_trees":1,"browsers":1,
+            "browser_exes":2,"allowed":3,"denied":4,"unclassified":0,
+            "audit_dropped":0,"peer_uid":501,
+            "mac_health":{"es_sequence_gaps":2,"es_global_sequence_gaps":1,
+            "pending_created":3,"pending_resolved_allow":1,
+            "pending_resolved_deny":2,"pending_timed_out":1,
+            "insufficient_deadline":1,"late_responses":0,
+            "namespace_allowed":4,"namespace_denied":5,
+            "namespace_alias_entries":6,"namespace_alias_capacity":65536,
+            "namespace_index_saturated":false,"process_graph_degraded":true}
+        }"#;
+        let status: StatusInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(status.backend_state.as_deref(), Some("DEGRADED"));
+        let health = status.mac_health.unwrap();
+        assert_eq!(health.es_sequence_gaps, 2);
+        assert_eq!(health.pending_timed_out, 1);
+        assert_eq!(health.namespace_denied, 5);
+        assert!(health.process_graph_degraded);
     }
 }

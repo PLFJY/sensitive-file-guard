@@ -8,21 +8,47 @@ use guard_core::resource::{
 
 use crate::browser_trust::MacBrowserEnrollment;
 
+pub const DEFAULT_ALIAS_CAPACITY: usize = 65_536;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamespaceScope {
+    pub browser: BrowserId,
+    pub profile: Option<ProfileId>,
+    pub owner_uid: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FileIdentity {
     pub dev: u64,
     pub ino: u64,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone)]
 pub struct MacResourceIndex {
     files: HashMap<FileIdentity, ProtectedResource>,
+    aliases: HashMap<FileIdentity, ProtectedResource>,
     tree_roots: HashMap<FileIdentity, TreeRoot>,
     profiles: Vec<MacProfileScope>,
     ssh_paths: HashMap<std::path::PathBuf, ProtectedResource>,
+    alias_capacity: usize,
+    alias_saturated: bool,
 }
 
-#[derive(Debug)]
+impl Default for MacResourceIndex {
+    fn default() -> Self {
+        Self {
+            files: HashMap::new(),
+            aliases: HashMap::new(),
+            tree_roots: HashMap::new(),
+            profiles: Vec::new(),
+            ssh_paths: HashMap::new(),
+            alias_capacity: DEFAULT_ALIAS_CAPACITY,
+            alias_saturated: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 struct MacProfileScope {
     browser: BrowserId,
     family: BrowserFamily,
@@ -72,6 +98,7 @@ impl MacResourceIndex {
                 firefox_single_profile: enrollment.profile_root.join("cookies.sqlite").is_file(),
             })
             .collect();
+        index.refresh_aliases()?;
         Ok(index)
     }
 
@@ -98,7 +125,9 @@ impl MacResourceIndex {
     }
 
     pub fn concrete(&self, identity: FileIdentity) -> Option<&ProtectedResource> {
-        self.files.get(&identity)
+        self.files
+            .get(&identity)
+            .or_else(|| self.aliases.get(&identity))
     }
 
     /// Classify one ES target without rescanning a profile. Concrete files are
@@ -134,6 +163,134 @@ impl MacResourceIndex {
             })
     }
 
+    pub fn classify_path(&self, path: &std::path::Path) -> Option<ProtectedResource> {
+        if let Some(resource) = self.ssh_paths.get(path) {
+            return Some(resource.clone());
+        }
+        self.tree_roots
+            .values()
+            .find_map(|tree| {
+                path.starts_with(&tree.dir).then(|| ProtectedResource {
+                    id: ProtectedResourceId(path.to_string_lossy().into_owned()),
+                    kind: tree.kind,
+                    owner_uid: tree.owner_uid,
+                    browser: Some(tree.browser.clone()),
+                    profile: Some(tree.profile.clone()),
+                    path: path.to_path_buf(),
+                })
+            })
+            .or_else(|| {
+                self.profiles
+                    .iter()
+                    .find_map(|profile| profile.classify(path))
+            })
+            .or_else(|| {
+                self.files
+                    .values()
+                    .find(|resource| resource.path == path)
+                    .cloned()
+            })
+    }
+
+    pub fn namespace_scope(&self, path: &std::path::Path) -> Option<NamespaceScope> {
+        self.profiles.iter().find_map(|profile| profile.scope(path))
+    }
+
+    pub fn contains_protected_path(&self, path: &std::path::Path) -> bool {
+        self.files
+            .values()
+            .any(|resource| resource.path.starts_with(path))
+            || self
+                .ssh_paths
+                .keys()
+                .any(|resource| resource.starts_with(path))
+            || self
+                .tree_roots
+                .values()
+                .any(|tree| tree.dir.starts_with(path))
+            || self
+                .profiles
+                .iter()
+                .any(|profile| profile.root.starts_with(path))
+    }
+
+    pub fn observe_alias(&mut self, identity: FileIdentity, resource: ProtectedResource) -> bool {
+        if self.files.contains_key(&identity) || self.aliases.contains_key(&identity) {
+            return true;
+        }
+        if self.aliases.len() >= self.alias_capacity {
+            self.alias_saturated = true;
+            return false;
+        }
+        self.aliases.insert(identity, resource);
+        true
+    }
+
+    pub fn alias_count(&self) -> usize {
+        self.aliases.len()
+    }
+
+    pub fn alias_capacity(&self) -> usize {
+        self.alias_capacity
+    }
+
+    pub fn alias_saturated(&self) -> bool {
+        self.alias_saturated
+    }
+
+    pub fn refresh_aliases(&mut self) -> anyhow::Result<()> {
+        use std::os::unix::fs::MetadataExt;
+
+        self.aliases.clear();
+        self.alias_saturated = false;
+        let roots = self
+            .profiles
+            .iter()
+            .map(|profile| profile.root.clone())
+            .chain(self.tree_roots.values().map(|tree| tree.dir.clone()))
+            .collect::<Vec<_>>();
+        let mut stack = roots;
+        let mut visited = 0usize;
+        while let Some(directory) = stack.pop() {
+            let entries = match std::fs::read_dir(&directory) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            for entry in entries {
+                let entry = entry?;
+                visited = visited.saturating_add(1);
+                if visited > self.alias_capacity.saturating_mul(8) {
+                    self.alias_saturated = true;
+                    return Ok(());
+                }
+                let file_type = entry.file_type()?;
+                if file_type.is_symlink() {
+                    continue;
+                }
+                let path = entry.path();
+                if file_type.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let Some(resource) = self.classify_path(&path) else {
+                    continue;
+                };
+                let metadata = entry.metadata()?;
+                if !self.observe_alias(
+                    FileIdentity {
+                        dev: metadata.dev(),
+                        ino: metadata.ino(),
+                    },
+                    resource,
+                ) {
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn resources(&self) -> impl Iterator<Item = &ProtectedResource> {
         self.files.values()
     }
@@ -161,6 +318,55 @@ impl MacResourceIndex {
 }
 
 impl MacProfileScope {
+    fn scope(&self, path: &std::path::Path) -> Option<NamespaceScope> {
+        let relative = path.strip_prefix(&self.root).ok()?;
+        let profile = match self.family {
+            BrowserFamily::Chromium => {
+                if relative == std::path::Path::new("Local State") {
+                    Some(ProfileId(
+                        guard_browser::chromium::LOCAL_STATE_PROFILE.into(),
+                    ))
+                } else {
+                    let mut components = relative.components();
+                    let name = components.next()?.as_os_str().to_string_lossy();
+                    if name == "Default" || name.starts_with("Profile ") {
+                        Some(ProfileId(name.into_owned()))
+                    } else if components.next().is_none() {
+                        Some(ProfileId(
+                            guard_browser::chromium::LOCAL_STATE_PROFILE.into(),
+                        ))
+                    } else {
+                        None
+                    }
+                }
+            }
+            BrowserFamily::Firefox | BrowserFamily::Zen => {
+                if self.firefox_single_profile {
+                    Some(ProfileId(
+                        self.root
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| "profile".into()),
+                    ))
+                } else {
+                    Some(ProfileId(
+                        relative
+                            .components()
+                            .next()?
+                            .as_os_str()
+                            .to_string_lossy()
+                            .into_owned(),
+                    ))
+                }
+            }
+        };
+        Some(NamespaceScope {
+            browser: self.browser.clone(),
+            profile,
+            owner_uid: self.owner_uid,
+        })
+    }
+
     fn classify(&self, path: &std::path::Path) -> Option<ProtectedResource> {
         let relative = path.strip_prefix(&self.root).ok()?;
         let (profile, kind) = match self.family {
@@ -432,6 +638,94 @@ mod tests {
                 FileIdentity { dev: 3, ino: 4 },
             )
             .is_none());
+    }
+
+    #[test]
+    fn startup_scan_protects_tree_hardlink_alias_outside_profile() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("Chrome");
+        let storage = root.join("Default/Local Storage/leveldb/000001.ldb");
+        std::fs::create_dir_all(storage.parent().unwrap()).unwrap();
+        std::fs::write(&storage, b"synthetic web storage").unwrap();
+        std::fs::write(root.join("Local State"), b"synthetic state").unwrap();
+        let alias = temp.path().join("preexisting-outside-alias");
+        std::fs::hard_link(&storage, &alias).unwrap();
+        let index = MacResourceIndex::from_browser_enrollments(&[MacBrowserEnrollment {
+            browser_id: BrowserId("chrome".into()),
+            family: BrowserFamily::Chromium,
+            profile_root: root,
+            owner_uid: 501,
+            app_bundle: None,
+            executables: vec![],
+        }])
+        .unwrap();
+        let metadata = std::fs::metadata(&alias).unwrap();
+        assert_eq!(
+            index
+                .classify(
+                    &alias,
+                    FileIdentity {
+                        dev: metadata.dev(),
+                        ino: metadata.ino(),
+                    },
+                )
+                .unwrap()
+                .kind,
+            ProtectedResourceKind::WebStorage
+        );
+        assert!(!index.alias_saturated());
+        assert!(index.alias_count() > 0);
+    }
+
+    #[test]
+    fn symlink_open_is_protected_by_kernel_observed_target_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let protected = temp.path().join("Cookies");
+        std::fs::write(&protected, b"synthetic cookie db").unwrap();
+        let alias = temp.path().join("symlink-alias");
+        std::os::unix::fs::symlink(&protected, &alias).unwrap();
+        let mut registry = ProtectedResourceRegistry::new();
+        registry.enroll_file(ProtectedResource {
+            id: ProtectedResourceId("cookies".into()),
+            kind: ProtectedResourceKind::CookieStore,
+            owner_uid: 501,
+            browser: Some(BrowserId("chrome".into())),
+            profile: Some(ProfileId("Default".into())),
+            path: protected,
+        });
+        let index = MacResourceIndex::from_registry(&registry).unwrap();
+        // `metadata`, like the ES open target, observes the followed object;
+        // `symlink_metadata` would describe only the namespace entry.
+        let target = std::fs::metadata(&alias).unwrap();
+        assert!(index
+            .classify(
+                &alias,
+                FileIdentity {
+                    dev: target.dev(),
+                    ino: target.ino(),
+                },
+            )
+            .is_some());
+    }
+
+    #[test]
+    fn alias_index_has_a_hard_capacity_and_reports_saturation() {
+        let mut index = MacResourceIndex {
+            alias_capacity: 1,
+            ..MacResourceIndex::default()
+        };
+        let resource = ProtectedResource {
+            id: ProtectedResourceId("bounded".into()),
+            kind: ProtectedResourceKind::CookieStore,
+            owner_uid: 501,
+            browser: Some(BrowserId("chrome".into())),
+            profile: Some(ProfileId("Default".into())),
+            path: std::path::PathBuf::from("/synthetic/Cookies"),
+        };
+        assert!(index.observe_alias(FileIdentity { dev: 1, ino: 1 }, resource.clone()));
+        assert!(!index.observe_alias(FileIdentity { dev: 1, ino: 2 }, resource));
+        assert_eq!(index.alias_count(), 1);
+        assert!(index.alias_saturated());
     }
 
     #[test]

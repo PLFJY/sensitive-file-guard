@@ -103,8 +103,11 @@ int guard_es_client_create(
     guard_es_client_t **client,
     guard_es_auth_open_callback_t callback,
     guard_es_process_callback_t process_callback,
+    guard_es_namespace_callback_t namespace_callback,
+    guard_es_sequence_callback_t sequence_callback,
     void *context) {
-    if (client == NULL || callback == NULL || process_callback == NULL) {
+    if (client == NULL || callback == NULL || process_callback == NULL ||
+        namespace_callback == NULL || sequence_callback == NULL) {
         return 1;
     }
     *client = NULL;
@@ -114,6 +117,23 @@ int guard_es_client_create(
     }
     es_new_client_result_t result = es_new_client(&wrapper->client, ^(
         es_client_t *es_client, const es_message_t *message) {
+        uint32_t stable_event_kind = 0;
+        switch (message->event_type) {
+            case ES_EVENT_TYPE_AUTH_OPEN: stable_event_kind = 1; break;
+            case ES_EVENT_TYPE_NOTIFY_FORK: stable_event_kind = 2; break;
+            case ES_EVENT_TYPE_NOTIFY_EXEC: stable_event_kind = 3; break;
+            case ES_EVENT_TYPE_NOTIFY_EXIT: stable_event_kind = 4; break;
+            case ES_EVENT_TYPE_AUTH_LINK: stable_event_kind = 5; break;
+            case ES_EVENT_TYPE_AUTH_RENAME: stable_event_kind = 6; break;
+            default: break;
+        }
+        sequence_callback(
+            context,
+            stable_event_kind,
+            message->version >= 2,
+            message->version >= 2 ? message->seq_num : 0,
+            message->version >= 4,
+            message->version >= 4 ? message->global_seq_num : 0);
         if (message->event_type == ES_EVENT_TYPE_NOTIFY_FORK) {
             guard_es_process_facts_t child;
             guard_es_process_facts_t parent;
@@ -132,6 +152,55 @@ int guard_es_client_create(
             guard_es_process_facts_t exiting;
             guard_normalize_process(message->version, message->process, &exiting);
             process_callback(context, 3, &exiting, NULL);
+            return;
+        }
+        if (message->action_type == ES_ACTION_TYPE_AUTH &&
+            (message->event_type == ES_EVENT_TYPE_AUTH_LINK ||
+             message->event_type == ES_EVENT_TYPE_AUTH_RENAME)) {
+            guard_es_namespace_event_t normalized;
+            memset(&normalized, 0, sizeof(normalized));
+            normalized.deadline = message->deadline;
+            const es_file_t *source = NULL;
+            if (message->event_type == ES_EVENT_TYPE_AUTH_LINK) {
+                const es_event_link_t *link = &message->event.link;
+                normalized.operation = 1;
+                source = link->source;
+                normalized.destination_dir_path = (const uint8_t *)link->target_dir->path.data;
+                normalized.destination_dir_path_len = link->target_dir->path.length;
+                normalized.destination_dir_path_truncated = link->target_dir->path_truncated;
+                normalized.destination_name = (const uint8_t *)link->target_filename.data;
+                normalized.destination_name_len = link->target_filename.length;
+            } else {
+                const es_event_rename_t *rename = &message->event.rename;
+                normalized.operation = 2;
+                source = rename->source;
+                if (rename->destination_type == ES_DESTINATION_TYPE_EXISTING_FILE) {
+                    const es_file_t *destination = rename->destination.existing_file;
+                    normalized.destination_existing = true;
+                    normalized.destination_dev = (uint64_t)destination->stat.st_dev;
+                    normalized.destination_ino = (uint64_t)destination->stat.st_ino;
+                    normalized.destination_existing_path =
+                        (const uint8_t *)destination->path.data;
+                    normalized.destination_existing_path_len = destination->path.length;
+                    normalized.destination_existing_path_truncated = destination->path_truncated;
+                } else {
+                    const es_file_t *dir = rename->destination.new_path.dir;
+                    normalized.destination_dir_path = (const uint8_t *)dir->path.data;
+                    normalized.destination_dir_path_len = dir->path.length;
+                    normalized.destination_dir_path_truncated = dir->path_truncated;
+                    normalized.destination_name =
+                        (const uint8_t *)rename->destination.new_path.filename.data;
+                    normalized.destination_name_len =
+                        rename->destination.new_path.filename.length;
+                }
+            }
+            normalized.source_dev = (uint64_t)source->stat.st_dev;
+            normalized.source_ino = (uint64_t)source->stat.st_ino;
+            normalized.source_path = (const uint8_t *)source->path.data;
+            normalized.source_path_len = source->path.length;
+            normalized.source_path_truncated = source->path_truncated;
+            guard_normalize_process(message->version, message->process, &normalized.process);
+            namespace_callback(context, es_client, message, &normalized);
             return;
         }
         if (message->action_type != ES_ACTION_TYPE_AUTH ||
@@ -173,8 +242,10 @@ int guard_es_client_subscribe_required(guard_es_client_t *client) {
         ES_EVENT_TYPE_NOTIFY_FORK,
         ES_EVENT_TYPE_NOTIFY_EXEC,
         ES_EVENT_TYPE_NOTIFY_EXIT,
+        ES_EVENT_TYPE_AUTH_LINK,
+        ES_EVENT_TYPE_AUTH_RENAME,
     };
-    return es_subscribe(client->client, events, 4) == ES_RETURN_SUCCESS ? 0 : -1;
+    return es_subscribe(client->client, events, 6) == ES_RETURN_SUCCESS ? 0 : -1;
 }
 
 int guard_es_client_delete(guard_es_client_t *client) {
@@ -216,6 +287,26 @@ int guard_es_respond_flags(
             return 4;
         case ES_RESPOND_RESULT_ERR_EVENT_TYPE:
             return 5;
+    }
+    return -1;
+}
+
+int guard_es_respond_auth(
+    const void *client,
+    const void *message,
+    bool allow) {
+    es_respond_result_t result = es_respond_auth_result(
+        (es_client_t *)client,
+        (const es_message_t *)message,
+        allow ? ES_AUTH_RESULT_ALLOW : ES_AUTH_RESULT_DENY,
+        false);
+    switch (result) {
+        case ES_RESPOND_RESULT_SUCCESS: return 0;
+        case ES_RESPOND_RESULT_ERR_INVALID_ARGUMENT: return 1;
+        case ES_RESPOND_RESULT_ERR_INTERNAL: return 2;
+        case ES_RESPOND_RESULT_NOT_FOUND: return 3;
+        case ES_RESPOND_RESULT_ERR_DUPLICATE_RESPONSE: return 4;
+        case ES_RESPOND_RESULT_ERR_EVENT_TYPE: return 5;
     }
     return -1;
 }

@@ -9,6 +9,7 @@ use guard_core::resource::{
 };
 use guard_platform::BackendHealth;
 
+use crate::browser_trust::MacBrowserTrustStore;
 use crate::identity::{
     AuditProcessKey, ExecutableSnapshot, MacCodeIdentity, MacProcessFacts, MacProcessGraph,
 };
@@ -19,6 +20,7 @@ use crate::pending::{
 pub use crate::pending::{
     MacPendingPermission, ReadOnlyMacPendingPermission, ES_FFLAG_READ, ES_FFLAG_WRITE,
 };
+use crate::resource_index::FileIdentity;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthOpenFacts {
@@ -44,6 +46,7 @@ pub struct MacAuthorizationEvent {
 pub struct MacProtectedResources {
     enabled: AtomicBool,
     index: RwLock<crate::resource_index::MacResourceIndex>,
+    refresh_needed: AtomicBool,
 }
 
 impl MacProtectedResources {
@@ -51,6 +54,7 @@ impl MacProtectedResources {
         Self {
             enabled: AtomicBool::new(enabled),
             index: RwLock::new(index),
+            refresh_needed: AtomicBool::new(false),
         }
     }
 
@@ -108,16 +112,77 @@ impl MacProtectedResources {
         if !self.enabled() {
             return None;
         }
-        self.index
+        let identity = FileIdentity {
+            dev: facts.target_dev,
+            ino: facts.target_ino,
+        };
+        let resource = self
+            .index
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .classify(
-                &facts.target,
-                crate::resource_index::FileIdentity {
-                    dev: facts.target_dev,
-                    ino: facts.target_ino,
-                },
-            )
+            .classify(&facts.target, identity)?;
+        let mut index = self
+            .index
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _ = index.observe_alias(identity, resource.clone());
+        Some(resource)
+    }
+
+    pub fn namespace_health(&self) -> (usize, usize, bool) {
+        let index = self
+            .index
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (
+            index.alias_count(),
+            index.alias_capacity(),
+            index.alias_saturated(),
+        )
+    }
+
+    fn namespace_view(
+        &self,
+        path: &std::path::Path,
+        identity: Option<FileIdentity>,
+    ) -> (
+        Option<ProtectedResource>,
+        Option<crate::resource_index::NamespaceScope>,
+        bool,
+    ) {
+        let index = self
+            .index
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let resource = identity
+            .and_then(|identity| index.concrete(identity).cloned())
+            .or_else(|| index.classify_path(path));
+        let scope = index.namespace_scope(path);
+        let contains = index.contains_protected_path(path);
+        (resource, scope, contains)
+    }
+
+    fn request_refresh(&self) {
+        self.refresh_needed.store(true, Ordering::Release);
+    }
+
+    pub fn repair_if_needed(&self) -> anyhow::Result<bool> {
+        if !self.refresh_needed.swap(false, Ordering::AcqRel) {
+            return Ok(false);
+        }
+        // Clone and scan outside the writer lock. ES callbacks may keep using
+        // the previous immutable snapshot until the brief atomic replacement.
+        let mut refreshed = self
+            .index
+            .read()
+            .map_err(|_| anyhow::anyhow!("macOS resource index lock is poisoned"))?
+            .clone();
+        refreshed.refresh_aliases()?;
+        *self
+            .index
+            .write()
+            .map_err(|_| anyhow::anyhow!("macOS resource index lock is poisoned"))? = refreshed;
+        Ok(true)
     }
 }
 
@@ -129,7 +194,10 @@ pub struct EndpointSecurityConfig {
 #[derive(Debug, Clone)]
 enum ProtectionScope {
     Synthetic(HashSet<PathBuf>),
-    Browser(Arc<MacProtectedResources>),
+    Browser {
+        resources: Arc<MacProtectedResources>,
+        trust: Arc<RwLock<MacBrowserTrustStore>>,
+    },
 }
 
 impl EndpointSecurityConfig {
@@ -153,9 +221,12 @@ impl EndpointSecurityConfig {
         })
     }
 
-    pub fn browser(resources: Arc<MacProtectedResources>) -> Self {
+    pub fn browser(
+        resources: Arc<MacProtectedResources>,
+        trust: Arc<RwLock<MacBrowserTrustStore>>,
+    ) -> Self {
         Self {
-            scope: ProtectionScope::Browser(resources),
+            scope: ProtectionScope::Browser { resources, trust },
         }
     }
 
@@ -172,9 +243,90 @@ impl EndpointSecurityConfig {
                 })
             }
             ProtectionScope::Synthetic(_) => None,
-            ProtectionScope::Browser(resources) => resources.classify(facts),
+            ProtectionScope::Browser { resources, .. } => resources.classify(facts),
         }
     }
+
+    fn authorize_namespace(&self, facts: &NamespaceFacts) -> bool {
+        match &self.scope {
+            ProtectionScope::Synthetic(paths) => {
+                !paths.contains(&facts.source) && !paths.contains(&facts.destination)
+            }
+            ProtectionScope::Browser { resources, trust } => {
+                if !resources.enabled() {
+                    return true;
+                }
+                let (source, source_scope, source_contains) =
+                    resources.namespace_view(&facts.source, Some(facts.source_identity));
+                let (destination, destination_scope, _) =
+                    resources.namespace_view(&facts.destination, facts.destination_identity);
+                if source.is_none() && destination.is_none() && !source_contains {
+                    return true;
+                }
+                // Directory moves that contain protected descendants are never
+                // a browser's atomic file replacement and can move a complete
+                // protected namespace out of policy scope.
+                if source.is_none() && source_contains {
+                    return false;
+                }
+                let protected = source.as_ref().or(destination.as_ref());
+                let Some(protected) = protected else {
+                    return false;
+                };
+                if protected.kind == ProtectedResourceKind::SshPrivateKey {
+                    return false;
+                }
+                let (Some(browser), Some(profile)) =
+                    (protected.browser.as_ref(), protected.profile.as_ref())
+                else {
+                    return false;
+                };
+                let trusted = trust
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .classify(&facts.process, protected.owner_uid);
+                if trusted.browser.as_ref() != Some(browser) {
+                    return false;
+                }
+                let same_scope = |scope: &crate::resource_index::NamespaceScope| {
+                    &scope.browser == browser
+                        && scope.profile.as_ref() == Some(profile)
+                        && scope.owner_uid == protected.owner_uid
+                };
+                let same_resource_scope = |resource: &ProtectedResource| {
+                    resource.kind != ProtectedResourceKind::SshPrivateKey
+                        && resource.browser.as_ref() == Some(browser)
+                        && resource.profile.as_ref() == Some(profile)
+                        && resource.owner_uid == protected.owner_uid
+                };
+                let source_ok = source.as_ref().map_or_else(
+                    || source_scope.as_ref().is_some_and(same_scope),
+                    same_resource_scope,
+                );
+                let destination_ok = destination.as_ref().map_or_else(
+                    || destination_scope.as_ref().is_some_and(same_scope),
+                    same_resource_scope,
+                );
+                source_ok && destination_ok
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamespaceOperation {
+    Link,
+    Rename,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamespaceFacts {
+    pub operation: NamespaceOperation,
+    pub process: MacProcessFacts,
+    pub source: PathBuf,
+    pub source_identity: FileIdentity,
+    pub destination: PathBuf,
+    pub destination_identity: Option<FileIdentity>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,6 +378,9 @@ pub struct EndpointSecurityBackend {
 }
 
 #[cfg(target_os = "macos")]
+const MAX_PENDING_AUTHORIZATIONS: usize = 1024;
+
+#[cfg(target_os = "macos")]
 impl EndpointSecurityBackend {
     pub fn start(config: EndpointSecurityConfig) -> Result<Self, ClientCreateError> {
         let health = Arc::new(HealthTracker::active(
@@ -235,7 +390,7 @@ impl EndpointSecurityBackend {
             health.degrade("could not start Endpoint Security deadline scheduler");
             ClientCreateError::Internal
         })?;
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = mpsc::sync_channel(MAX_PENDING_AUTHORIZATIONS);
         let registry = Arc::new(Mutex::new(Vec::new()));
         let process_graph = Arc::new(Mutex::new(MacProcessGraph::default()));
         let mut context = Box::new(CallbackContext {
@@ -245,17 +400,18 @@ impl EndpointSecurityBackend {
             registry,
             process_graph,
             health,
+            sequences: Mutex::new(SequenceTracker::default()),
         });
         let client = NativeClient::create(context.as_mut() as *mut CallbackContext)?;
         if client.subscribe_required().is_err() {
             context
                 .health
-                .degrade("Endpoint Security AUTH_OPEN/process subscription failed");
+                .degrade("Endpoint Security required subscription failed");
             return Err(ClientCreateError::Internal);
         }
         context
             .health
-            .note("Endpoint Security AUTH_OPEN and bounded process graph subscriptions are active");
+            .note("Endpoint Security AUTH_OPEN/AUTH_LINK/AUTH_RENAME and bounded process graph subscriptions are active");
         Ok(Self {
             scheduler,
             client: Some(client),
@@ -272,16 +428,56 @@ impl EndpointSecurityBackend {
     }
 
     pub fn health(&self) -> BackendHealth {
-        let (active, diagnostic) = self.context.health.snapshot();
+        let snapshot = self.context.health.snapshot();
+        let (alias_entries, alias_capacity, index_saturated) = match &self.context.config.scope {
+            ProtectionScope::Browser { resources, .. } => resources.namespace_health(),
+            ProtectionScope::Synthetic(_) => (0, 0, false),
+        };
+        let process_graph_degraded = self
+            .context
+            .process_graph
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_degraded();
         BackendHealth {
             backend: "endpoint-security".to_owned(),
-            active,
-            diagnostic,
+            state: if !snapshot.active {
+                "NOT_ENFORCING"
+            } else if snapshot.degraded || index_saturated || process_graph_degraded {
+                "DEGRADED"
+            } else {
+                "ACTIVE"
+            }
+            .to_owned(),
+            active: snapshot.active,
+            degraded: snapshot.degraded || index_saturated || process_graph_degraded,
+            diagnostic: snapshot.diagnostic,
+            sequence_gaps: snapshot.sequence_gaps,
+            global_sequence_gaps: snapshot.global_sequence_gaps,
+            pending_created: snapshot.pending_created,
+            pending_resolved_allow: snapshot.pending_resolved_allow,
+            pending_resolved_deny: snapshot.pending_resolved_deny,
+            pending_timed_out: snapshot.pending_timed_out,
+            insufficient_deadline: snapshot.insufficient_deadline,
+            late_responses: snapshot.late_responses,
+            namespace_allowed: snapshot.namespace_allowed,
+            namespace_denied: snapshot.namespace_denied,
+            namespace_alias_entries: alias_entries,
+            namespace_alias_capacity: alias_capacity,
+            namespace_index_saturated: index_saturated,
+            process_graph_degraded,
         }
     }
 
     pub fn process_graph(&self) -> Arc<Mutex<MacProcessGraph>> {
         Arc::clone(&self.context.process_graph)
+    }
+
+    pub fn repair_if_needed(&self) -> anyhow::Result<bool> {
+        match &self.context.config.scope {
+            ProtectionScope::Browser { resources, .. } => resources.repair_if_needed(),
+            ProtectionScope::Synthetic(_) => Ok(false),
+        }
     }
 }
 
@@ -305,6 +501,8 @@ pub fn diagnose_client_creation() -> Result<(), ClientCreateError> {
     let client = NativeClient::create_with_callback(
         diagnostic_callback,
         diagnostic_process_callback,
+        diagnostic_namespace_callback,
+        diagnostic_sequence_callback,
         (&mut marker as *mut ()).cast(),
     )?;
     drop(client);
@@ -319,11 +517,48 @@ pub fn diagnose_client_creation() -> Result<(), ClientCreateError> {
 #[cfg(target_os = "macos")]
 struct CallbackContext {
     config: EndpointSecurityConfig,
-    sender: mpsc::Sender<MacAuthorizationEvent>,
+    sender: mpsc::SyncSender<MacAuthorizationEvent>,
     scheduler: DeadlineSchedulerHandle,
     registry: Arc<Mutex<Vec<Weak<PendingInner>>>>,
     process_graph: Arc<Mutex<MacProcessGraph>>,
     health: Arc<HealthTracker>,
+    sequences: Mutex<SequenceTracker>,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct SequenceTracker {
+    per_kind: [Option<u64>; 7],
+    global: Option<u64>,
+}
+
+#[cfg(target_os = "macos")]
+impl SequenceTracker {
+    fn observe(&mut self, kind: u32, sequence: Option<u64>, global: Option<u64>) -> (u64, u64) {
+        let mut per_kind_gap = 0;
+        if let (Some(sequence), Some(slot)) = (sequence, self.per_kind.get_mut(kind as usize)) {
+            if let Some(previous) = *slot {
+                if sequence > previous.saturating_add(1) {
+                    per_kind_gap = sequence - previous - 1;
+                }
+            }
+            if slot.is_none_or(|previous| sequence > previous) {
+                *slot = Some(sequence);
+            }
+        }
+        let mut global_gap = 0;
+        if let Some(sequence) = global {
+            if let Some(previous) = self.global {
+                if sequence > previous.saturating_add(1) {
+                    global_gap = sequence - previous - 1;
+                }
+            }
+            if self.global.is_none_or(|previous| sequence > previous) {
+                self.global = Some(sequence);
+            }
+        }
+        (per_kind_gap, global_gap)
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -364,6 +599,7 @@ impl CallbackContext {
             match crate::deadline::response_budget(&crate::deadline::DarwinClock, raw.deadline) {
                 Ok(budget) => budget,
                 Err(error) => {
+                    self.health.insufficient_deadline();
                     self.health
                         .note(format!("protected AUTH_OPEN failed closed: {error}"));
                     self.respond_immediate(client, message, 0);
@@ -389,6 +625,14 @@ impl CallbackContext {
                 .upgrade()
                 .is_some_and(|permission| !permission.is_terminal())
         });
+        if registry.len() >= MAX_PENDING_AUTHORIZATIONS {
+            drop(registry);
+            self.health.degrade(
+                "protected AUTH_OPEN failed closed because the pending authorization bound was reached",
+            );
+            drop(permission);
+            return;
+        }
         registry.push(weak.clone());
         drop(registry);
         if let Err(error) = self.scheduler.schedule(weak, response_budget) {
@@ -398,16 +642,17 @@ impl CallbackContext {
             drop(permission);
             return;
         }
+        let interactive_budget =
+            crate::deadline::interactive_budget(&crate::deadline::DarwinClock, raw.deadline);
+        if interactive_budget.is_err() {
+            self.health.insufficient_deadline();
+        }
         if self
             .sender
-            .send(MacAuthorizationEvent {
+            .try_send(MacAuthorizationEvent {
                 facts,
                 resource,
-                interactive_budget: crate::deadline::interactive_budget(
-                    &crate::deadline::DarwinClock,
-                    raw.deadline,
-                )
-                .ok(),
+                interactive_budget: interactive_budget.ok(),
                 permission,
             })
             .is_err()
@@ -415,6 +660,95 @@ impl CallbackContext {
             self.health.degrade(
                 "protected AUTH_OPEN failed closed because the authorization queue is unavailable",
             );
+        }
+    }
+
+    fn handle_namespace(
+        &self,
+        client: *const std::ffi::c_void,
+        message: *const std::ffi::c_void,
+        raw: &RawNamespaceEvent,
+    ) {
+        if let Err(error) =
+            crate::deadline::response_budget(&crate::deadline::DarwinClock, raw.deadline)
+        {
+            self.health.insufficient_deadline();
+            self.health.degrade(format!(
+                "namespace authorization had insufficient response deadline: {error}"
+            ));
+            self.respond_namespace(client, message, false);
+            return;
+        }
+        let facts = match raw.to_facts() {
+            Ok(facts) => facts,
+            Err(error) => {
+                self.health.degrade(format!(
+                    "namespace authorization failed closed during normalization: {error}"
+                ));
+                self.respond_namespace(client, message, false);
+                return;
+            }
+        };
+        if let Err(error) = self
+            .process_graph
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .observe(facts.process.clone(), std::time::Instant::now())
+        {
+            self.health.degrade(format!(
+                "namespace authorization failed closed because process identity was invalid: {error}"
+            ));
+            self.respond_namespace(client, message, false);
+            return;
+        }
+        let allow = self.config.authorize_namespace(&facts);
+        self.health.namespace_decision(allow);
+        if allow {
+            if let ProtectionScope::Browser { resources, .. } = &self.config.scope {
+                let source_protected = resources
+                    .namespace_view(&facts.source, Some(facts.source_identity))
+                    .0
+                    .is_some();
+                let destination_protected = resources
+                    .namespace_view(&facts.destination, facts.destination_identity)
+                    .0
+                    .is_some();
+                if source_protected || destination_protected {
+                    resources.request_refresh();
+                }
+            }
+        }
+        self.respond_namespace(client, message, allow);
+    }
+
+    fn observe_sequence(&self, event_kind: u32, sequence: Option<u64>, global: Option<u64>) {
+        let (per_kind_gap, global_gap) = self
+            .sequences
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .observe(event_kind, sequence, global);
+        if per_kind_gap == 0 && global_gap == 0 {
+            return;
+        }
+        if per_kind_gap > 0 {
+            self.health.sequence_gap(false, per_kind_gap);
+        }
+        if global_gap > 0 {
+            self.health.sequence_gap(true, global_gap);
+        }
+        self.health.degrade(format!(
+            "Endpoint Security sequence gap detected (event_kind={event_kind}, per_type={per_kind_gap}, global={global_gap})"
+        ));
+        if global_gap > 0 || matches!(event_kind, 2..=4) {
+            self.process_graph
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .mark_degraded();
+        }
+        if global_gap > 0 || matches!(event_kind, 1 | 5 | 6) {
+            if let ProtectionScope::Browser { resources, .. } = &self.config.scope {
+                resources.request_refresh();
+            }
         }
     }
 
@@ -471,6 +805,23 @@ impl CallbackContext {
         if result != ResponseCode::Success {
             self.health.degrade(format!(
                 "immediate Endpoint Security flags response failed: {result}"
+            ));
+        }
+    }
+
+    fn respond_namespace(
+        &self,
+        client: *const std::ffi::c_void,
+        message: *const std::ffi::c_void,
+        allow: bool,
+    ) {
+        // SAFETY: both pointers are supplied by the live ES callback and the
+        // bridge always disables authorization caching.
+        let result =
+            ResponseCode::from_raw(unsafe { guard_es_respond_auth(client, message, allow) });
+        if result != ResponseCode::Success {
+            self.health.degrade(format!(
+                "Endpoint Security namespace response failed: {result}"
             ));
         }
     }
@@ -542,19 +893,35 @@ struct NativeClient {
 #[cfg(target_os = "macos")]
 impl NativeClient {
     fn create(context: *mut CallbackContext) -> Result<Self, ClientCreateError> {
-        Self::create_with_callback(auth_open_callback, process_callback, context.cast())
+        Self::create_with_callback(
+            auth_open_callback,
+            process_callback,
+            namespace_callback,
+            sequence_callback,
+            context.cast(),
+        )
     }
 
     fn create_with_callback(
         callback: RawCallback,
         process_callback: RawProcessCallback,
+        namespace_callback: RawNamespaceCallback,
+        sequence_callback: RawSequenceCallback,
         context: *mut std::ffi::c_void,
     ) -> Result<Self, ClientCreateError> {
         let mut raw = std::ptr::null_mut();
         // SAFETY: context remains live in EndpointSecurityBackend for the
         // complete client lifetime; the C wrapper copies the callback block.
-        let result =
-            unsafe { guard_es_client_create(&mut raw, callback, process_callback, context) };
+        let result = unsafe {
+            guard_es_client_create(
+                &mut raw,
+                callback,
+                process_callback,
+                namespace_callback,
+                sequence_callback,
+                context,
+            )
+        };
         match result {
             0 => Ok(Self {
                 raw,
@@ -599,6 +966,30 @@ struct RawAuthOpenEvent {
     target_path: *const u8,
     target_path_len: usize,
     target_path_truncated: bool,
+    process: RawProcessFacts,
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct RawNamespaceEvent {
+    operation: u32,
+    deadline: u64,
+    source_dev: u64,
+    source_ino: u64,
+    source_path: *const u8,
+    source_path_len: usize,
+    source_path_truncated: bool,
+    destination_existing: bool,
+    destination_dev: u64,
+    destination_ino: u64,
+    destination_dir_path: *const u8,
+    destination_dir_path_len: usize,
+    destination_dir_path_truncated: bool,
+    destination_name: *const u8,
+    destination_name_len: usize,
+    destination_existing_path: *const u8,
+    destination_existing_path_len: usize,
+    destination_existing_path_truncated: bool,
     process: RawProcessFacts,
 }
 
@@ -653,6 +1044,62 @@ impl RawAuthOpenEvent {
             target: token_path(self.target_path, self.target_path_len)?,
             target_dev: self.target_dev,
             target_ino: self.target_ino,
+        })
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl RawNamespaceEvent {
+    fn to_facts(&self) -> anyhow::Result<NamespaceFacts> {
+        anyhow::ensure!(
+            !self.source_path_truncated,
+            "Endpoint Security supplied a truncated namespace source path"
+        );
+        anyhow::ensure!(
+            self.source_dev != 0 && self.source_ino != 0,
+            "Endpoint Security supplied incomplete namespace source identity"
+        );
+        let destination = if self.destination_existing {
+            anyhow::ensure!(
+                !self.destination_existing_path_truncated,
+                "Endpoint Security supplied a truncated existing destination path"
+            );
+            anyhow::ensure!(
+                self.destination_dev != 0 && self.destination_ino != 0,
+                "Endpoint Security supplied incomplete existing destination identity"
+            );
+            token_path(
+                self.destination_existing_path,
+                self.destination_existing_path_len,
+            )?
+        } else {
+            anyhow::ensure!(
+                !self.destination_dir_path_truncated,
+                "Endpoint Security supplied a truncated destination directory path"
+            );
+            let directory = token_path(self.destination_dir_path, self.destination_dir_path_len)?;
+            directory.join(token_os_string(
+                self.destination_name,
+                self.destination_name_len,
+            )?)
+        };
+        Ok(NamespaceFacts {
+            operation: match self.operation {
+                1 => NamespaceOperation::Link,
+                2 => NamespaceOperation::Rename,
+                value => anyhow::bail!("unknown namespace operation {value}"),
+            },
+            process: self.process.to_facts()?,
+            source: token_path(self.source_path, self.source_path_len)?,
+            source_identity: FileIdentity {
+                dev: self.source_dev,
+                ino: self.source_ino,
+            },
+            destination,
+            destination_identity: self.destination_existing.then_some(FileIdentity {
+                dev: self.destination_dev,
+                ino: self.destination_ino,
+            }),
         })
     }
 }
@@ -753,6 +1200,17 @@ fn token_path(pointer: *const u8, length: usize) -> anyhow::Result<PathBuf> {
 }
 
 #[cfg(target_os = "macos")]
+fn token_os_string(pointer: *const u8, length: usize) -> anyhow::Result<std::ffi::OsString> {
+    use std::os::unix::ffi::OsStringExt;
+
+    anyhow::ensure!(!pointer.is_null() || length == 0, "missing filename token");
+    // SAFETY: the token is copied synchronously while the ES message is live.
+    let bytes = unsafe { std::slice::from_raw_parts(pointer, length) };
+    anyhow::ensure!(!bytes.is_empty(), "empty filename token");
+    Ok(std::ffi::OsString::from_vec(bytes.to_vec()))
+}
+
+#[cfg(target_os = "macos")]
 type RawCallback = unsafe extern "C" fn(
     *mut std::ffi::c_void,
     *const std::ffi::c_void,
@@ -767,6 +1225,17 @@ type RawProcessCallback = unsafe extern "C" fn(
     *const RawProcessFacts,
     *const RawProcessFacts,
 );
+
+#[cfg(target_os = "macos")]
+type RawNamespaceCallback = unsafe extern "C" fn(
+    *mut std::ffi::c_void,
+    *const std::ffi::c_void,
+    *const std::ffi::c_void,
+    *const RawNamespaceEvent,
+);
+
+#[cfg(target_os = "macos")]
+type RawSequenceCallback = unsafe extern "C" fn(*mut std::ffi::c_void, u32, bool, u64, bool, u64);
 
 #[cfg(target_os = "macos")]
 unsafe extern "C" fn auth_open_callback(
@@ -831,6 +1300,56 @@ unsafe extern "C" fn process_callback(
 }
 
 #[cfg(target_os = "macos")]
+unsafe extern "C" fn namespace_callback(
+    context: *mut std::ffi::c_void,
+    client: *const std::ffi::c_void,
+    message: *const std::ffi::c_void,
+    event: *const RawNamespaceEvent,
+) {
+    // SAFETY: context and event are owned by the live native callback.
+    let context = unsafe { &*context.cast::<CallbackContext>() };
+    if event.is_null() {
+        context
+            .health
+            .degrade("namespace callback omitted normalized event facts");
+        let _ = unsafe { guard_es_respond_auth(client, message, false) };
+        return;
+    }
+    let event = unsafe { &*event };
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        context.handle_namespace(client, message, event);
+    }))
+    .is_err()
+    {
+        std::process::abort();
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn sequence_callback(
+    context: *mut std::ffi::c_void,
+    event_kind: u32,
+    has_sequence: bool,
+    sequence: u64,
+    has_global_sequence: bool,
+    global_sequence: u64,
+) {
+    // SAFETY: context is the boxed CallbackContext for the live client.
+    let context = unsafe { &*context.cast::<CallbackContext>() };
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        context.observe_sequence(
+            event_kind,
+            has_sequence.then_some(sequence),
+            has_global_sequence.then_some(global_sequence),
+        );
+    }))
+    .is_err()
+    {
+        std::process::abort();
+    }
+}
+
+#[cfg(target_os = "macos")]
 unsafe extern "C" fn diagnostic_callback(
     _context: *mut std::ffi::c_void,
     client: *const std::ffi::c_void,
@@ -854,11 +1373,36 @@ unsafe extern "C" fn diagnostic_process_callback(
 }
 
 #[cfg(target_os = "macos")]
+unsafe extern "C" fn diagnostic_namespace_callback(
+    _context: *mut std::ffi::c_void,
+    client: *const std::ffi::c_void,
+    message: *const std::ffi::c_void,
+    event: *const RawNamespaceEvent,
+) {
+    if !event.is_null() {
+        let _ = unsafe { guard_es_respond_auth(client, message, false) };
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn diagnostic_sequence_callback(
+    _context: *mut std::ffi::c_void,
+    _event_kind: u32,
+    _has_sequence: bool,
+    _sequence: u64,
+    _has_global_sequence: bool,
+    _global_sequence: u64,
+) {
+}
+
+#[cfg(target_os = "macos")]
 extern "C" {
     fn guard_es_client_create(
         client: *mut *mut std::ffi::c_void,
         callback: RawCallback,
         process_callback: RawProcessCallback,
+        namespace_callback: RawNamespaceCallback,
+        sequence_callback: RawSequenceCallback,
         context: *mut std::ffi::c_void,
     ) -> i32;
     fn guard_es_client_subscribe_required(client: *mut std::ffi::c_void) -> i32;
@@ -870,11 +1414,86 @@ extern "C" {
         message: *const std::ffi::c_void,
         authorized_flags: u32,
     ) -> i32;
+    fn guard_es_respond_auth(
+        client: *const std::ffi::c_void,
+        message: *const std::ffi::c_void,
+        allow: bool,
+    ) -> i32;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::browser_trust::{
+        BrowserExecutableRole, MacBrowserEnrollment, MacExecutableEnrollment,
+    };
+    use guard_core::resource::{BrowserFamily, BrowserId};
+    use std::os::unix::fs::MetadataExt;
+
+    fn fixture_process(signing_id: &str) -> MacProcessFacts {
+        MacProcessFacts {
+            key: AuditProcessKey {
+                pid: 42,
+                pidversion: 7,
+            },
+            uid: 501,
+            gid: 20,
+            start_time_us: 123_456,
+            executable: ExecutableSnapshot {
+                path: PathBuf::from("/Applications/Fixture.app/Contents/MacOS/Fixture"),
+                dev: 9,
+                ino: 10,
+                owner_uid: 0,
+                mode: 0o100755,
+                size: 100,
+                mtime_ns: 1,
+                ctime_ns: 1,
+            },
+            code: MacCodeIdentity {
+                valid: true,
+                platform_binary: false,
+                flags: 1,
+                team_id: Some("TEAM123456".into()),
+                signing_id: Some(signing_id.into()),
+                cdhash: [1; 20],
+            },
+            parent: None,
+            responsible: None,
+        }
+    }
+
+    fn browser_namespace_fixture() -> (tempfile::TempDir, EndpointSecurityConfig, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("Chrome");
+        std::fs::create_dir_all(root.join("Default/Network")).unwrap();
+        std::fs::write(root.join("Local State"), b"synthetic state").unwrap();
+        let cookies = root.join("Default/Network/Cookies");
+        std::fs::write(&cookies, b"synthetic cookies").unwrap();
+        let enrollment = MacBrowserEnrollment {
+            browser_id: BrowserId("chrome".into()),
+            family: BrowserFamily::Chromium,
+            profile_root: root,
+            owner_uid: 501,
+            app_bundle: Some(PathBuf::from("/Applications/Fixture.app")),
+            executables: vec![MacExecutableEnrollment::Signed {
+                role: BrowserExecutableRole::Main,
+                path: PathBuf::from("/Applications/Fixture.app/Contents/MacOS/Fixture"),
+                bundle_suffix: None,
+                team_id: "TEAM123456".into(),
+                signing_id: "fixture.browser".into(),
+            }],
+        };
+        let index = crate::resource_index::MacResourceIndex::from_browser_enrollments(
+            std::slice::from_ref(&enrollment),
+        )
+        .unwrap();
+        let trust = MacBrowserTrustStore::load_and_revalidate(vec![enrollment]).unwrap();
+        let config = EndpointSecurityConfig::browser(
+            Arc::new(MacProtectedResources::new(true, index)),
+            Arc::new(RwLock::new(trust)),
+        );
+        (temp, config, cookies)
+    }
 
     #[test]
     fn synthetic_config_requires_existing_absolute_paths() {
@@ -895,5 +1514,157 @@ mod tests {
         assert!(ClientCreateError::TooManyClients
             .to_string()
             .contains("limit"));
+    }
+
+    #[test]
+    fn only_exact_own_browser_can_mutate_inside_same_profile_namespace() {
+        let (temp, config, cookies) = browser_namespace_fixture();
+        let metadata = std::fs::metadata(&cookies).unwrap();
+        let inside = cookies.with_extension("replacement");
+        let base = NamespaceFacts {
+            operation: NamespaceOperation::Link,
+            process: fixture_process("fixture.browser"),
+            source: cookies.clone(),
+            source_identity: FileIdentity {
+                dev: metadata.dev(),
+                ino: metadata.ino(),
+            },
+            destination: inside,
+            destination_identity: None,
+        };
+        assert!(config.authorize_namespace(&base));
+
+        let mut outside = base.clone();
+        outside.destination = temp.path().join("escaped-cookie-alias");
+        assert!(!config.authorize_namespace(&outside));
+
+        let mut wrong_client = base;
+        wrong_client.process = fixture_process("wrong.client");
+        assert!(!config.authorize_namespace(&wrong_client));
+    }
+
+    #[test]
+    fn trusted_browser_atomic_replace_is_narrow_and_parent_rename_is_denied() {
+        let (_temp, config, cookies) = browser_namespace_fixture();
+        let replacement = cookies.with_extension("tmp");
+        std::fs::write(&replacement, b"replacement synthetic cookies").unwrap();
+        let replacement_metadata = std::fs::metadata(&replacement).unwrap();
+        let destination_metadata = std::fs::metadata(&cookies).unwrap();
+        let replace = NamespaceFacts {
+            operation: NamespaceOperation::Rename,
+            process: fixture_process("fixture.browser"),
+            source: replacement,
+            source_identity: FileIdentity {
+                dev: replacement_metadata.dev(),
+                ino: replacement_metadata.ino(),
+            },
+            destination: cookies.clone(),
+            destination_identity: Some(FileIdentity {
+                dev: destination_metadata.dev(),
+                ino: destination_metadata.ino(),
+            }),
+        };
+        assert!(config.authorize_namespace(&replace));
+
+        let profile = cookies.parent().unwrap().parent().unwrap().to_path_buf();
+        let profile_metadata = std::fs::metadata(&profile).unwrap();
+        let parent_rename = NamespaceFacts {
+            source: profile.clone(),
+            source_identity: FileIdentity {
+                dev: profile_metadata.dev(),
+                ino: profile_metadata.ino(),
+            },
+            destination: profile.with_extension("moved"),
+            destination_identity: None,
+            ..replace
+        };
+        assert!(!config.authorize_namespace(&parent_rename));
+    }
+
+    #[test]
+    fn namespace_mutation_of_ssh_key_is_denied_even_to_trusted_browser() {
+        let temp = tempfile::tempdir().unwrap();
+        let key = temp.path().join("id_ed25519");
+        std::fs::write(&key, b"synthetic ephemeral key fixture").unwrap();
+        let key = std::fs::canonicalize(key).unwrap();
+        let index = crate::resource_index::MacResourceIndex::from_enrollments(
+            &[],
+            std::slice::from_ref(&key),
+        )
+        .unwrap();
+        let config = EndpointSecurityConfig::browser(
+            Arc::new(MacProtectedResources::new(true, index)),
+            Arc::new(RwLock::new(
+                MacBrowserTrustStore::load_and_revalidate(vec![]).unwrap(),
+            )),
+        );
+        let metadata = std::fs::metadata(&key).unwrap();
+        assert!(!config.authorize_namespace(&NamespaceFacts {
+            operation: NamespaceOperation::Rename,
+            process: fixture_process("fixture.browser"),
+            source: key,
+            source_identity: FileIdentity {
+                dev: metadata.dev(),
+                ino: metadata.ino(),
+            },
+            destination: temp.path().join("escaped-key"),
+            destination_identity: None,
+        }));
+    }
+
+    #[test]
+    fn sequence_tracker_counts_per_type_and_global_drops() {
+        let mut tracker = SequenceTracker::default();
+        assert_eq!(tracker.observe(1, Some(10), Some(100)), (0, 0));
+        assert_eq!(tracker.observe(1, Some(13), Some(104)), (2, 3));
+        // Duplicate/out-of-order delivery is not misreported as a dropped event.
+        assert_eq!(tracker.observe(1, Some(12), Some(103)), (0, 0));
+    }
+
+    #[test]
+    fn concurrent_resource_replacement_keeps_complete_snapshots() {
+        use guard_browser::ProtectedResourceRegistry;
+        use guard_core::resource::{ProtectedResourceId, ProtectedResourceKind};
+
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        std::fs::write(&first, b"first synthetic fixture").unwrap();
+        std::fs::write(&second, b"second synthetic fixture").unwrap();
+        let make_index = |path: &std::path::Path| {
+            let mut registry = ProtectedResourceRegistry::new();
+            registry.enroll_file(ProtectedResource {
+                id: ProtectedResourceId(path.to_string_lossy().into_owned()),
+                kind: ProtectedResourceKind::CookieStore,
+                owner_uid: 501,
+                browser: Some(BrowserId("chrome".into())),
+                profile: Some(ProfileId("Default".into())),
+                path: path.to_path_buf(),
+            });
+            crate::resource_index::MacResourceIndex::from_registry(&registry).unwrap()
+        };
+        let first_index = make_index(&first);
+        let second_index = make_index(&second);
+        let resources = Arc::new(MacProtectedResources::new(true, first_index.clone()));
+        let writer_resources = Arc::clone(&resources);
+        let writer = std::thread::spawn(move || {
+            for turn in 0..200 {
+                writer_resources
+                    .replace(
+                        true,
+                        if turn % 2 == 0 {
+                            first_index.clone()
+                        } else {
+                            second_index.clone()
+                        },
+                    )
+                    .unwrap();
+            }
+        });
+        for _ in 0..200 {
+            let (files, trees) = resources.counts();
+            assert_eq!((files, trees), (1, 0));
+        }
+        writer.join().unwrap();
     }
 }
