@@ -110,10 +110,27 @@ impl MacProcessGraph {
     pub fn observe(&mut self, facts: MacProcessFacts, now: Instant) -> anyhow::Result<()> {
         facts.validate()?;
         if let Some(existing) = self.entries.get(&facts.key) {
-            anyhow::ensure!(
-                existing.facts.stable_id() == facts.stable_id() && existing.facts.uid == facts.uid,
-                "same audit process key changed stable identity"
-            );
+            if existing.facts.stable_id() != facts.stable_id() || existing.facts.uid != facts.uid {
+                let mut changed = Vec::new();
+                if existing.facts.start_time_us != facts.start_time_us {
+                    changed.push("start_time");
+                }
+                if existing.facts.executable.path != facts.executable.path {
+                    changed.push("executable_path");
+                }
+                if existing.facts.executable.dev != facts.executable.dev
+                    || existing.facts.executable.ino != facts.executable.ino
+                {
+                    changed.push("executable_file_identity");
+                }
+                if existing.facts.uid != facts.uid {
+                    changed.push("uid");
+                }
+                anyhow::bail!(
+                    "same audit process key changed stable identity fields: {}",
+                    changed.join(",")
+                );
+            }
         }
         self.current_by_pid.insert(facts.key.pid, facts.key);
         self.entries.insert(
@@ -336,7 +353,20 @@ mod tests {
         let first = facts(10, 1, 100, None);
         let changed = facts(10, 1, 200, None);
         graph.observe(first, now).unwrap();
-        assert!(graph.observe(changed, now).is_err());
+        let error = graph.observe(changed, now).unwrap_err();
+        assert!(error.to_string().contains("start_time"));
+    }
+
+    #[test]
+    fn same_audit_key_reports_executable_path_changes_without_accepting_them() {
+        let now = Instant::now();
+        let mut graph = MacProcessGraph::default();
+        let first = facts(10, 1, 100, None);
+        let mut changed = first.clone();
+        changed.executable.path = PathBuf::from("/System/alternate/path");
+        graph.observe(first, now).unwrap();
+        let error = graph.observe(changed, now).unwrap_err();
+        assert!(error.to_string().contains("executable_path"));
     }
 
     #[test]

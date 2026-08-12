@@ -58,6 +58,14 @@ struct MacProfileScope {
 }
 
 impl MacResourceIndex {
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+            && self.aliases.is_empty()
+            && self.tree_roots.is_empty()
+            && self.profiles.is_empty()
+            && self.ssh_paths.is_empty()
+    }
+
     pub fn from_registry(registry: &ProtectedResourceRegistry) -> anyhow::Result<Self> {
         use std::os::unix::fs::MetadataExt;
 

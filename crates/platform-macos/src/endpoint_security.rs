@@ -33,6 +33,26 @@ pub struct AuthOpenFacts {
     pub target_ino: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AuthOpenTargetFacts {
+    requested_fflags: u32,
+    target: PathBuf,
+    target_dev: u64,
+    target_ino: u64,
+}
+
+impl AuthOpenTargetFacts {
+    fn with_process(self, process: MacProcessFacts) -> AuthOpenFacts {
+        AuthOpenFacts {
+            requested_fflags: self.requested_fflags,
+            process,
+            target: self.target,
+            target_dev: self.target_dev,
+            target_ino: self.target_ino,
+        }
+    }
+}
+
 pub struct MacAuthorizationEvent {
     pub facts: AuthOpenFacts,
     pub resource: ProtectedResource,
@@ -90,6 +110,15 @@ impl MacProtectedResources {
             .ssh_key_count()
     }
 
+    fn has_protected_scope(&self) -> bool {
+        self.enabled()
+            && !self
+                .index
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty()
+    }
+
     pub fn is_configured_ssh_resource(&self, resource: &ProtectedResource) -> bool {
         self.index
             .read()
@@ -108,7 +137,7 @@ impl MacProtectedResources {
         )
     }
 
-    fn classify(&self, facts: &AuthOpenFacts) -> Option<ProtectedResource> {
+    fn classify(&self, facts: &AuthOpenTargetFacts) -> Option<ProtectedResource> {
         if !self.enabled() {
             return None;
         }
@@ -125,7 +154,9 @@ impl MacProtectedResources {
             .index
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _ = index.observe_alias(identity, resource.clone());
+        if identity.dev != 0 && identity.ino != 0 {
+            let _ = index.observe_alias(identity, resource.clone());
+        }
         Some(resource)
     }
 
@@ -230,13 +261,24 @@ impl EndpointSecurityConfig {
         }
     }
 
-    fn classify(&self, facts: &AuthOpenFacts) -> Option<ProtectedResource> {
+    fn has_protected_scope(&self) -> bool {
+        match &self.scope {
+            ProtectionScope::Synthetic(paths) => !paths.is_empty(),
+            ProtectionScope::Browser { resources, .. } => resources.has_protected_scope(),
+        }
+    }
+
+    fn classify(
+        &self,
+        facts: &AuthOpenTargetFacts,
+        synthetic_owner_uid: u32,
+    ) -> Option<ProtectedResource> {
         match &self.scope {
             ProtectionScope::Synthetic(paths) if paths.contains(&facts.target) => {
                 Some(ProtectedResource {
                     id: ProtectedResourceId(facts.target.to_string_lossy().into_owned()),
                     kind: ProtectedResourceKind::CookieStore,
-                    owner_uid: facts.process.uid,
+                    owner_uid: synthetic_owner_uid,
                     browser: Some(BrowserId("synthetic".into())),
                     profile: Some(ProfileId("fixture".into())),
                     path: facts.target.clone(),
@@ -311,6 +353,28 @@ impl EndpointSecurityConfig {
             }
         }
     }
+
+    /// Cheap scope gate for namespace events. Process identity, deadlines and
+    /// policy can only deny after the kernel target is known to touch the
+    /// protected namespace. This is the availability boundary that prevents a
+    /// damaged process graph from blocking unrelated filesystem activity.
+    fn namespace_requires_authorization(&self, facts: &NamespaceTargetFacts) -> bool {
+        match &self.scope {
+            ProtectionScope::Synthetic(paths) => {
+                paths.contains(&facts.source) || paths.contains(&facts.destination)
+            }
+            ProtectionScope::Browser { resources, .. } => {
+                if !resources.enabled() {
+                    return false;
+                }
+                let (source, _, source_contains) =
+                    resources.namespace_view(&facts.source, Some(facts.source_identity));
+                let (destination, _, _) =
+                    resources.namespace_view(&facts.destination, facts.destination_identity);
+                source.is_some() || destination.is_some() || source_contains
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -327,6 +391,28 @@ pub struct NamespaceFacts {
     pub source_identity: FileIdentity,
     pub destination: PathBuf,
     pub destination_identity: Option<FileIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NamespaceTargetFacts {
+    operation: NamespaceOperation,
+    source: PathBuf,
+    source_identity: FileIdentity,
+    destination: PathBuf,
+    destination_identity: Option<FileIdentity>,
+}
+
+impl NamespaceTargetFacts {
+    fn with_process(self, process: MacProcessFacts) -> NamespaceFacts {
+        NamespaceFacts {
+            operation: self.operation,
+            process,
+            source: self.source,
+            source_identity: self.source_identity,
+            destination: self.destination,
+            destination_identity: self.destination_identity,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -526,6 +612,69 @@ struct CallbackContext {
 }
 
 #[cfg(target_os = "macos")]
+enum ScopedOpen {
+    Unprotected {
+        requested_fflags: u32,
+    },
+    Protected {
+        target: AuthOpenTargetFacts,
+        resource: ProtectedResource,
+    },
+}
+
+#[cfg(target_os = "macos")]
+fn scope_open(
+    config: &EndpointSecurityConfig,
+    raw: &RawAuthOpenEvent,
+) -> anyhow::Result<ScopedOpen> {
+    if !config.has_protected_scope() {
+        return Ok(ScopedOpen::Unprotected {
+            requested_fflags: raw.requested_flags,
+        });
+    }
+    let Some(candidate) = raw.candidate_target_facts() else {
+        return Ok(ScopedOpen::Unprotected {
+            requested_fflags: raw.requested_flags,
+        });
+    };
+    let Some(resource) = config.classify(&candidate, raw.process.uid) else {
+        return Ok(ScopedOpen::Unprotected {
+            requested_fflags: raw.requested_flags,
+        });
+    };
+    // Strict normalization is deliberately deferred until the target has
+    // already matched the protected scope. Its failure may therefore deny one
+    // protected target, but can never turn malformed unrelated events into a
+    // machine-wide deny rule.
+    let target = raw.to_target_facts()?;
+    Ok(ScopedOpen::Protected { target, resource })
+}
+
+#[cfg(target_os = "macos")]
+enum ScopedNamespace {
+    Unprotected,
+    Protected(NamespaceTargetFacts),
+}
+
+#[cfg(target_os = "macos")]
+fn scope_namespace(
+    config: &EndpointSecurityConfig,
+    raw: &RawNamespaceEvent,
+) -> anyhow::Result<ScopedNamespace> {
+    if !config.has_protected_scope() {
+        return Ok(ScopedNamespace::Unprotected);
+    }
+    let Some(candidate) = raw.candidate_target_facts() else {
+        return Ok(ScopedNamespace::Unprotected);
+    };
+    if !config.namespace_requires_authorization(&candidate) {
+        return Ok(ScopedNamespace::Unprotected);
+    }
+    let target = raw.to_target_facts()?;
+    Ok(ScopedNamespace::Protected(target))
+}
+
+#[cfg(target_os = "macos")]
 #[derive(Default)]
 struct SequenceTracker {
     per_kind: [Option<u64>; 7],
@@ -569,16 +718,31 @@ impl CallbackContext {
         message: *const std::ffi::c_void,
         raw: &RawAuthOpenEvent,
     ) {
-        let facts = match raw.to_facts() {
-            Ok(facts) => facts,
+        let (target, resource) = match scope_open(&self.config, raw) {
+            Ok(ScopedOpen::Unprotected { requested_fflags }) => {
+                self.respond_immediate(client, message, requested_fflags);
+                return;
+            }
+            Ok(ScopedOpen::Protected { target, resource }) => (target, resource),
             Err(error) => {
                 self.health.note(format!(
-                    "AUTH_OPEN failed closed during normalization: {error}"
+                    "protected AUTH_OPEN failed closed during target normalization: {error}"
                 ));
                 self.respond_immediate(client, message, 0);
                 return;
             }
         };
+        let process = match raw.process.to_facts() {
+            Ok(process) => process,
+            Err(error) => {
+                self.health.note(format!(
+                    "protected AUTH_OPEN failed closed during process normalization: {error}"
+                ));
+                self.respond_immediate(client, message, 0);
+                return;
+            }
+        };
+        let facts = target.with_process(process);
         if let Err(error) = self
             .process_graph
             .lock()
@@ -586,15 +750,11 @@ impl CallbackContext {
             .observe(facts.process.clone(), std::time::Instant::now())
         {
             self.health.note(format!(
-                "AUTH_OPEN failed closed because process identity could not be graphed: {error}"
+                "protected AUTH_OPEN failed closed because process identity could not be graphed: {error}"
             ));
             self.respond_immediate(client, message, 0);
             return;
         }
-        let Some(resource) = self.config.classify(&facts) else {
-            self.respond_immediate(client, message, facts.requested_fflags);
-            return;
-        };
         let response_budget =
             match crate::deadline::response_budget(&crate::deadline::DarwinClock, raw.deadline) {
                 Ok(budget) => budget,
@@ -669,26 +829,42 @@ impl CallbackContext {
         message: *const std::ffi::c_void,
         raw: &RawNamespaceEvent,
     ) {
-        if let Err(error) =
-            crate::deadline::response_budget(&crate::deadline::DarwinClock, raw.deadline)
-        {
-            self.health.insufficient_deadline();
-            self.health.degrade(format!(
-                "namespace authorization had insufficient response deadline: {error}"
-            ));
-            self.respond_namespace(client, message, false);
-            return;
-        }
-        let facts = match raw.to_facts() {
-            Ok(facts) => facts,
+        let target = match scope_namespace(&self.config, raw) {
+            Ok(ScopedNamespace::Unprotected) => {
+                self.health.namespace_decision(true);
+                self.respond_namespace(client, message, true);
+                return;
+            }
+            Ok(ScopedNamespace::Protected(target)) => target,
             Err(error) => {
                 self.health.degrade(format!(
-                    "namespace authorization failed closed during normalization: {error}"
+                    "protected namespace authorization failed closed during target normalization: {error}"
                 ));
                 self.respond_namespace(client, message, false);
                 return;
             }
         };
+        if let Err(error) =
+            crate::deadline::response_budget(&crate::deadline::DarwinClock, raw.deadline)
+        {
+            self.health.insufficient_deadline();
+            self.health.degrade(format!(
+                "protected namespace authorization had insufficient response deadline: {error}"
+            ));
+            self.respond_namespace(client, message, false);
+            return;
+        }
+        let process = match raw.process.to_facts() {
+            Ok(process) => process,
+            Err(error) => {
+                self.health.degrade(format!(
+                    "protected namespace authorization failed closed during process normalization: {error}"
+                ));
+                self.respond_namespace(client, message, false);
+                return;
+            }
+        };
+        let facts = target.with_process(process);
         if let Err(error) = self
             .process_graph
             .lock()
@@ -696,7 +872,7 @@ impl CallbackContext {
             .observe(facts.process.clone(), std::time::Instant::now())
         {
             self.health.degrade(format!(
-                "namespace authorization failed closed because process identity was invalid: {error}"
+                "protected namespace authorization failed closed because process identity was invalid: {error}"
             ));
             self.respond_namespace(client, message, false);
             return;
@@ -779,6 +955,8 @@ impl CallbackContext {
                     .and_then(|parent| graph.observe(parent, now));
                 parent_result.and_then(|()| graph.observe(process, now))
             }
+            // Apple documents exec as incrementing pidversion, so the target
+            // is a new audit key and must pass the ordinary strict observer.
             2 => graph.observe(process, now),
             3 => {
                 graph.remove_terminal(process.key);
@@ -970,6 +1148,7 @@ struct RawAuthOpenEvent {
 }
 
 #[cfg(target_os = "macos")]
+#[derive(Default)]
 #[repr(C)]
 struct RawNamespaceEvent {
     operation: u32,
@@ -994,6 +1173,7 @@ struct RawNamespaceEvent {
 }
 
 #[cfg(target_os = "macos")]
+#[derive(Default)]
 #[repr(C)]
 struct RawProcessFacts {
     pid: i32,
@@ -1029,7 +1209,16 @@ struct RawProcessFacts {
 
 #[cfg(target_os = "macos")]
 impl RawAuthOpenEvent {
-    fn to_facts(&self) -> anyhow::Result<AuthOpenFacts> {
+    fn candidate_target_facts(&self) -> Option<AuthOpenTargetFacts> {
+        Some(AuthOpenTargetFacts {
+            requested_fflags: self.requested_flags,
+            target: token_path_candidate(self.target_path, self.target_path_len)?,
+            target_dev: self.target_dev,
+            target_ino: self.target_ino,
+        })
+    }
+
+    fn to_target_facts(&self) -> anyhow::Result<AuthOpenTargetFacts> {
         anyhow::ensure!(
             !self.target_path_truncated,
             "Endpoint Security supplied a truncated target path"
@@ -1038,9 +1227,8 @@ impl RawAuthOpenEvent {
             self.target_dev != 0 && self.target_ino != 0,
             "Endpoint Security supplied incomplete target file identity"
         );
-        Ok(AuthOpenFacts {
+        Ok(AuthOpenTargetFacts {
             requested_fflags: self.requested_flags,
-            process: self.process.to_facts()?,
             target: token_path(self.target_path, self.target_path_len)?,
             target_dev: self.target_dev,
             target_ino: self.target_ino,
@@ -1050,7 +1238,37 @@ impl RawAuthOpenEvent {
 
 #[cfg(target_os = "macos")]
 impl RawNamespaceEvent {
-    fn to_facts(&self) -> anyhow::Result<NamespaceFacts> {
+    fn candidate_target_facts(&self) -> Option<NamespaceTargetFacts> {
+        let destination = if self.destination_existing {
+            token_path_candidate(
+                self.destination_existing_path,
+                self.destination_existing_path_len,
+            )?
+        } else {
+            token_path_candidate(self.destination_dir_path, self.destination_dir_path_len)?.join(
+                token_os_string_candidate(self.destination_name, self.destination_name_len)?,
+            )
+        };
+        Some(NamespaceTargetFacts {
+            operation: match self.operation {
+                1 => NamespaceOperation::Link,
+                2 => NamespaceOperation::Rename,
+                _ => return None,
+            },
+            source: token_path_candidate(self.source_path, self.source_path_len)?,
+            source_identity: FileIdentity {
+                dev: self.source_dev,
+                ino: self.source_ino,
+            },
+            destination,
+            destination_identity: self.destination_existing.then_some(FileIdentity {
+                dev: self.destination_dev,
+                ino: self.destination_ino,
+            }),
+        })
+    }
+
+    fn to_target_facts(&self) -> anyhow::Result<NamespaceTargetFacts> {
         anyhow::ensure!(
             !self.source_path_truncated,
             "Endpoint Security supplied a truncated namespace source path"
@@ -1083,13 +1301,12 @@ impl RawNamespaceEvent {
                 self.destination_name_len,
             )?)
         };
-        Ok(NamespaceFacts {
+        Ok(NamespaceTargetFacts {
             operation: match self.operation {
                 1 => NamespaceOperation::Link,
                 2 => NamespaceOperation::Rename,
                 value => anyhow::bail!("unknown namespace operation {value}"),
             },
-            process: self.process.to_facts()?,
             source: token_path(self.source_path, self.source_path_len)?,
             source_identity: FileIdentity {
                 dev: self.source_dev,
@@ -1191,23 +1408,48 @@ fn token_optional_string(pointer: *const u8, length: usize) -> anyhow::Result<Op
 fn token_path(pointer: *const u8, length: usize) -> anyhow::Result<PathBuf> {
     use std::os::unix::ffi::OsStringExt;
 
-    anyhow::ensure!(!pointer.is_null() || length == 0, "missing path token");
+    anyhow::ensure!(length > 0, "empty path token");
+    anyhow::ensure!(!pointer.is_null(), "missing path token");
     // SAFETY: the token is supplied by ES and copied synchronously while the
     // callback's es_message_t is live.
     let bytes = unsafe { std::slice::from_raw_parts(pointer, length) };
-    anyhow::ensure!(!bytes.is_empty(), "empty path token");
     Ok(PathBuf::from(std::ffi::OsString::from_vec(bytes.to_vec())))
+}
+
+#[cfg(target_os = "macos")]
+fn token_path_candidate(pointer: *const u8, length: usize) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+
+    if pointer.is_null() || length == 0 {
+        return None;
+    }
+    // SAFETY: checked non-null/non-empty and copied only while the ES message
+    // backing the token is live.
+    let bytes = unsafe { std::slice::from_raw_parts(pointer, length) };
+    Some(PathBuf::from(std::ffi::OsString::from_vec(bytes.to_vec())))
 }
 
 #[cfg(target_os = "macos")]
 fn token_os_string(pointer: *const u8, length: usize) -> anyhow::Result<std::ffi::OsString> {
     use std::os::unix::ffi::OsStringExt;
 
-    anyhow::ensure!(!pointer.is_null() || length == 0, "missing filename token");
+    anyhow::ensure!(length > 0, "empty filename token");
+    anyhow::ensure!(!pointer.is_null(), "missing filename token");
     // SAFETY: the token is copied synchronously while the ES message is live.
     let bytes = unsafe { std::slice::from_raw_parts(pointer, length) };
-    anyhow::ensure!(!bytes.is_empty(), "empty filename token");
     Ok(std::ffi::OsString::from_vec(bytes.to_vec()))
+}
+
+#[cfg(target_os = "macos")]
+fn token_os_string_candidate(pointer: *const u8, length: usize) -> Option<std::ffi::OsString> {
+    use std::os::unix::ffi::OsStringExt;
+
+    if pointer.is_null() || length == 0 {
+        return None;
+    }
+    // SAFETY: checked non-null/non-empty and copied synchronously.
+    let bytes = unsafe { std::slice::from_raw_parts(pointer, length) };
+    Some(std::ffi::OsString::from_vec(bytes.to_vec()))
 }
 
 #[cfg(target_os = "macos")]
@@ -1501,6 +1743,213 @@ mod tests {
             EndpointSecurityConfig::synthetic_exact_paths([PathBuf::from("relative")]).is_err()
         );
         assert!(EndpointSecurityConfig::synthetic_exact_paths(Vec::<PathBuf>::new()).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn unprotected_open_is_scoped_before_invalid_process_identity() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let protected = temp.path().join("protected fixture with spaces.txt");
+        let ordinary = temp.path().join("ordinary file with spaces.txt");
+        std::fs::write(&protected, b"synthetic protected bytes").unwrap();
+        std::fs::write(&ordinary, b"ordinary bytes").unwrap();
+        let config = EndpointSecurityConfig::synthetic_exact_paths([protected.clone()]).unwrap();
+        let ordinary_metadata = std::fs::metadata(&ordinary).unwrap();
+        let ordinary_bytes = ordinary.as_os_str().as_bytes();
+        let raw = RawAuthOpenEvent {
+            requested_flags: ES_FFLAG_READ,
+            deadline: 0,
+            target_dev: ordinary_metadata.dev(),
+            target_ino: ordinary_metadata.ino(),
+            target_path: ordinary_bytes.as_ptr(),
+            target_path_len: ordinary_bytes.len(),
+            target_path_truncated: false,
+            // An invalid process proves that the unprotected scope gate does
+            // not parse or trust process identity before allowing the open.
+            process: RawProcessFacts::default(),
+        };
+
+        assert!(raw.process.to_facts().is_err());
+        assert!(matches!(
+            scope_open(&config, &raw).unwrap(),
+            ScopedOpen::Unprotected {
+                requested_fflags: ES_FFLAG_READ
+            }
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn empty_policy_allows_open_and_namespace_before_target_normalization() {
+        let config = EndpointSecurityConfig::browser(
+            Arc::new(MacProtectedResources::new(true, Default::default())),
+            Arc::new(RwLock::new(
+                MacBrowserTrustStore::load_and_revalidate(vec![]).unwrap(),
+            )),
+        );
+        let raw_open = RawAuthOpenEvent {
+            requested_flags: ES_FFLAG_READ,
+            deadline: 0,
+            target_dev: 0,
+            target_ino: 0,
+            target_path: std::ptr::null(),
+            target_path_len: 0,
+            target_path_truncated: true,
+            process: RawProcessFacts::default(),
+        };
+        assert!(matches!(
+            scope_open(&config, &raw_open).unwrap(),
+            ScopedOpen::Unprotected {
+                requested_fflags: ES_FFLAG_READ
+            }
+        ));
+        assert!(matches!(
+            scope_namespace(&config, &RawNamespaceEvent::default()).unwrap(),
+            ScopedNamespace::Unprotected
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn protected_open_with_spaces_enters_the_narrow_fail_closed_scope() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let protected = temp.path().join("protected fixture with spaces.txt");
+        std::fs::write(&protected, b"synthetic protected bytes").unwrap();
+        let config = EndpointSecurityConfig::synthetic_exact_paths([protected.clone()]).unwrap();
+        let protected = std::fs::canonicalize(protected).unwrap();
+        let metadata = std::fs::metadata(&protected).unwrap();
+        let path_bytes = protected.as_os_str().as_bytes();
+        let raw = RawAuthOpenEvent {
+            requested_flags: ES_FFLAG_READ,
+            deadline: 0,
+            target_dev: metadata.dev(),
+            target_ino: metadata.ino(),
+            target_path: path_bytes.as_ptr(),
+            target_path_len: path_bytes.len(),
+            target_path_truncated: false,
+            process: RawProcessFacts::default(),
+        };
+
+        match scope_open(&config, &raw).unwrap() {
+            ScopedOpen::Protected { target, resource } => {
+                assert_eq!(target.target, protected);
+                assert_eq!(resource.path, protected);
+            }
+            ScopedOpen::Unprotected { .. } => panic!("protected path was scoped as ordinary"),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn truncated_paths_only_fail_closed_after_a_protected_match() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let protected = temp.path().join("protected fixture.txt");
+        let ordinary = temp.path().join("ordinary fixture.txt");
+        std::fs::write(&protected, b"synthetic protected bytes").unwrap();
+        std::fs::write(&ordinary, b"ordinary bytes").unwrap();
+        let config = EndpointSecurityConfig::synthetic_exact_paths([protected.clone()]).unwrap();
+        let protected = std::fs::canonicalize(protected).unwrap();
+        let ordinary = std::fs::canonicalize(ordinary).unwrap();
+
+        let raw_for = |path: &std::path::Path| {
+            let metadata = std::fs::metadata(path).unwrap();
+            let path_bytes = path.as_os_str().as_bytes();
+            RawAuthOpenEvent {
+                requested_flags: ES_FFLAG_READ,
+                deadline: 0,
+                target_dev: metadata.dev(),
+                target_ino: metadata.ino(),
+                target_path: path_bytes.as_ptr(),
+                target_path_len: path_bytes.len(),
+                target_path_truncated: true,
+                process: RawProcessFacts::default(),
+            }
+        };
+
+        assert!(matches!(
+            scope_open(&config, &raw_for(&ordinary)).unwrap(),
+            ScopedOpen::Unprotected { .. }
+        ));
+        assert!(scope_open(&config, &raw_for(&protected)).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn truncated_namespace_paths_only_deny_after_a_protected_match() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let protected = temp.path().join("protected namespace fixture.txt");
+        let ordinary = temp.path().join("ordinary namespace fixture.txt");
+        std::fs::write(&protected, b"synthetic protected bytes").unwrap();
+        std::fs::write(&ordinary, b"ordinary bytes").unwrap();
+        let config = EndpointSecurityConfig::synthetic_exact_paths([protected.clone()]).unwrap();
+        let protected = std::fs::canonicalize(protected).unwrap();
+        let ordinary = std::fs::canonicalize(ordinary).unwrap();
+        let directory = std::fs::canonicalize(temp.path()).unwrap();
+        let directory_bytes = directory.as_os_str().as_bytes();
+        let destination_name = b"destination fixture.txt";
+
+        let raw_for = |source: &std::path::Path| {
+            let metadata = std::fs::metadata(source).unwrap();
+            let source_bytes = source.as_os_str().as_bytes();
+            RawNamespaceEvent {
+                operation: 2,
+                deadline: 0,
+                source_dev: metadata.dev(),
+                source_ino: metadata.ino(),
+                source_path: source_bytes.as_ptr(),
+                source_path_len: source_bytes.len(),
+                source_path_truncated: true,
+                destination_existing: false,
+                destination_dev: 0,
+                destination_ino: 0,
+                destination_dir_path: directory_bytes.as_ptr(),
+                destination_dir_path_len: directory_bytes.len(),
+                destination_dir_path_truncated: false,
+                destination_name: destination_name.as_ptr(),
+                destination_name_len: destination_name.len(),
+                destination_existing_path: std::ptr::null(),
+                destination_existing_path_len: 0,
+                destination_existing_path_truncated: false,
+                process: RawProcessFacts::default(),
+            }
+        };
+
+        assert!(matches!(
+            scope_namespace(&config, &raw_for(&ordinary)).unwrap(),
+            ScopedNamespace::Unprotected
+        ));
+        assert!(scope_namespace(&config, &raw_for(&protected)).is_err());
+    }
+
+    #[test]
+    fn namespace_scope_gate_allows_unrelated_paths_before_identity_checks() {
+        let temp = tempfile::tempdir().unwrap();
+        let protected = temp.path().join("protected fixture with spaces.txt");
+        std::fs::write(&protected, b"synthetic protected bytes").unwrap();
+        let config = EndpointSecurityConfig::synthetic_exact_paths([protected.clone()]).unwrap();
+        let protected = std::fs::canonicalize(protected).unwrap();
+        let ordinary = NamespaceTargetFacts {
+            operation: NamespaceOperation::Rename,
+            source: temp.path().join("ordinary source with spaces.txt"),
+            source_identity: FileIdentity { dev: 9, ino: 10 },
+            destination: temp.path().join("ordinary destination with spaces.txt"),
+            destination_identity: None,
+        };
+        assert!(!config.namespace_requires_authorization(&ordinary));
+
+        let protected_rename = NamespaceTargetFacts {
+            source: protected,
+            ..ordinary
+        };
+        assert!(config.namespace_requires_authorization(&protected_rename));
     }
 
     #[test]
