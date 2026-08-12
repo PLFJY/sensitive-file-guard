@@ -2,8 +2,9 @@
 
 The development `Guard.app` contains the Endpoint Security extension, GTK
 control center, authenticated XPC clients, pending helper, and browser/SSH
-policy runtime. It is not distributable packaging. Live enforcement still requires
-Apple-approved Endpoint Security provisioning and Full Disk Access.
+policy runtime. It is not distributable packaging. Live enforcement requires
+either explicit SIP-off self-use certificate mode or optional formally
+provisioned Apple mode, plus Full Disk Access.
 It intentionally may retain Homebrew GTK dependencies and is not the release
 artifact. See [the macOS release guide](INSTALL_MACOS_RELEASE.md) for the
 self-contained hardened-runtime/notarization path.
@@ -24,7 +25,25 @@ scripts/macos/inspect-signing.sh
 ```
 
 The result is `build/macos/Guard.app`. The development bundle may reference
-Homebrew GTK dylibs. Runtime relocation belongs to the packaging phase.
+Homebrew GTK dylibs. Runtime relocation belongs to the packaging phase. The
+ad-hoc development bundle carries restricted entitlement templates but has no
+certificate identity; do not treat it as a launchable SIP-on GUI smoke package.
+Use the entitlement-free `LOCAL_SIGNING_ONLY=1` release mode for that purpose.
+
+For a live self-use development candidate, keep SIP enabled while building and
+use a certificate (never `SIGNING_IDENTITY=-`):
+
+```sh
+SELF_USE_SIP_OFF=1 \
+SELF_USE_SIGNING_IDENTITY='Guard Local Development Certificate' \
+SELF_USE_SIGNING_KEYCHAIN="$HOME/Library/Keychains/GuardSelfUse.keychain-db" \
+scripts/macos/build-dev-app.sh
+```
+
+This runs the self-use safety gate and retains both restricted entitlements
+without provisioning. Do not activate it until offline review and removal of
+any previous Guard extension are complete. While SIP is enabled, inspect this
+candidate with signing tools rather than launching it.
 
 Bundle and signing inputs are external:
 
@@ -55,17 +74,16 @@ build/macos/Guard.app/Contents/MacOS/Guard --deactivate-system-extension
 ```
 
 The product uses `OSSystemExtensionRequest`; it does not shell out to
-`systemextensionsctl`. Activation normally requires an Apple-approved Endpoint
-Security entitlement, matching provisioning, proper signing, placement of the
-app in an allowed location, user approval, and Full Disk Access. Direct
-`codesign` output proves only that an entitlement claim was embedded; it does
-not prove that Apple authorized that restricted entitlement. An ad-hoc bundle
-is suitable for layout and diagnostics only and must not be reported as an
-enforcement pass.
+`systemextensionsctl`. Self-use activation requires SIP off, developer mode,
+the local certificate, correct placement, both final entitlements, user
+approval, and Full Disk Access. Formal SIP-on activation instead requires Apple
+provisioning. `codesign` output is only a prerequisite; neither path is an
+enforcement pass until the live synthetic kernel tests succeed. An ad-hoc
+bundle remains suitable for layout and diagnostics only.
 
 Phase 03's real synthetic AUTH_OPEN allow/deny acceptance script is
-`scripts/macos/run-es-poc.sh`. It requires approved bundle IDs, matching host
-and Endpoint Security provisioning profiles, and an explicit signing identity.
+`scripts/macos/run-es-poc.sh`. In self-use mode it requires the local signing
+identity and explicit risk acknowledgement, but not provisioning profiles.
 It creates only a temporary synthetic canary and never accesses browser or SSH
 data.
 
@@ -94,12 +112,12 @@ cargo build -p guardctl
 scripts/macos/test-ephemeral-ssh-key.sh target/debug/guardctl
 ```
 
-On an installed, activated, provisioned test host, run
+On an installed and activated self-use or provisioned test host, run
 `scripts/macos/run-ssh-policy-acceptance.sh build/macos/Guard.app` for the real
 Block/Allow/process-tree flow. The script refuses to continue when authenticated
 XPC/Endpoint Security is unavailable and never selects a key from `~/.ssh`.
 
 Run `scripts/macos/run-namespace-health-acceptance.sh` for disposable Chrome
 hardlink, symlink, rename-out, parent-rename, status-counter, and real-browser
-atomic-update regression checks. It has the same provisioned-host prerequisite
+atomic-update regression checks. It has the same live-backend prerequisite
 and exits 77 before fixture creation when that prerequisite is absent.

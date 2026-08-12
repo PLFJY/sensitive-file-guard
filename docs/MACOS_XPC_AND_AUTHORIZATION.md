@@ -86,10 +86,11 @@ Guard.app/Contents/MacOS/Guard --xpc-status
 Guard.app/Contents/MacOS/guardctl status
 ```
 
-Ad-hoc builds are expected to report that authenticated XPC is unavailable
-because they have no Team ID. A live end-to-end service test requires a valid
-Team-signed, provisioned, activated Endpoint Security extension; this is the
-same external Apple gate as live AUTH_OPEN acceptance.
+Ad-hoc builds are expected to report that authenticated XPC is unavailable.
+Formal builds use the Apple Team requirement. SIP-off self-use builds use the
+exact local certificate fingerprint plus the expected Guard signing identifier;
+same UID alone remains insufficient. A live service test requires one of those
+authenticated identities and an activated Endpoint Security extension.
 
 When an Apple Development signing identity is available, the transport-only
 test can exercise the real Mach service without activating ES:

@@ -11,14 +11,16 @@ fanotify/Polkit desktop acceptance remains environment-dependent.
 Conservative mode remains implementation-complete but is not promoted because
 its replacement race remained readable in 10,000/10,000 iterations.
 
-**macOS acceptance state:** **FUNCTIONALLY COMPLETE / SECURITY ACCEPTANCE
-BLOCKED** on the recorded macOS 26.6.1 arm64 host. The self-contained app,
+**macOS acceptance state:** **OFFLINE SAFETY/SIGNING GATES PASS; LIVE SECURITY
+RE-ACCEPTANCE PAUSED** on the recorded macOS 26.6.1 arm64 host. The self-contained app,
 deadline-safe Endpoint Security adapter, signer-aware identity, authenticated
 XPC, LocalAuthentication gates, browser/SSH policy, namespace mediation,
-health, update, and recovery paths pass locally testable gates. The host lacks
-Apple-authorized provisioning/Developer ID/notary credentials and an active
-FDA-authorized extension, and SIP is disabled. Consequently no real entitled
-pre-open, browser, SSH, namespace, or performance result is claimed.
+health, update, and recovery paths pass locally testable gates. The current
+target intentionally uses a local certificate and SIP-off instead of waiting
+for Apple provisioning. After an over-broad AUTH_OPEN failure incident, SIP was
+re-enabled and the extension deactivated; only offline corrections have been
+tested. No current real pre-open, browser, SSH, namespace, or performance result
+is claimed until the controlled synthetic rerun.
 
 ## Mission
 

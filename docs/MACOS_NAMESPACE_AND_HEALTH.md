@@ -52,7 +52,8 @@ continuous mediation during that unavoidable interval.
 
 ## Disposable acceptance
 
-On an Apple-provisioned host with the extension activated and Full Disk Access:
+On a SIP-off self-use or formally provisioned host with the extension activated
+and Full Disk Access:
 
 ```sh
 scripts/macos/run-namespace-health-acceptance.sh

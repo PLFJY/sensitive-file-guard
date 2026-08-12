@@ -3,10 +3,10 @@
 ## Purpose
 
 This document defines the production boundary shared by the Linux reference
-implementation and the functionally complete macOS backend. Platform security
-acceptance is recorded separately: macOS still requires a normal-SIP,
-Apple-provisioned Endpoint Security/FDA run before it can be called
-security-accepted.
+implementation and the macOS backend. Platform security acceptance is recorded
+separately: the current target is experimental SIP-off self-use with a local
+certificate and FDA. It must pass the controlled synthetic rerun before it can
+be called security-accepted; formal SIP-on distribution remains optional.
 
 ## Portable layers
 

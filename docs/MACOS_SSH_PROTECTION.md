@@ -96,13 +96,13 @@ scripts/macos/test-ephemeral-ssh-key.sh target/debug/guardctl
 ```
 
 For real kernel-mediated Block, Allow, descendant, unrelated-process, and audit
-acceptance on a provisioned host, run:
+acceptance on an activated self-use or provisioned host, run:
 
 ```sh
 scripts/macos/run-ssh-policy-acceptance.sh build/macos/Guard.app
 ```
 
 That script stops with status 77 before generating a key if the signed CLI
-cannot reach the activated extension. Until an Apple-provisioned ES extension
-with Full Disk Access is available, the live kernel assertions remain BLOCKED,
-not passed.
+cannot reach the activated extension. Until the controlled SIP-off live rerun
+with Full Disk Access succeeds, the live kernel assertions remain BLOCKED, not
+passed.

@@ -91,13 +91,13 @@ their normal protected-class writes and observed signed helper topology were
 verified.
 
 Live proof that an unknown process is denied by the kernel and that a real
-cross-browser importer succeeds after approval requires an activated,
-Apple-provisioned Endpoint Security extension with Full Disk Access. Until
-that external environment exists, those two end-to-end assertions remain
-BLOCKED and must not be reported as passed.
+cross-browser importer succeeds after approval requires an activated SIP-off
+self-use or formally provisioned Endpoint Security extension with Full Disk
+Access. These end-to-end assertions remain BLOCKED until the controlled live
+rerun and must not be reported as passed.
 
 Run `scripts/macos/test-disposable-browsers.sh` for the entitlement-independent
-Chrome/Firefox startup and signer check. On a provisioned test host, run
+Chrome/Firefox startup and signer check. On an activated test host, run
 `scripts/macos/run-browser-policy-acceptance.sh`; it creates only mktemp-backed
 profiles, refuses to continue without authenticated XPC, checks unknown-probe
 denial, and guides the two explicit migration decisions before verifying typed

@@ -1,71 +1,97 @@
 # macOS 保护启用指南
 
-这份指南面向使用 Guard 的普通 macOS 用户。正常情况下，你不需要运行
-`systemextensionsctl`、终端激活命令，也不需要理解“授权助手”之类的内部名称。
+当前 macOS 产品定位是自用、开源实验。主要路径是：本地自签名证书、保留
+Endpoint Security entitlement、关闭 SIP、由用户正常批准系统扩展和完全磁盘访问。
+它不是已公证的普通消费者安装包，也不代表支持 SIP-on 分发。
 
-## 当前支持的自用模式
+## 先看安全边界
 
-当前 macOS 版本首先服务于自用和开源测试：需要在你自己控制的 Mac 上关闭 SIP，
-使用本地 Guard 签名证书，并开启 System Extension developer mode。它不是面向普通
-消费者的免配置安装包，也不代表已公证或支持 SIP-on 分发。
+不要一上来关闭 SIP。先在 SIP 开启状态完成构建、单元测试、签名和包检查；只有这些
+离线门槛全部通过，并确认旧 Guard 扩展已经移除，才考虑进入 Recovery 关闭 SIP。
 
-完成 Recovery 中的 `csrutil disable` 并重启后，在终端运行：
+`SELF_USE_SIP_OFF=1` 构建会强制执行 `scripts/macos/self-use-safety-gate.sh`。当前安全门
+要求至少证明：
+
+- 空策略不会因目标或进程元数据异常而拒绝普通文件操作；
+- AUTH_OPEN 先确认目标属于保护集合，之后才允许身份、期限、队列错误 fail-closed；
+- link/rename 同样先确认涉及保护命名空间；
+- 带空格路径按原始字节长度处理，不经过 shell 分词；
+- 旧的自用包没有 `SAFETY_GATE=mac-auth-scope-v1` 标记时，GUI 禁止安装扩展。
+
+这些措施显著缩小故障影响范围，但任何系统级安全软件都不能诚实承诺“100% 不会出现
+故障”。首次 live 验收只使用一个合成文件，并提前保留恢复方案；不要直接登记真实
+浏览器或 SSH 私钥。
+
+## 自用构建与离线验证
+
+保持 SIP 开启，在仓库根目录执行：
 
 ```sh
-sudo systemextensionsctl developer on
 scripts/macos/create-self-use-signing-identity.sh
+
+SELF_USE_SIP_OFF=1 \
+SELF_USE_SIGNING_IDENTITY='Guard Local Development Certificate' \
+SELF_USE_SIGNING_KEYCHAIN="$HOME/Library/Keychains/GuardSelfUse.keychain-db" \
+CODESIGN_TIMESTAMP=none \
+scripts/macos/build-release-app.sh
 ```
 
-然后按 [macOS 安装说明](INSTALL_MACOS.md) 构建 `SELF_USE_SIP_OFF=1` 包。Guard
-不会自动关闭 SIP、修改 TCC 或替你授予完全磁盘访问。
+构建必须显示安全门、测试、clippy 和 `VERIFY_SIGNING_MODE=self-use` 验证通过。最终包内
+主程序应有 `com.apple.developer.system-extension.install`，扩展应有
+`com.apple.developer.endpoint-security.client`；本地证书和私钥只留在 Keychain，不能
+出现在仓库或应用包内。
 
-## 可选的正式包
+## 受控启用流程
 
-真正能够保护浏览器会话数据和 SSH 私钥的包，必须由发布者提供，并同时具备：
+完成离线评审后，按以下顺序操作：
 
-- Apple 批准的 Endpoint Security 授权；
-- 与该授权匹配的签名和 provisioning profile；
-- 已通过公证的分发签名。
+1. 确认 `systemextensionsctl list` 中没有旧 Guard 扩展处于 enabled/active；若显示
+   `terminated waiting to uninstall on reboot`，先重启完成移除。
+2. 在 Recovery 里手动执行 `csrutil disable`，然后重启。Guard 不会替你做这一步。
+3. 登录后执行 `csrutil status`，确认明确显示 disabled。
+4. 执行 `sudo systemextensionsctl developer on`。
+5. 将审查过的 `Guard.app` 放入 `/Applications`，不要从 `build/` 目录请求激活。
+6. 打开 Guard。Protection 页面必须显示当前安全门有效、SIP 已关闭、Host/Extension
+   entitlement 均存在，安装按钮才可用。
+7. 点击“安装防护扩展”，按 macOS 提示批准；再点击“授予完全磁盘访问权限”，由用户
+   在系统设置中正常授权。Guard 不修改 TCC 数据库。
+8. 暂时保持保护策略关闭。先验证扩展 Active、`guard-es` 运行、认证 XPC 可用、
+   Endpoint Security backend Active。
+9. 只创建一个临时合成文件，先验证普通系统文件仍可打开，再验证该合成文件的
+   `/usr/bin/cat` DENY 和明确登记 probe 的 ALLOW。
+10. 基础安全验收通过后，才继续合成浏览器、临时 SSH key、deadline、namespace 和
+    restart/update 验收。
 
-如果 Guard 的“安装防护扩展”按钮是灰色，页面会说明这是“本地测试包”。这类包
-只能打开界面和验证打包，**无法**安装系统扩展、授予权限或开启真实保护。它不是
-你的操作错误；请向发布者索取正式包。
+运行 live PoC 还必须显式设置：
 
-## 正常安装和启用
+```sh
+LIVE_ES_ACCEPTANCE=I_ACCEPT_SYSTEM_EXTENSION_RISK
+```
 
-1. 将正式的 `Guard.app` 拖到“应用程序”（`/Applications`）文件夹。
-2. 双击打开 Guard，进入左侧“Protection / 保护”页面。
-3. 点击“1. 安装防护扩展”。
-4. 若 macOS 弹出确认，按提示选择允许；若系统设置打开，请在其中批准 Guard 的
-   防护扩展。
-5. 回到 Guard，等待“防护扩展”显示为“Active / 已启用”。若提示需要重启，先重启
-   Mac，再重新打开 Guard。
-6. 点击“2. 授予完全磁盘访问权限”。Guard 会打开 macOS 的对应设置页；在列表中为
-   Guard 启用开关。Guard 不会替你修改该权限。
-7. 回到 Guard，等待“完全磁盘访问”显示为“Granted / 已授予”。
-8. 建议开启“遇到确认请求时自动打开 Guard”。这是一个登录项：当浏览器迁移或 SSH
-   密钥读取需要你确认时，它会自动打开 Guard 的确认窗口。它不会读取你的数据，也
-   不负责安装扩展或授予权限。
-9. 添加并审核要保护的浏览器配置或 SSH 私钥，然后打开“Protection policy / 保护策略”。
-   只有扩展、完全磁盘访问和策略均正常时，状态才会显示为已保护。
+缺少该确认或 SIP 仍开启时，脚本会拒绝激活。它不是跳过安全门的开关。
 
-## 常见状态
+## 紧急恢复
 
-| Guard 显示 | 含义与处理 |
-|---|---|
-| `Not installed / unknown` | 尚未安装扩展。点击“安装防护扩展”。 |
-| `Pending approval` | macOS 正在等待你的批准。按系统通知或系统设置提示操作。 |
-| `Restart required` | 重启 Mac 后再打开 Guard。 |
-| `Installed, disabled` | 扩展已存在但未启用。再次点击“安装防护扩展”，按系统提示批准。 |
-| `Full Disk Access: Required` | 点击“授予完全磁盘访问权限”，然后在系统设置中打开 Guard 的开关。 |
-| 安装按钮灰色，提示本地测试包 | 该包没有 Apple 所需授权，不能开启真实保护；更改本机权限无效。 |
+如果启用扩展后普通软件无法打开：
 
-## 不需要做的事
+1. 不再尝试继续测试或反复启动 Guard。
+2. 进入 Recovery，执行 `csrutil enable`，重启。当前自用扩展在 SIP 开启后不会运行。
+3. 到“系统设置 → 通用 → 登录项与扩展 → Endpoint Security Extensions”关闭或移除
+   Guard；若显示待卸载，重启完成。
+4. 用 `systemextensionsctl list` 确认 Guard 不再 enabled/active，并确认没有
+   `guard-es` 进程。
 
-- 不要关闭 SIP 或 Secure Boot；
-- 不要使用 `systemextensionsctl` 强行安装；
-- 不要修改 TCC 数据库或执行来源不明的“授权脚本”；
-- 不要为了测试把真实浏览器配置、Cookie 或 `~/.ssh` 私钥交给任何脚本。
+不要执行 `systemextensionsctl reset`，它会影响机器上的其他厂商扩展。不要修改
+TCC.db，也不要删除浏览器配置或 SSH key。
 
-如果完成步骤后状态仍不是已保护，请在 Guard 的“Security Log / 安全日志”查看
-错误，并将应用版本、状态文字和诊断输出交给发布者；不要上传浏览器数据或私钥。
+## 确认助手
+
+“遇到确认请求时自动打开 Guard”只是可选登录项。它负责在浏览器迁移或 SSH 读取
+出现待确认请求时打开 GUI，不安装 Endpoint Security，不拥有保护策略，也不授予
+完全磁盘访问。
+
+## 可选的未来 SIP-on 分发
+
+正式分发路径仍保留，未来可使用 Apple 管理的 Endpoint Security capability、
+Developer ID、匹配 provisioning profiles、公证和 staple。它与当前本地证书的
+SIP-off 自用路径是两个明确模式，不应互相冒充。

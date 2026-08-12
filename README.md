@@ -5,13 +5,16 @@ Platform status:
 | Platform | Status |
 |---|---|
 | Linux | SECURITY-ACCEPTED ALPHA on the recorded Arch `strict-filesystem` host; not rerun during the macOS-only phases |
-| macOS | FUNCTIONALLY COMPLETE / SECURITY ACCEPTANCE BLOCKED on macOS 26.6.1 arm64 |
+| macOS | SIP-off self-use candidate passes offline gates; live re-acceptance paused until the owner reboots |
 
-The macOS blocker is platform acceptance, not an unreported pass: this host has
-no Apple-provisioned Endpoint Security profiles, no Developer ID identity or
-notary profile, no active/FDA-authorized extension, and SIP is currently
-disabled. See the [macOS install and status guide](docs/INSTALL_MACOS.md) and
-[Phase 11 report](reports/mac/macos-phase-11.md).
+The primary macOS path is experimental self-use: a local certificate, SIP
+disabled by the owner from Recovery, System Extension developer mode, and
+normal user approval/FDA. It is not a notarized SIP-on distribution. After an
+incident caused unprotected opens to fail closed, the extension was deactivated,
+SIP was re-enabled, AUTH_OPEN scope was corrected, and activation safety gates
+were added. Live results remain unaccepted until a controlled synthetic rerun.
+See the [macOS install and status guide](docs/INSTALL_MACOS.md) and
+[Phase 17 incident report](reports/mac/macos-phase-17.md).
 
 各平台的构建、打包、安装、升级、验收和卸载流程见[中文打包与部署指南](docs/打包与部署指南.md)。
 
@@ -31,10 +34,10 @@ disabled. See the [macOS install and status guide](docs/INSTALL_MACOS.md) and
 > exposes semantic enforcement/FDA/approval health with lifecycle counters.
 > Phase 10 adds a self-contained arm64 release-bundle path, explicit inside-out
 > hardened-runtime signing, external-credential notarization, update/recovery,
-> and GTK runtime/license verification. Provisioned activation/notarization is
-> still an external acceptance gate, not a claimed pass.
-> Live entitled ES acceptance remains
-> externally blocked until an Apple-provisioned test host is available.
+> and GTK runtime/license verification. Later work adds an explicit SIP-off
+> self-use mode, certificate-pinned local XPC, semantic GUI readiness, and an
+> AUTH_OPEN scope safety gate. Real live enforcement must be re-accepted on the
+> owner's controlled SIP-off host before it is claimed.
 
 > **Linux status: SECURITY-ACCEPTED ALPHA ON TESTED ARCH HOST when configured
 > with `strict-filesystem`.** Conservative mode remains available and retains
@@ -270,7 +273,7 @@ RUST_LOG=info                    # env var (set in the unit file)
 
 For the macOS disposable namespace/health suite, use
 `scripts/macos/run-namespace-health-acceptance.sh`. It requires an activated,
-Apple-provisioned extension and uses only its own temporary Chrome profile; see
+SIP-off self-use or formally provisioned extension and uses only its own temporary Chrome profile; see
 [the macOS namespace/health guide](docs/MACOS_NAMESPACE_AND_HEALTH.md).
 
 Run this from the intended Arch desktop user's logged-in session. It builds

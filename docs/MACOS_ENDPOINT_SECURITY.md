@@ -3,8 +3,11 @@
 Phase 03 implements the narrow `ES_EVENT_TYPE_AUTH_OPEN` authorization
 primitive. Phase 04 additionally subscribes to `NOTIFY_FORK`, `NOTIFY_EXEC`,
 and `NOTIFY_EXIT` solely to maintain a bounded, stable-instance process graph.
-There are no other authorization event subscriptions, and the backend is not
-yet wired to browser or SSH product policy.
+Later phases add namespace authorization and wire the backend to browser and SSH
+policy. AUTH_OPEN now performs a two-stage scope check: an empty or disabled
+policy allows immediately, and an unprotected target is allowed before strict
+process-graph/deadline/queue checks. Only a target already classified as
+protected may fail closed on those checks.
 
 The C shim includes Apple's current SDK headers and exposes only client
 lifecycle, AUTH_OPEN plus the three process-graph notifications, normalized facts,
@@ -47,7 +50,9 @@ requires the executable's `st_dev` and `st_ino` identity. It verifies that
 temporary synthetic canary only, uses no network, and explicitly deactivates
 the extension on exit.
 
-The script requires Apple-approved Endpoint Security provisioning, matching
-host/extension profiles, Full Disk Access, and valid bundle/signing inputs. A
-directly embedded entitlement claim without matching provisioning is not an
-acceptance result.
+The current self-use path requires `SELF_USE_SIP_OFF=1`, a certificate-backed
+identity, SIP disabled, developer mode, both final signed entitlements, Full
+Disk Access, and `LIVE_ES_ACCEPTANCE=I_ACCEPT_SYSTEM_EXTENSION_RISK`. It does
+not require Apple provisioning. The optional formal SIP-on path still requires
+matching Apple profiles. Entitlement output alone is never an acceptance result;
+backend health and synthetic deny/allow evidence are required.

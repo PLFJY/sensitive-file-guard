@@ -25,6 +25,27 @@ path is the documented default.
 
 ## Build and local verification
 
+There are three intentionally distinct modes:
+
+- `LOCAL_SIGNING_ONLY=1`: entitlement-free packaging smoke; cannot enforce;
+- `SELF_USE_SIP_OFF=1`: local certificate, restricted entitlements, no
+  provisioning/notarization; experimental live self-use candidate;
+- neither flag: optional formally provisioned and notarized SIP-on release.
+
+For self-use, create the Keychain-only identity and build while SIP is enabled:
+
+```sh
+scripts/macos/create-self-use-signing-identity.sh
+SELF_USE_SIP_OFF=1 \
+SELF_USE_SIGNING_IDENTITY='Guard Local Development Certificate' \
+SELF_USE_SIGNING_KEYCHAIN="$HOME/Library/Keychains/GuardSelfUse.keychain-db" \
+CODESIGN_TIMESTAMP=none \
+scripts/macos/build-release-app.sh
+```
+
+The name is resolved to one exact valid identity hash before signing, so a
+stale same-name certificate cannot make `codesign` select ambiguously.
+
 Required external values are not stored in source control:
 
 ```sh
@@ -38,13 +59,13 @@ GUARD_VERSION=0.1.0 GUARD_BUILD_NUMBER=1 \
 scripts/macos/build-release-app.sh
 ```
 
-The result is `build/macos-release/Guard.app` plus an arm64 zip. The script
-requires both provisioning profiles unless `LOCAL_SIGNING_ONLY=1` is explicitly
-set. That override exists only for deterministic local packaging tests; its
-output is not distributable, cannot prove ES activation, and is labeled as
-such. `CODESIGN_TIMESTAMP=none` is likewise local-test-only.
+The result is `build/macos-release/Guard.app` plus an arm64 zip. Formal mode
+requires both provisioning profiles. `LOCAL_SIGNING_ONLY=1` is only for
+deterministic packaging tests; its output cannot enforce. `SELF_USE_SIP_OFF=1`
+instead retains the restricted entitlements without profiles and requires the
+local certificate. Neither local mode is distributable.
 
-Verification is repeatable:
+Formal/local-smoke verification is repeatable:
 
 ```sh
 scripts/macos/verify-bundle.sh build/macos-release/Guard.app
@@ -57,6 +78,11 @@ For an explicitly local-only artifact built with `LOCAL_SIGNING_ONLY=1`, use
 verification mode requires embedded provisioning profiles and the scoped
 restricted entitlements; local mode instead requires those restricted
 entitlements to be absent so AMFI can launch the smoke-test artifact.
+
+For self-use, use `VERIFY_SIGNING_MODE=self-use`. While SIP is enabled, do not
+execute that entitlement-bearing artifact merely as a packaging smoke test;
+only inspect it with `verify-bundle.sh`. The self-use final preflight checks SIP
+before it executes the app, and exits 77 on SIP-on.
 
 `verify-bundle.sh` checks layout, plists, arm64 slices, explicit nested
 signatures, hardened runtime, scoped entitlements, GTK loader metadata, and all
@@ -91,17 +117,20 @@ distribution zip from the stapled app. It never prints or copies credentials.
 
 ## Install and first activation
 
-1. Place the notarized `Guard.app` in `/Applications`.
+For self-use, first complete the offline gate, then deliberately disable SIP
+from Recovery and enable developer mode. Formal release keeps SIP enabled.
+
+1. Place the reviewed `Guard.app` in `/Applications`.
 2. Launch Guard and request system-extension activation.
 3. If macOS reports waiting for approval, approve the extension in ordinary
    System Settings. A restart-required result remains visible until restart.
 4. Grant Full Disk Access through System Settings if status reports
-   `REQUIRES_FULL_DISK_ACCESS`. Guard never edits TCC and never instructs users
-   to disable SIP/Secure Boot.
+   `REQUIRES_FULL_DISK_ACCESS`. Guard never edits TCC and cannot change SIP;
+   only the documented self-use path asks the owner to do that from Recovery.
 5. Register the pending helper using the separate UI switch. Its SMAppService
    status/health is distinct from extension and FDA status.
-6. Enable protection only after the backend state is `ACTIVE` or intentionally
-   reviewed `DEGRADED`.
+6. Enable protection only after the backend state is `ACTIVE`; `DEGRADED` is a
+   failure to investigate, not an acceptable first-run state.
 
 An extension lifecycle callback saying “activation completed” is not by itself
 an enforcement claim. Product status is ACTIVE only after the ES client/XPC is

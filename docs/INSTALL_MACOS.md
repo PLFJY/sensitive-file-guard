@@ -12,33 +12,26 @@ SIP is disabled only manually from macOS Recovery. Guard never changes SIP,
 TCC, or Secure Boot. Disabling SIP reduces macOS global protection, so use this
 mode only on a Mac you control and do not treat it as a distributable release.
 
+Keep SIP **enabled while building and reviewing**. A self-use build now has to
+pass `scripts/macos/self-use-safety-gate.sh`, and its signed marker must contain
+`SAFETY_GATE=mac-auth-scope-v1`. Older self-use artifacts are not activation
+candidates. The GUI rejects a self-use marker that lacks this safety revision.
+
 ## Self-use SIP-off setup
 
 Run these commands from the repository root. Do not use real browser profiles,
 cookies, passwords, sessions, or SSH keys for acceptance.
 
-1. In macOS Recovery, run `csrutil disable`, then reboot. Guard cannot do this
-   step for you. Verify after login:
-
-   ```sh
-   csrutil status
-   ```
-
-2. Enable System Extension developer mode once (this requires your macOS
-   administrator password):
-
-   ```sh
-   sudo systemextensionsctl developer on
-   ```
-
-3. Create a private local signing identity. It creates no repository file and
-   stores the certificate/private key only in your user Keychain:
+1. While SIP is still enabled, create the private local signing identity. It
+   creates no repository file and stores the certificate/private key only in
+   your user Keychain:
 
    ```sh
    scripts/macos/create-self-use-signing-identity.sh
    ```
 
-4. Build the entitlement-bearing self-use app:
+2. Build the entitlement-bearing app. The build automatically runs macOS tests
+   and clippy before it is allowed to write the current self-use safety marker:
 
    ```sh
    SELF_USE_SIP_OFF=1 \
@@ -48,16 +41,55 @@ cookies, passwords, sessions, or SSH keys for acceptance.
    scripts/macos/build-release-app.sh
    ```
 
-5. Verify the final signed artifact and platform preconditions, then open it:
+3. Verify the final artifact without activating it:
 
    ```sh
-   scripts/macos/self-use-preflight.sh build/macos-release/Guard.app
-   open build/macos-release/Guard.app
+   VERIFY_SIGNING_MODE=self-use \
+   scripts/macos/verify-bundle.sh build/macos-release/Guard.app
    ```
 
-6. In Guard's Protection page, click **安装防护扩展**, approve the normal
+4. Confirm `systemextensionsctl list` contains no older Guard extension marked
+   enabled/active. A `terminated waiting to uninstall on reboot` entry requires
+   a reboot before continuing.
+
+5. Only after the offline review passes, boot macOS Recovery, run
+   `csrutil disable`, and reboot. Guard cannot perform this step. Verify after
+   login:
+
+   ```sh
+   csrutil status
+   ```
+
+6. Enable System Extension developer mode once (this requires your macOS
+   administrator password):
+
+   ```sh
+   sudo systemextensionsctl developer on
+   ```
+
+7. Copy the reviewed app into `/Applications`, run the preflight against that
+   copy, then open it. SystemExtensions activation is rejected when launched
+   directly from `build/`.
+
+   ```sh
+   test ! -e /Applications/Guard.app || {
+     echo '先在 Finder 中移走旧的 /Applications/Guard.app'; exit 1;
+   }
+   ditto build/macos-release/Guard.app /Applications/Guard.app
+   scripts/macos/self-use-preflight.sh /Applications/Guard.app
+   open /Applications/Guard.app
+   ```
+
+8. In Guard's Protection page, click **安装防护扩展**, approve the normal
    macOS prompt, grant **完全磁盘访问**, optionally enable the confirmation
-   login item, configure synthetic resources first, and finally enable policy.
+   login item, and keep policy disabled until lifecycle/XPC/backend health is
+   confirmed. Configure synthetic resources first and only then enable policy.
+
+If a live test ever prevents ordinary applications from opening, re-enable SIP
+from Recovery, reboot, remove only Guard under System Settings > General >
+Login Items & Extensions > Endpoint Security Extensions, and verify no
+`guard-es` process remains. Do not use `systemextensionsctl reset`, because it
+also changes unrelated vendors' extensions.
 
 The self-use build keeps `com.apple.developer.system-extension.install` on the
 host and `com.apple.developer.endpoint-security.client` on the nested extension.
@@ -126,10 +158,12 @@ Guard never edits TCC, disables SIP/Secure Boot, shells out to
 
 ## Safe final acceptance
 
-Keep normal security enabled and run the preflight before creating any
-fixtures:
+Keep SIP enabled for every offline gate. After the reviewed app is installed,
+the old extension is gone, and the owner has deliberately completed the
+Recovery SIP-off step, run the self-use preflight before creating fixtures:
 
 ```sh
+VERIFY_SIGNING_MODE=self-use \
 scripts/macos/preflight-final-acceptance.sh /Applications/Guard.app
 ```
 
@@ -140,8 +174,11 @@ interactive scripts. Those scripts use temporary browser profiles and a newly
 generated ephemeral SSH key. Never enroll a normal profile under
 `~/Library/Application Support` or a real key under `~/.ssh` for acceptance.
 
-The authoritative executed matrix and blockers are in
-[the Phase 11 report](../reports/mac/macos-phase-11.md).
+The latest incident analysis and offline candidate evidence are in
+[Phase 17](../reports/mac/macos-phase-17.md) and
+[Phase 18](../reports/mac/macos-phase-18.md). The final-artifact GUI preflight
+and reboot handoff are recorded in
+[Phase 19](../reports/mac/macos-phase-19.md).
 
 ## Diagnostics, update, and removal
 
