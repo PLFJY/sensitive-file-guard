@@ -3,7 +3,23 @@
 这份指南面向使用 Guard 的普通 macOS 用户。正常情况下，你不需要运行
 `systemextensionsctl`、终端激活命令，也不需要理解“授权助手”之类的内部名称。
 
-## 先确认你拿到的是正式包
+## 当前支持的自用模式
+
+当前 macOS 版本首先服务于自用和开源测试：需要在你自己控制的 Mac 上关闭 SIP，
+使用本地 Guard 签名证书，并开启 System Extension developer mode。它不是面向普通
+消费者的免配置安装包，也不代表已公证或支持 SIP-on 分发。
+
+完成 Recovery 中的 `csrutil disable` 并重启后，在终端运行：
+
+```sh
+sudo systemextensionsctl developer on
+scripts/macos/create-self-use-signing-identity.sh
+```
+
+然后按 [macOS 安装说明](INSTALL_MACOS.md) 构建 `SELF_USE_SIP_OFF=1` 包。Guard
+不会自动关闭 SIP、修改 TCC 或替你授予完全磁盘访问。
+
+## 可选的正式包
 
 真正能够保护浏览器会话数据和 SSH 私钥的包，必须由发布者提供，并同时具备：
 

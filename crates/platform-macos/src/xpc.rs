@@ -765,4 +765,20 @@ mod tests {
             leaf_certificate_sha1: Some(certificate),
         }));
     }
+
+    #[test]
+    fn local_certificate_requirements_compile_in_security_framework() {
+        let requirements = SigningRequirements::for_local_certificate(
+            "0123456789ABCDEF0123456789ABCDEF01234567",
+            "io.example.Guard",
+            "io.example.Guard.guard-es",
+        )
+        .unwrap();
+        assert!(requirements
+            .client_requirement
+            .contains("certificate leaf = H\"0123456789ABCDEF0123456789ABCDEF01234567\""));
+        assert!(requirements
+            .server_requirement
+            .contains("io.example.Guard.guard-es"));
+    }
 }

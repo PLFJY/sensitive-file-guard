@@ -23,6 +23,16 @@ if [ "$local_only" = 1 ] && [ "$self_use" = 1 ]; then
 fi
 if [ "$self_use" = 1 ]; then
     identity=${SELF_USE_SIGNING_IDENTITY:?SELF_USE_SIGNING_IDENTITY is required for SELF_USE_SIP_OFF=1}
+    signing_keychain=${SELF_USE_SIGNING_KEYCHAIN:-}
+    if [ -n "$signing_keychain" ]; then
+        keychain_password=$(security find-generic-password -a "$USER" \
+            -s io.github.plfjy.SensitiveFileGuard.self-use-keychain -w 2>/dev/null) || {
+            echo "cannot unlock SELF_USE_SIGNING_KEYCHAIN: local keychain password is unavailable" >&2
+            exit 2
+        }
+        security unlock-keychain -p "$keychain_password" "$signing_keychain"
+        unset keychain_password
+    fi
     signing_mode=self-use
 elif [ "$local_only" = 1 ]; then
     identity=${SIGNING_IDENTITY:?SIGNING_IDENTITY is required}
@@ -46,10 +56,6 @@ if [ "$signing_mode" = release ]; then
     }
 fi
 
-if [ "$signing_mode" = self-use ]; then
-    printf '%s\n' 'SELF-USE / SIP-OFF: local entitlement-bearing build; not notarized or distributable' \
-        >"$app/Contents/Resources/SELF_USE_SIP_OFF.txt"
-fi
 for command_name in codesign ditto file; do
     command -v "$command_name" >/dev/null 2>&1 || {
         echo "missing required command: $command_name" >&2
@@ -60,6 +66,11 @@ done
 MACOS_BUILD_ROOT="$build_root" BUILD_PROFILE=release SKIP_SIGNING=1 \
     "$script_dir/build-dev-app.sh"
 "$script_dir/bundle-gtk-runtime.sh" "$app"
+
+if [ "$signing_mode" = self-use ]; then
+    printf '%s\n' 'SELF-USE / SIP-OFF: local entitlement-bearing build; not notarized or distributable' \
+        >"$app/Contents/Resources/SELF_USE_SIP_OFF.txt"
+fi
 
 extension=$(find "$app/Contents/Library/SystemExtensions" -maxdepth 1 \
     -type d -name '*.systemextension' -print | head -n 1)
@@ -76,9 +87,17 @@ if [ "${CODESIGN_TIMESTAMP:-secure}" = none ]; then
     timestamp_flag=
 fi
 
+sign_code() {
+    if [ -n "${signing_keychain:-}" ]; then
+        codesign --force --sign "$identity" --keychain "$signing_keychain" \
+            --options runtime $timestamp_flag "$@"
+    else
+        codesign --force --sign "$identity" --options runtime $timestamp_flag "$@"
+    fi
+}
+
 sign_runtime_file() {
-    target=$1
-    codesign --force --sign "$identity" --options runtime $timestamp_flag "$target"
+    sign_code "$1"
 }
 
 # Explicit inside-out signing. Only Mach-O loader/runtime files are included;
@@ -91,22 +110,18 @@ find "$app/Contents/Frameworks" "$app/Contents/Resources/gdk-pixbuf/loaders" \
 done
 
 app_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")
-codesign --force --sign "$identity" --options runtime $timestamp_flag \
-    --identifier "$app_id.guardctl" "$app/Contents/MacOS/guardctl"
-codesign --force --sign "$identity" --options runtime $timestamp_flag \
-    --identifier "$app_id.guard-notify" "$app/Contents/MacOS/guard-notify"
+sign_code --identifier "$app_id.guardctl" "$app/Contents/MacOS/guardctl"
+sign_code --identifier "$app_id.guard-notify" "$app/Contents/MacOS/guard-notify"
 if [ "$signing_mode" = local ]; then
     # Restricted system-extension and Endpoint Security entitlements require
     # matching provisioning profiles. Omitting them makes this explicitly
     # local-only artifact executable for runtime/upgrade smoke tests.
-    codesign --force --sign "$identity" --options runtime $timestamp_flag "$extension"
-    codesign --force --sign "$identity" --options runtime $timestamp_flag "$app"
+    sign_code "$extension"
+    sign_code "$app"
     verify_signing_mode=local
 else
-    codesign --force --sign "$identity" --options runtime $timestamp_flag \
-        --entitlements "$repo_dir/packaging/macos/GuardES.entitlements" "$extension"
-    codesign --force --sign "$identity" --options runtime $timestamp_flag \
-        --entitlements "$repo_dir/packaging/macos/Guard.entitlements" "$app"
+    sign_code --entitlements "$repo_dir/packaging/macos/GuardES.entitlements" "$extension"
+    sign_code --entitlements "$repo_dir/packaging/macos/Guard.entitlements" "$app"
     verify_signing_mode=$signing_mode
 fi
 
