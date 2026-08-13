@@ -2434,16 +2434,23 @@ fn spawn_system_extension_install(button: gtk::Button, message: gtk::Label) {
 fn spawn_apply(bytes: Vec<u8>, button: gtk::Button) {
     let write_bytes = bytes.clone();
     glib::MainContext::default().spawn_local(async move {
-        let ok = gio::spawn_blocking(move || platform_service::apply_config(&write_bytes).is_ok())
-            .await
-            .unwrap_or(false);
-        button.set_sensitive(!ok);
-        if ok {
-            button.set_tooltip_text(None);
-        } else {
-            button.set_tooltip_text(Some(
-                "Apply failed; previous configuration was restored when possible.",
-            ));
+        let result =
+            gio::spawn_blocking(move || platform_service::apply_config(&write_bytes)).await;
+        match result {
+            Ok(Ok(())) => {
+                button.set_sensitive(false);
+                button.set_tooltip_text(None);
+            }
+            Ok(Err(error)) => {
+                button.set_sensitive(true);
+                let message = format!("应用失败：{error:#}");
+                button.set_tooltip_text(Some(&message));
+            }
+            Err(error) => {
+                button.set_sensitive(true);
+                let message = format!("应用任务异常：{error:?}");
+                button.set_tooltip_text(Some(&message));
+            }
         }
     });
 }

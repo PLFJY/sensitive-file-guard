@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::browser_trust::MacBrowserEnrollment;
 use crate::code_signature::CodeSignatureInspector;
 use crate::identity::MacProcessFacts;
-use guard_core::resource::ProtectedResourceKind;
+use guard_core::resource::{BrowserFamily, ProtectedResourceKind};
 
 pub const MAC_CONFIG_VERSION: u32 = 1;
 pub const SYSTEM_CONFIG_PATH: &str =
@@ -299,9 +299,15 @@ impl MacBackendConfig {
         }
         for (index, browser) in self.browser_trust.iter().enumerate() {
             for other in self.browser_trust.iter().skip(index + 1) {
+                // Safari intentionally uses ~/Library as a narrow namespace
+                // root, while Chromium/Firefox profiles live below it. Their
+                // resource index applies family-specific path filters.
+                let safari_library_overlap = browser.family == BrowserFamily::Safari
+                    || other.family == BrowserFamily::Safari;
                 anyhow::ensure!(
-                    !browser.profile_root.starts_with(&other.profile_root)
-                        && !other.profile_root.starts_with(&browser.profile_root),
+                    safari_library_overlap
+                        || (!browser.profile_root.starts_with(&other.profile_root)
+                            && !other.profile_root.starts_with(&browser.profile_root)),
                     "macOS browser profile roots must not overlap"
                 );
             }

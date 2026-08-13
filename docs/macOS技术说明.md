@@ -8,7 +8,7 @@
 
 ## 审计日志保留
 
-macOS 与 Linux 共用 `guard-audit` 的 SQLite 写入器。每次批量提交后只保留最新 1000 条审计事件，超出部分按事件 ID 从旧到新删除。这个上限是全局的，不按用户分别计算；GUI 的分页数量只是查询限制，不改变保留策略。日志只保存元数据，不保存 Cookie、密码、会话内容或私钥字节。
+macOS 与 Linux 共用 `guard-audit` 的 SQLite 写入器。每次批量提交后只保留最新 1000 条审计事件，超出部分按事件 ID 从旧到新删除。这个上限是全局的，不按用户分别计算；GUI 的分页数量只是查询限制，不改变保留策略。日志只保存元数据，不保存 Cookie、密码、会话内容或私钥字节。Safari 的配置根目录显示为 `~/Library`，但资源索引只允许 Safari 自己的 `Safari/` 和 `Containers/com.apple.Safari/Data/Library/` 子路径，不会把整个 Library 纳入保护。
 
 ## AUTH_OPEN 决策
 
