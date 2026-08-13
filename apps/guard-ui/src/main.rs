@@ -746,7 +746,11 @@ fn event_row_with_decision(event: &guard_ipc::EventInfo, decision: &str) -> gtk:
     // Process names and paths are untrusted metadata. Without a width cap a
     // GTK Label contributes its entire natural width to the ListBox and makes
     // the security log stretch the whole window horizontally.
-    let title = gtk::Label::new(Some(&format!("{}  ·  {}", decision, event.exe)));
+    let timestamp = format_event_timestamp(event.ts_ms);
+    let title = gtk::Label::new(Some(&format!(
+        "{timestamp}  ·  {}  ·  {}",
+        decision, event.exe
+    )));
     title.set_xalign(0.0);
     title.set_hexpand(true);
     title.set_wrap(true);
@@ -779,6 +783,18 @@ fn event_row_with_decision(event: &guard_ipc::EventInfo, decision: &str) -> gtk:
     box_.append(&subtitle);
     row.set_child(Some(&box_));
     row
+}
+
+/// Format audit milliseconds in the user's local timezone for both Linux and
+/// macOS. Keep a deterministic fallback for malformed/zero timestamps used by
+/// layout smoke tests and older records.
+fn format_event_timestamp(ts_ms: u64) -> String {
+    let seconds = i64::try_from(ts_ms / 1_000).unwrap_or(i64::MAX);
+    glib::DateTime::from_unix_local(seconds)
+        .ok()
+        .and_then(|date_time| date_time.format("%Y-%m-%d %H:%M:%S").ok())
+        .map(|formatted| formatted.to_string())
+        .unwrap_or_else(|| "时间未知".into())
 }
 
 fn is_blocked_event(event: &guard_ipc::EventInfo) -> bool {
@@ -2562,6 +2578,13 @@ mod tests {
         let (_, body) = mac_notification_text(&event);
         assert!(!body.contains("/Users/"));
         assert!(body.contains("browser_cookie_store"));
+    }
+
+    #[test]
+    fn event_timestamp_is_local_date_and_time() {
+        assert_eq!(format_event_timestamp(1_700_000_000_000).len(), 19);
+        assert!(format_event_timestamp(0).starts_with("1970-01-01 "));
+        assert!(!format_event_timestamp(0).contains("时间未知"));
     }
 
     #[test]
