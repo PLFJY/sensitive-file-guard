@@ -6,6 +6,10 @@
 
 `Guard.app` 负责 GUI、配置、用户确认和 macOS 系统通知；嵌套的 `guard-es.systemextension` 创建 Endpoint Security client；`guardctl` 和 `guard-notify` 通过经过签名身份验证的 XPC 与控制面通信。`guard-notify` 在 macOS 上只负责发现 pending 请求并唤起 Guard，不发送拒绝通知，避免通知代理和 GUI 重复发送。策略、资源索引、进程身份、审计和 deadline 逻辑只有一份，不在 GUI 中复制。
 
+## 审计日志保留
+
+macOS 与 Linux 共用 `guard-audit` 的 SQLite 写入器。每次批量提交后只保留最新 1000 条审计事件，超出部分按事件 ID 从旧到新删除。这个上限是全局的，不按用户分别计算；GUI 的分页数量只是查询限制，不改变保留策略。日志只保存元数据，不保存 Cookie、密码、会话内容或私钥字节。
+
 ## AUTH_OPEN 决策
 
 - 未命中受保护资源时立即允许，不要求进程身份完整。

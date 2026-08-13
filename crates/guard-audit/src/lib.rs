@@ -32,6 +32,12 @@ use guard_core::resource::{BrowserId, ProfileId, ProtectedResourceKind};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
+/// Maximum number of audit events retained in the persistent SQLite store.
+///
+/// Retention is global to the store (not per UID): the newest events remain,
+/// while older metadata rows are removed after a successful batch commit.
+pub const MAX_PERSISTED_EVENTS: i64 = 1_000;
+
 /// One authorization decision to persist. No secret contents — `path` is the
 /// protected file's path string, never its bytes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,6 +99,7 @@ impl AuditStore {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         init_schema(&conn)?;
+        prune_events(&conn)?;
 
         let (tx, rx) = mpsc::sync_channel::<AuditCmd>(8192);
         let dropped = Arc::new(AtomicU64::new(0));
@@ -304,8 +311,21 @@ fn commit_batch(conn: &Connection, pending: &mut Vec<AuditRecord>) -> anyhow::Re
     for r in pending.iter() {
         insert_record(&tx, r)?;
     }
+    // Keep the database bounded without touching the authorization hot path.
+    // This runs in the same transaction as the inserts, so readers observe
+    // either the previous complete retention window or the new one.
+    prune_events(&tx)?;
     tx.commit()?;
     pending.clear();
+    Ok(())
+}
+
+fn prune_events(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute(
+        "DELETE FROM events
+         WHERE id NOT IN (SELECT id FROM events ORDER BY id DESC LIMIT ?1)",
+        rusqlite::params![MAX_PERSISTED_EVENTS],
+    )?;
     Ok(())
 }
 
@@ -687,5 +707,22 @@ mod tests {
         let _ = sample_identity(); // keep helper referenced
         let events = store.query_events(None, 2000).unwrap();
         assert_eq!(events.len(), 1000);
+    }
+
+    #[test]
+    fn retention_keeps_only_newest_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("audit.db");
+        let store = AuditStore::open(&db).unwrap();
+        for i in 0..(MAX_PERSISTED_EVENTS as usize + 1) {
+            store.record(sample_record(1000, &format!("/p/{i}"), Decision::Allow));
+        }
+        store.flush();
+
+        let events = store.query_events(None, 2_000).unwrap();
+        assert_eq!(events.len(), MAX_PERSISTED_EVENTS as usize);
+        assert_eq!(events.first().unwrap().record.path, "/p/1000");
+        assert_eq!(events.last().unwrap().record.path, "/p/1");
+        assert!(store.query_event(1).unwrap().is_none());
     }
 }
