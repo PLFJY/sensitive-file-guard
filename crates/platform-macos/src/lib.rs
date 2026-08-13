@@ -3,20 +3,35 @@
 //! Apple framework calls remain in `native/macos`; this crate exposes typed
 //! lifecycle and entitlement diagnostics without containing product policy.
 
+#[cfg(target_os = "macos")]
 pub mod browser_trust;
+#[cfg(target_os = "macos")]
 pub mod bundle;
+#[cfg(target_os = "macos")]
 pub mod code_signature;
+#[cfg(target_os = "macos")]
 pub mod config;
+#[cfg(target_os = "macos")]
 pub mod deadline;
+#[cfg(target_os = "macos")]
 pub mod discovery;
+#[cfg(target_os = "macos")]
 pub mod endpoint_security;
+#[cfg(target_os = "macos")]
 pub mod identity;
+#[cfg(target_os = "macos")]
 pub mod local_auth;
+#[cfg(target_os = "macos")]
 pub mod notifications;
+#[cfg(target_os = "macos")]
 mod pending;
+#[cfg(target_os = "macos")]
 pub mod resource_index;
+#[cfg(target_os = "macos")]
 pub mod system_extension;
+#[cfg(target_os = "macos")]
 pub mod user_agent;
+#[cfg(target_os = "macos")]
 pub mod xpc;
 
 pub const DEFAULT_APP_BUNDLE_ID: &str = match option_env!("GUARD_APP_BUNDLE_ID") {

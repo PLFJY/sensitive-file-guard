@@ -97,6 +97,7 @@ pub struct EditableConfiguration {
     pub browsers: Vec<guard_platform::config::BrowserEnrollmentConfig>,
     pub enrolled_exes: Vec<std::path::PathBuf>,
     pub ssh_keys: Vec<std::path::PathBuf>,
+    #[cfg(target_os = "macos")]
     #[serde(default)]
     pub mac_allowlist: platform_macos::config::MacAllowlistConfig,
 }
@@ -119,11 +120,18 @@ pub struct PlatformOverview {
     pub endpoint_security_entitlement_state: String,
 }
 
-#[cfg(target_os = "macos")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MacSetupReadiness {
     pub can_request_extension_install: bool,
     pub explanation: String,
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn mac_setup_readiness() -> MacSetupReadiness {
+    MacSetupReadiness {
+        can_request_extension_install: false,
+        explanation: "macOS 防护扩展仅可在 macOS 上安装。".into(),
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -375,6 +383,11 @@ pub fn request_system_extension_install() -> anyhow::Result<String> {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
+pub fn request_system_extension_install() -> anyhow::Result<String> {
+    anyhow::bail!("macOS 防护扩展仅可在 macOS 上安装")
+}
+
 #[cfg(target_os = "macos")]
 pub fn open_full_disk_access_settings() -> anyhow::Result<()> {
     let status = std::process::Command::new("open")
@@ -382,6 +395,11 @@ pub fn open_full_disk_access_settings() -> anyhow::Result<()> {
         .status()?;
     anyhow::ensure!(status.success(), "macOS 无法打开“完全磁盘访问”设置");
     Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn open_full_disk_access_settings() -> anyhow::Result<()> {
+    anyhow::bail!("完全磁盘访问设置仅可在 macOS 上打开")
 }
 
 pub const fn apply_button_label() -> &'static str {
@@ -400,6 +418,7 @@ pub fn initial_configuration_if_missing(backend_reachable: bool) -> Option<Edita
             browsers: Vec::new(),
             enrolled_exes: Vec::new(),
             ssh_keys: Vec::new(),
+            #[cfg(target_os = "macos")]
             mac_allowlist: platform_macos::config::MacAllowlistConfig::default(),
         })
     } else {
@@ -673,8 +692,41 @@ pub fn editable_from_metadata(info: guard_ipc::ConfigurationInfo) -> Option<Edit
     }
     #[cfg(target_os = "macos")]
     let current_uid = unsafe { libc::geteuid() };
-    #[cfg(not(target_os = "macos"))]
-    let current_uid = 0;
+
+    #[cfg(target_os = "macos")]
+    let mac_allowlist = platform_macos::config::MacAllowlistConfig {
+        system_processes: info
+            .mac_system_processes
+            .into_iter()
+            .map(|rule| platform_macos::config::MacSystemProcessRule {
+                path: rule.path.into(),
+                team_id: None,
+                signing_id: rule.signing_id,
+                platform_binary: true,
+                owner_uid: 0,
+                allow_kinds: rule
+                    .allow_kinds
+                    .into_iter()
+                    .filter_map(|kind| match kind.as_str() {
+                        "browser_history" => Some(guard_core::ProtectedResourceKind::History),
+                        _ => None,
+                    })
+                    .collect(),
+            })
+            .collect(),
+        trusted_tools: info
+            .mac_trusted_tools
+            .into_iter()
+            .map(|rule| platform_macos::config::MacTrustedToolRule {
+                path: rule.path.into(),
+                dev: rule.dev,
+                ino: rule.ino,
+                team_id: rule.team_id,
+                signing_id: rule.signing_id,
+                owner_uid: current_uid,
+            })
+            .collect(),
+    };
 
     Some(EditableConfiguration {
         enforcement_mode,
@@ -682,39 +734,8 @@ pub fn editable_from_metadata(info: guard_ipc::ConfigurationInfo) -> Option<Edit
         browsers,
         enrolled_exes: info.enrolled_exes.into_iter().map(Into::into).collect(),
         ssh_keys: info.ssh_keys.into_iter().map(Into::into).collect(),
-        mac_allowlist: platform_macos::config::MacAllowlistConfig {
-            system_processes: info
-                .mac_system_processes
-                .into_iter()
-                .map(|rule| platform_macos::config::MacSystemProcessRule {
-                    path: rule.path.into(),
-                    team_id: None,
-                    signing_id: rule.signing_id,
-                    platform_binary: true,
-                    owner_uid: 0,
-                    allow_kinds: rule
-                        .allow_kinds
-                        .into_iter()
-                        .filter_map(|kind| match kind.as_str() {
-                            "browser_history" => Some(guard_core::ProtectedResourceKind::History),
-                            _ => None,
-                        })
-                        .collect(),
-                })
-                .collect(),
-            trusted_tools: info
-                .mac_trusted_tools
-                .into_iter()
-                .map(|rule| platform_macos::config::MacTrustedToolRule {
-                    path: rule.path.into(),
-                    dev: rule.dev,
-                    ino: rule.ino,
-                    team_id: rule.team_id,
-                    signing_id: rule.signing_id,
-                    owner_uid: current_uid,
-                })
-                .collect(),
-        },
+        #[cfg(target_os = "macos")]
+        mac_allowlist,
     })
 }
 

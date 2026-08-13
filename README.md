@@ -59,7 +59,7 @@ cargo test --workspace --all-features
 git diff --check
 ```
 
-macOS 主机运行 Linux-only crate 可能因本机缺少 fanotify/inotify libc 符号而无法完成全 workspace 检查；此时应运行文档中列出的 macOS 相关 crate 检查，并在报告中记录确切错误，不得把阻塞写成通过。
+Linux 与 macOS 平台 crate 在反平台上只编译为空边界，`guardd` 在非 Linux 平台只提供明确的 unsupported 入口。因此上述 workspace 检查应在 Linux 和 macOS 主机上都通过；Endpoint Security、fanotify 和系统权限行为仍只在对应原生平台执行。
 
 ## 设计边界
 

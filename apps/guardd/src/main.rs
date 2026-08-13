@@ -11,21 +11,32 @@
 
 #![deny(clippy::significant_drop_in_scrutinee)]
 
+#[cfg(target_os = "linux")]
 mod enforce;
+#[cfg(target_os = "linux")]
 mod ipc;
+#[cfg(target_os = "linux")]
 mod pending;
+#[cfg(target_os = "linux")]
 mod strict;
 
+#[cfg(target_os = "linux")]
 use std::io::Write;
+#[cfg(target_os = "linux")]
 use std::path::PathBuf;
 use std::process::ExitCode;
+#[cfg(target_os = "linux")]
 use std::sync::{Arc, Mutex};
 
+#[cfg(target_os = "linux")]
 use clap::Parser;
+#[cfg(target_os = "linux")]
 use guard_audit::AuditStore;
 use guard_core::init_logging;
+#[cfg(target_os = "linux")]
 use platform_linux::{capability, fanotify, signal};
 
+#[cfg(target_os = "linux")]
 #[derive(Parser, Debug)]
 #[command(
     name = "guardd",
@@ -66,6 +77,7 @@ struct Cli {
     audit_db: Option<PathBuf>,
 }
 
+#[cfg(target_os = "linux")]
 fn main() -> ExitCode {
     init_logging();
     let cli = Cli::parse();
@@ -107,6 +119,7 @@ fn main() -> ExitCode {
 
 /// Fail fast with a precise message if we cannot enforce. Returns the error
 /// to propagate, or exits 2 directly (matching Phase 02 behavior).
+#[cfg(target_os = "linux")]
 fn require_cap_sys_admin() -> anyhow::Result<()> {
     if capability::has_cap_sys_admin() {
         return Ok(());
@@ -130,6 +143,7 @@ fn require_cap_sys_admin() -> anyhow::Result<()> {
     std::process::exit(2);
 }
 
+#[cfg(target_os = "linux")]
 fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Result<()> {
     require_cap_sys_admin()?;
 
@@ -760,6 +774,7 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn unix_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -767,6 +782,7 @@ fn unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
+#[cfg(target_os = "linux")]
 fn run_protect_test_file(target: &std::path::Path, cli: &Cli) -> anyhow::Result<()> {
     require_cap_sys_admin()?;
 
@@ -854,4 +870,11 @@ fn run_protect_test_file(target: &std::path::Path, cli: &Cli) -> anyhow::Result<
     }
 
     Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn main() -> ExitCode {
+    init_logging();
+    eprintln!("guardd: Linux fanotify enforcement is available only on Linux");
+    ExitCode::from(78)
 }

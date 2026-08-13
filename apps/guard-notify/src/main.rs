@@ -7,6 +7,7 @@
 
 #[cfg(target_os = "linux")]
 use std::collections::HashMap;
+#[cfg(target_os = "macos")]
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
@@ -245,17 +246,20 @@ fn fetch_macos_pending(
         .collect())
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum PendingKey {
     Migration(String),
     SshRead(String),
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Default)]
 struct PendingObserver {
     presented: HashSet<PendingKey>,
 }
 
+#[cfg(target_os = "macos")]
 impl PendingObserver {
     /// Returns true exactly once for each item while it remains in successful
     /// snapshots. The helper launches the UI but never resolves policy.
@@ -568,6 +572,7 @@ mod tests {
         assert!(!should_notify(&mut sent, &second, 1_001));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn pending_observer_launches_once_and_deduplicates_snapshots() {
         let mut observer = PendingObserver::default();
