@@ -130,7 +130,7 @@ pub struct MacSetupReadiness {
 pub fn mac_setup_readiness() -> MacSetupReadiness {
     MacSetupReadiness {
         can_request_extension_install: false,
-        explanation: "macOS 防护扩展仅可在 macOS 上安装。".into(),
+        explanation: "The macOS protection extension can only be installed on macOS.".into(),
     }
 }
 
@@ -170,7 +170,7 @@ fn bundled_endpoint_security_entitlement_present() -> anyhow::Result<bool> {
     RESULT
         .get_or_init(|| {
             let app = current_app_bundle()
-                .ok_or_else(|| String::from("无法定位当前 Guard.app bundle"))?;
+                .ok_or_else(|| String::from("Unable to locate the current Guard.app bundle"))?;
             platform_macos::system_extension::bundled_endpoint_security_entitlement_present(
                 &app,
                 platform_macos::DEFAULT_EXTENSION_BUNDLE_ID,
@@ -211,13 +211,13 @@ pub fn overview_detail(
         return daemon.map_or_else(
             || {
                 format!(
-                    "保护尚未运行 · 防护扩展：{} · 完全磁盘访问：{} · 确认助手：{}",
+                    "Protection is not running · Protection extension: {} · Full Disk Access: {} · Confirmation helper: {}",
                     overview.extension_state, overview.full_disk_access, overview.helper_state
                 )
             },
             |status| {
                 format!(
-                    "后端：{} · 防护扩展：{} · 完全磁盘访问：{} · 策略：{} · 迁移只读：{} · 确认助手：{} · 已允许：{} · 已拒绝：{}",
+                    "Backend: {} · Protection extension: {} · Full Disk Access: {} · Policy: {} · Read-only migration: {} · Confirmation helper: {} · Allowed: {} · Denied: {}",
                     status.backend_kind,
                     overview.extension_state,
                     overview.full_disk_access,
@@ -282,7 +282,7 @@ pub const fn protection_switch_title() -> &'static str {
 
 pub const fn protection_switch_subtitle() -> &'static str {
     if cfg!(target_os = "macos") {
-        "请先在“Protection”页面完成扩展安装和权限授权。"
+        "Complete extension installation and permission setup on the “Protection” page first."
     } else {
         "Controls guardd.service and guard-notify.service together; turning it off makes protected files accessible normally."
     }
@@ -297,19 +297,19 @@ pub fn mac_setup_readiness() -> MacSetupReadiness {
     if self_use_marker.is_some() && !self_use {
         return MacSetupReadiness {
             can_request_extension_install: false,
-            explanation: "这个 SIP-off 自用包没有通过当前 macOS AUTH_OPEN 安全门，安装按钮已强制禁用。请重新构建，不要激活事故前的旧包。".into(),
+            explanation: "This SIP-off self-use build did not pass the current macOS AUTH_OPEN safety gate, so installation is disabled. Rebuild the app and do not activate the pre-incident package.".into(),
         };
     }
     if self_use && !sip_is_disabled().unwrap_or(false) {
         return MacSetupReadiness {
             can_request_extension_install: false,
-            explanation: "这是 SIP-off 自用构建，但当前 SIP 仍处于开启状态。请在 macOS Recovery 中手动执行 csrutil disable，重启后再回来安装扩展；Guard 不会也不能替你修改 SIP。".into(),
+            explanation: "This is a SIP-off self-use build, but SIP is still enabled. Run csrutil disable manually from macOS Recovery, restart, and return to install the extension; Guard will not and cannot modify SIP for you.".into(),
         };
     }
     if self_use && !self_use_app_is_in_applications() {
         return MacSetupReadiness {
             can_request_extension_install: false,
-            explanation: "SIP-off 自用构建需要从 /Applications 启动，macOS 才会接受防护扩展安装。请把 Guard.app 复制到 /Applications 后重新打开；不要从 build/ 目录点击安装。".into(),
+            explanation: "SIP-off self-use builds must be launched from /Applications for macOS to accept protection extension installation. Copy Guard.app to /Applications and reopen it; do not install from the build/ directory.".into(),
         };
     }
     let host_entitlement = host_install_entitlement_present();
@@ -318,26 +318,26 @@ pub fn mac_setup_readiness() -> MacSetupReadiness {
         (Ok(true), Ok(true)) => MacSetupReadiness {
             can_request_extension_install: true,
             explanation: if self_use {
-                "SIP-off 自用模式检查已通过：SIP 已关闭，签名 entitlement 齐全。按钮会向 macOS 提交安装或更新请求；如果旧扩展已激活，macOS 将请求替换为当前包内版本。确认已手动运行 sudo systemextensionsctl developer on 后再点击。".into()
+                "SIP-off self-use checks passed: SIP is disabled and all signing entitlements are present. The button will submit an install or update request to macOS; if an older extension is active, macOS will replace it with the version in this bundle. Run sudo systemextensionsctl developer on manually before clicking.".into()
             } else {
-                "宿主安装 entitlement 与包内 Endpoint Security entitlement 均存在，可以请求安装或更新防护扩展。".into()
+                "The host installation entitlement and bundled Endpoint Security entitlement are present. You can request a protection extension install or update.".into()
             },
         },
         (Ok(false), _) => MacSetupReadiness {
             can_request_extension_install: false,
-            explanation: "最终签名的 Guard 宿主缺少 com.apple.developer.system-extension.install；安装按钮已禁用。请重新构建正确模式的包，不要尝试激活。".into(),
+            explanation: "The final signed Guard host is missing com.apple.developer.system-extension.install; installation is disabled. Rebuild the package in the correct signing mode and do not try to activate it.".into(),
         },
         (_, Ok(false)) => MacSetupReadiness {
             can_request_extension_install: false,
-            explanation: "最终签名的包内 guard-es.systemextension 缺少 com.apple.developer.endpoint-security.client；安装按钮已禁用。请重新构建正确模式的包，不要尝试激活。".into(),
+            explanation: "The final bundled guard-es.systemextension is missing com.apple.developer.endpoint-security.client; installation is disabled. Rebuild the package in the correct signing mode and do not try to activate it.".into(),
         },
         (Err(error), _) => MacSetupReadiness {
             can_request_extension_install: false,
-            explanation: format!("Guard 无法检查宿主安装 entitlement：{error}"),
+            explanation: format!("Guard could not inspect the host installation entitlement: {error}"),
         },
         (_, Err(error)) => MacSetupReadiness {
             can_request_extension_install: false,
-            explanation: format!("Guard 无法检查包内 Endpoint Security entitlement：{error}"),
+            explanation: format!("Guard could not inspect the bundled Endpoint Security entitlement: {error}"),
         },
     }
 }
@@ -359,23 +359,23 @@ pub fn request_system_extension_install() -> anyhow::Result<String> {
     let status = wait_for_lifecycle(&controller, std::time::Duration::from_secs(30))?;
     match status.state {
         LifecycleState::Active => Ok(
-            "macOS 已完成防护扩展安装/更新，当前版本已激活。请回到页面确认 Endpoint Security 状态为 Active；如完全磁盘访问仍显示 Required，请单独授予权限。"
+            "macOS completed the protection extension install/update and the current version is active. Return to this page to confirm that Endpoint Security is Active; if Full Disk Access still shows Required, grant that permission separately."
                 .into(),
         ),
         LifecycleState::UserApprovalRequired => Ok(
-            "macOS 已收到防护扩展安装/更新请求，等待用户批准。请在系统设置的 Endpoint Security 扩展页面允许 Guard，然后回到此页面刷新状态。"
+            "macOS received the protection extension install/update request and is waiting for user approval. Allow Guard in the Endpoint Security Extensions pane in System Settings, then return here and refresh the status."
                 .into(),
         ),
         LifecycleState::RestartRequired => Ok(
-            "macOS 已接受防护扩展更新，但需要重启后生效。重启前不会宣称新版本已激活。".into(),
+            "macOS accepted the protection extension update, but a restart is required. The new version will not be reported as active before restarting.".into(),
         ),
         LifecycleState::Deactivated => anyhow::bail!(
-            "macOS 返回扩展未激活：{}。请确认系统设置中的 Guard 扩展没有被停用。",
+            "macOS reported that the extension is not active: {}. Confirm that the Guard extension has not been disabled in System Settings.",
             status.diagnostic
         ),
         LifecycleState::Failed | LifecycleState::Unknown | LifecycleState::Submitted => {
             anyhow::bail!(
-                "macOS 未完成防护扩展安装/更新：state={:?}, diagnostic={}",
+                "macOS did not complete the protection extension install/update: state={:?}, diagnostic={}",
                 status.state,
                 status.diagnostic
             )
@@ -385,7 +385,7 @@ pub fn request_system_extension_install() -> anyhow::Result<String> {
 
 #[cfg(not(target_os = "macos"))]
 pub fn request_system_extension_install() -> anyhow::Result<String> {
-    anyhow::bail!("macOS 防护扩展仅可在 macOS 上安装")
+    anyhow::bail!("The macOS protection extension can only be installed on macOS")
 }
 
 #[cfg(target_os = "macos")]
@@ -393,13 +393,16 @@ pub fn open_full_disk_access_settings() -> anyhow::Result<()> {
     let status = std::process::Command::new("open")
         .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
         .status()?;
-    anyhow::ensure!(status.success(), "macOS 无法打开“完全磁盘访问”设置");
+    anyhow::ensure!(
+        status.success(),
+        "macOS could not open the Full Disk Access settings"
+    );
     Ok(())
 }
 
 #[cfg(not(target_os = "macos"))]
 pub fn open_full_disk_access_settings() -> anyhow::Result<()> {
-    anyhow::bail!("完全磁盘访问设置仅可在 macOS 上打开")
+    anyhow::bail!("Full Disk Access settings can only be opened on macOS")
 }
 
 pub const fn apply_button_label() -> &'static str {
@@ -490,28 +493,28 @@ pub fn platform_overview(
         helper_state: helper_state.into(),
         sip_state: if self_use_bundle_marker().is_some() {
             match sip_is_disabled() {
-                Ok(true) => "已关闭（自用模式要求）".into(),
-                Ok(false) => "已开启（自用模式不可用）".into(),
-                Err(_) => "无法检查".into(),
+                Ok(true) => "Disabled (required for self-use mode)".into(),
+                Ok(false) => "Enabled (self-use mode unavailable)".into(),
+                Err(_) => "Unable to check".into(),
             }
         } else {
-            "不适用".into()
+            "Not applicable".into()
         },
         developer_mode_state: if self_use_bundle_marker().is_some() {
-            "需手动启用：sudo systemextensionsctl developer on（当前 macOS 没有只读状态查询）"
+            "Enable manually: sudo systemextensionsctl developer on (macOS has no read-only status query)"
                 .into()
         } else {
-            "不适用".into()
+            "Not applicable".into()
         },
         host_entitlement_state: match host_install_entitlement_present() {
-            Ok(true) => "存在".into(),
-            Ok(false) => "缺失（不能安装扩展）".into(),
-            Err(error) => format!("检查失败：{error}"),
+            Ok(true) => "Present".into(),
+            Ok(false) => "Missing (extension cannot be installed)".into(),
+            Err(error) => format!("Check failed: {error}"),
         },
         endpoint_security_entitlement_state: match bundled_endpoint_security_entitlement_present() {
-            Ok(true) => "存在".into(),
-            Ok(false) => "缺失（不能启动 Endpoint Security）".into(),
-            Err(error) => format!("检查失败：{error}"),
+            Ok(true) => "Present".into(),
+            Ok(false) => "Missing (Endpoint Security cannot start)".into(),
+            Err(error) => format!("Check failed: {error}"),
         },
     }
 }
@@ -648,7 +651,10 @@ pub fn set_protection_enabled(
 pub fn set_user_agent_enabled(enabled: bool) -> anyhow::Result<()> {
     if enabled {
         let protection_enabled = configuration()?.policy_enabled.unwrap_or(false);
-        anyhow::ensure!(protection_enabled, "请先打开防护服务，再启动 guard-notify");
+        anyhow::ensure!(
+            protection_enabled,
+            "Enable protection before starting guard-notify"
+        );
     }
     let agent = platform_macos::user_agent::UserAgentController::bundled()?;
     if enabled {
@@ -1116,7 +1122,7 @@ fn pending_helper_mutation(register: bool) -> i32 {
         match configuration().and_then(|configuration| {
             anyhow::ensure!(
                 configuration.policy_enabled.unwrap_or(false),
-                "请先打开防护服务，再启动 guard-notify"
+                "Enable protection before starting guard-notify"
             );
             Ok(())
         }) {

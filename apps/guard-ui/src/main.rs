@@ -143,8 +143,8 @@ fn main() {
     #[cfg(target_os = "macos")]
     if std::env::args().any(|arg| arg == "--test-notification") {
         match platform_macos::notifications::send(
-            "Sensitive File Guard 测试通知",
-            "Guard.app 通知通道正常；这是一条合成测试消息。",
+            "Sensitive File Guard test notification",
+            "The Guard.app notification channel is working; this is a synthetic test message.",
         ) {
             Ok(()) => {
                 eprintln!("Guard: delivered synthetic macOS test notification");
@@ -222,28 +222,29 @@ fn build_ui(app: &adw::Application, pending_only: bool, layout_smoke_page: Optio
     events.set_selection_mode(gtk::SelectionMode::None);
     let extension_status = adw::ActionRow::new();
     configure_status_row(&extension_status);
-    extension_status.set_title("防护扩展");
-    extension_status.set_subtitle("正在检查安装状态…");
+    extension_status.set_title("Protection extension");
+    extension_status.set_subtitle("Checking installation status…");
     let fda_status = adw::ActionRow::new();
     configure_status_row(&fda_status);
-    fda_status.set_title("完全磁盘访问");
-    fda_status.set_subtitle("正在检查权限状态…");
+    fda_status.set_title("Full Disk Access");
+    fda_status.set_subtitle("Checking permission status…");
     let sip_status = adw::ActionRow::new();
     configure_status_row(&sip_status);
     sip_status.set_title("SIP");
-    sip_status.set_subtitle("正在检查…");
+    sip_status.set_subtitle("Checking…");
     let developer_mode_status = adw::ActionRow::new();
     configure_status_row(&developer_mode_status);
     developer_mode_status.set_title("System Extension developer mode");
-    developer_mode_status.set_subtitle("正在检查…");
+    developer_mode_status.set_subtitle("Checking…");
     let host_entitlement_status = adw::ActionRow::new();
     configure_status_row(&host_entitlement_status);
-    host_entitlement_status.set_title("宿主安装 entitlement");
-    host_entitlement_status.set_subtitle("正在检查最终签名…");
+    host_entitlement_status.set_title("Host installation entitlement");
+    host_entitlement_status.set_subtitle("Checking final signature…");
     let endpoint_security_entitlement_status = adw::ActionRow::new();
     configure_status_row(&endpoint_security_entitlement_status);
     endpoint_security_entitlement_status.set_title("Endpoint Security entitlement");
-    endpoint_security_entitlement_status.set_subtitle("正在检查包内扩展的最终签名…");
+    endpoint_security_entitlement_status
+        .set_subtitle("Checking the bundled extension's final signature…");
     let mac_setup_message = gtk::Label::new(None);
     mac_setup_message.set_wrap(true);
     mac_setup_message.set_wrap_mode(gtk::pango::WrapMode::WordChar);
@@ -293,9 +294,9 @@ fn build_ui(app: &adw::Application, pending_only: bool, layout_smoke_page: Optio
     stack.add_titled(&overview, Some("overview"), "Overview");
     stack.add_titled(&protection, Some("protection"), "Protection");
     stack.add_titled(&log, Some("log"), "Security Log");
-    let refresh_status = gtk::Button::with_label("刷新状态");
+    let refresh_status = gtk::Button::with_label("Refresh status");
     refresh_status.set_tooltip_text(Some(
-        "刷新防护设置、权限、浏览器保护、SSH Key 保护和服务健康状态",
+        "Refresh protection settings, permissions, browser protection, SSH key protection, and service health",
     ));
     refresh_status.add_css_class("suggested-action");
     refresh_status.set_halign(gtk::Align::End);
@@ -491,12 +492,12 @@ fn protection_page(state: &UiState) -> gtk::Box {
             }
         });
     } else {
-        let heading = gtk::Label::new(Some("保护设置"));
+        let heading = gtk::Label::new(Some("Protection setup"));
         heading.set_xalign(0.0);
         heading.add_css_class("title-2");
         page.append(&heading);
         let group = adw::PreferencesGroup::new();
-        group.set_title("请按以下顺序完成");
+        group.set_title("Complete these steps in order");
         group.add(&state.sip_status);
         group.add(&state.developer_mode_status);
         group.add(&state.host_entitlement_status);
@@ -506,8 +507,8 @@ fn protection_page(state: &UiState) -> gtk::Box {
         page.append(&group);
         let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         actions.set_halign(gtk::Align::Start);
-        let install = gtk::Button::with_label("1. 安装/更新防护扩展");
-        let fda = gtk::Button::with_label("2. 授予完全磁盘访问权限");
+        let install = gtk::Button::with_label("1. Install/update protection extension");
+        let fda = gtk::Button::with_label("2. Grant Full Disk Access");
         let readiness = platform_service::mac_setup_readiness();
         install.set_sensitive(readiness.can_request_extension_install);
         install.set_tooltip_text(Some(&readiness.explanation));
@@ -530,11 +531,11 @@ fn protection_page(state: &UiState) -> gtk::Box {
         );
 
         let helper_group = adw::PreferencesGroup::new();
-        helper_group.set_title("可选：需要确认时自动打开 Guard");
+        helper_group.set_title("Optional: open Guard automatically for confirmations");
         let helper = adw::SwitchRow::new();
         helper.set_subtitle_lines(STATUS_SUBTITLE_LINES);
-        helper.set_title("遇到确认请求时自动打开 Guard");
-        helper.set_subtitle("仅在防护服务开启时运行，用于显示浏览器迁移或 SSH 密钥确认；它不会安装扩展，也不会授予权限。");
+        helper.set_title("Open Guard automatically when confirmation is required");
+        helper.set_subtitle("Runs only while protection is enabled to show browser migration or SSH key confirmations; it does not install extensions or grant permissions.");
         helper.set_active(false);
         helper.set_sensitive(false);
         let helper_row = helper.clone();
@@ -556,19 +557,19 @@ fn protection_page(state: &UiState) -> gtk::Box {
         helper_group.add(&helper);
         page.append(&helper_group);
 
-        let allowlist_heading = gtk::Label::new(Some("macOS 受信任工具"));
+        let allowlist_heading = gtk::Label::new(Some("macOS trusted tools"));
         allowlist_heading.set_xalign(0.0);
         allowlist_heading.add_css_class("title-2");
         page.append(&allowlist_heading);
         let allowlist_info = gtk::Label::new(Some(
-            "Spotlight 仅对历史元数据使用精确 Apple 签名例外；第三方工具不会因为名称或安装位置自动放行。Cookie、密码、会话数据和 SSH 私钥仍需人工确认。",
+            "Spotlight uses exact Apple-signature exceptions only for history metadata; third-party tools are not automatically allowed based on their name or install location. Cookies, passwords, session data, and SSH private keys still require confirmation.",
         ));
         allowlist_info.set_xalign(0.0);
         allowlist_info.set_wrap(true);
         allowlist_info.set_wrap_mode(gtk::pango::WrapMode::WordChar);
         allowlist_info.set_max_width_chars(SUMMARY_WIDTH_CHARS);
         page.append(&allowlist_info);
-        let add_tool = gtk::Button::with_label("添加受信任工具…");
+        let add_tool = gtk::Button::with_label("Add trusted tool…");
         add_tool.set_halign(gtk::Align::Start);
         let tool_state = state.clone();
         let trusted_tools = gtk::ListBox::new();
@@ -723,11 +724,11 @@ fn mac_notification_text(event: &guard_ipc::EventInfo) -> (String, String) {
     let executable = std::path::Path::new(&event.exe)
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "某个进程".into());
+        .unwrap_or_else(|| "a process".into());
     (
-        "Sensitive File Guard 已拦截访问".into(),
+        "Sensitive File Guard blocked access".into(),
         format!(
-            "{executable} 尝试访问受保护的 {}。",
+            "{executable} attempted to access protected {}.",
             event.resource_kind_code
         ),
     )
@@ -1199,11 +1200,11 @@ fn show_add_key_dialog(state: &UiState) {
 #[cfg(target_os = "macos")]
 fn show_add_trusted_tool_dialog(state: &UiState, list: &gtk::ListBox) {
     let dialog = gtk::FileChooserNative::new(
-        Some("选择受信任工具 App 内的可执行文件"),
+        Some("Select an executable inside the trusted tool App"),
         None::<&gtk::Window>,
         gtk::FileChooserAction::Open,
-        Some("验证并添加"),
-        Some("取消"),
+        Some("Verify and add"),
+        Some("Cancel"),
     );
     let list = list.clone();
     let candidate = state.candidate.clone();
@@ -1236,7 +1237,7 @@ fn show_add_trusted_tool_dialog(state: &UiState, list: &gtk::ListBox) {
                                     config.mac_allowlist.trusted_tools.push(rule);
                                     apply.set_sensitive(true);
                                     dialog_state.mac_setup_message.set_text(
-                                        "受信任工具已加入待应用配置；关键浏览器数据和 SSH 私钥仍需人工确认。",
+                                        "The trusted tool was added to the pending configuration; sensitive browser data and SSH private keys still require confirmation.",
                                     );
                                     render_trusted_tools(&dialog_state, &list);
                                 }
@@ -1244,10 +1245,10 @@ fn show_add_trusted_tool_dialog(state: &UiState, list: &gtk::ListBox) {
                         }
                         Ok(Err(error)) => dialog_state
                             .mac_setup_message
-                            .set_text(&format!("工具未添加：{error}")),
+                            .set_text(&format!("Tool was not added: {error}")),
                         Err(error) => dialog_state
                             .mac_setup_message
-                            .set_text(&format!("验证任务失败：{error:?}")),
+                            .set_text(&format!("Verification task failed: {error:?}")),
                     }
                 });
             }
@@ -1273,13 +1274,13 @@ fn render_trusted_tools(state: &UiState, list: &gtk::ListBox) {
         row.set_margin_start(10);
         row.set_margin_end(10);
         let label = gtk::Label::new(Some(&format!(
-            "{} · 已登记（仅低敏感度元数据）",
+            "{} · Enrolled (low-sensitivity metadata only)",
             tool.path.display()
         )));
         label.set_xalign(0.0);
         label.set_hexpand(true);
         label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
-        let remove = gtk::Button::with_label("撤销");
+        let remove = gtk::Button::with_label("Revoke");
         let candidate = state.candidate.clone();
         let apply = state.apply.clone();
         let path = tool.path.clone();
@@ -2387,14 +2388,14 @@ fn spawn_user_agent_change(
             }
             Ok(Err(error)) => {
                 row.set_active(!enabled);
-                let message = format!("启用确认助手失败：{error}");
+                let message = format!("Failed to enable confirmation helper: {error}");
                 *error_state.borrow_mut() = Some(message.clone());
                 row.set_subtitle(&message);
                 row.set_tooltip_text(Some(&message));
             }
             Err(error) => {
                 row.set_active(!enabled);
-                let message = format!("确认助手任务异常：{error:?}");
+                let message = format!("Confirmation helper task failed: {error:?}");
                 *error_state.borrow_mut() = Some(message.clone());
                 row.set_subtitle(&message);
                 row.set_tooltip_text(Some(&message));
@@ -2406,7 +2407,7 @@ fn spawn_user_agent_change(
 
 fn spawn_system_extension_install(button: gtk::Button, message: gtk::Label) {
     button.set_sensitive(false);
-    message.set_text("正在请求 macOS 安装或更新防护扩展…");
+    message.set_text("Requesting macOS protection extension installation/update…");
     glib::MainContext::default().spawn_local(async move {
         let result = gio::spawn_blocking(platform_service::request_system_extension_install).await;
         button.set_sensitive(true);
@@ -2416,12 +2417,15 @@ fn spawn_system_extension_install(button: gtk::Button, message: gtk::Label) {
                 button.set_tooltip_text(None);
             }
             Ok(Err(error)) => {
-                message.set_text(&format!("无法安装防护扩展：{error}"));
+                message.set_text(&format!(
+                    "Unable to install the protection extension: {error}"
+                ));
                 button.set_tooltip_text(Some(&error.to_string()));
             }
             Err(error) => {
-                message.set_text("安装请求意外停止，请重试。");
-                button.set_tooltip_text(Some(&format!("安装任务停止：{error:?}")));
+                message
+                    .set_text("The installation request stopped unexpectedly; please try again.");
+                button.set_tooltip_text(Some(&format!("Installation task stopped: {error:?}")));
             }
         }
     });
