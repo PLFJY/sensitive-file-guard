@@ -270,7 +270,7 @@ impl PendingObserver {
 
 #[cfg(target_os = "macos")]
 fn activate_guard_ui_macos() {
-    if let Err(error) = activate_guard_ui_macos_with_args(&["--pending-only"]) {
+    if let Err(error) = activate_guard_ui_macos_with_args(&[]) {
         eprintln!("guard-notify: could not activate Guard.app: {error}");
     }
 }
@@ -282,14 +282,32 @@ fn activate_guard_ui_macos_with_args(args: &[&str]) -> anyhow::Result<()> {
         Err(error) => anyhow::bail!("cannot locate app bundle: {error}"),
     };
     let guard = guard_ui_executable(&executable)?;
-    Command::new(&guard)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| anyhow::anyhow!("could not activate {}: {error}", guard.display()))
+    if args.is_empty() {
+        // Launch through LaunchServices instead of executing the nested Mach-O
+        // directly. This reliably activates an already-running GApplication
+        // after its window was closed, and starts the correct bundle when the
+        // GUI process has exited. The bundle path is passed as one argv item,
+        // so spaces in the installation path remain safe.
+        let bundle = guard_ui_bundle(&guard)?;
+        Command::new("/usr/bin/open")
+            .arg("-a")
+            .arg(&bundle)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| anyhow::anyhow!("could not open {}: {error}", bundle.display()))
+    } else {
+        Command::new(&guard)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| anyhow::anyhow!("could not activate {}: {error}", guard.display()))
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -302,6 +320,24 @@ fn guard_ui_executable(helper: &Path) -> anyhow::Result<PathBuf> {
         "pending helper is not inside an app Contents/MacOS directory"
     );
     Ok(macos_dir.join("Guard"))
+}
+
+#[cfg(target_os = "macos")]
+fn guard_ui_bundle(guard: &Path) -> anyhow::Result<PathBuf> {
+    let macos_dir = guard
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Guard executable has no parent directory"))?;
+    let contents = macos_dir
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Guard executable is not inside Contents/MacOS"))?;
+    anyhow::ensure!(
+        contents.file_name().is_some_and(|name| name == "Contents"),
+        "Guard executable is not inside an app bundle"
+    );
+    Ok(contents
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Guard bundle has no parent directory"))?
+        .to_path_buf())
 }
 
 #[cfg(target_os = "linux")]
@@ -627,6 +663,16 @@ mod tests {
             guard_ui_executable(helper).unwrap(),
             PathBuf::from("/Applications/Guard.app/Contents/MacOS/Guard")
         );
+        assert_eq!(
+            guard_ui_bundle(&guard_ui_executable(helper).unwrap()).unwrap(),
+            PathBuf::from("/Applications/Guard.app")
+        );
+        let spaced = Path::new("/Applications/Guard Test.app/Contents/MacOS/guard-notify");
+        assert_eq!(
+            guard_ui_bundle(&guard_ui_executable(spaced).unwrap()).unwrap(),
+            PathBuf::from("/Applications/Guard Test.app")
+        );
         assert!(guard_ui_executable(Path::new("/tmp/guard-notify")).is_err());
+        assert!(guard_ui_bundle(Path::new("/tmp/Guard")).is_err());
     }
 }

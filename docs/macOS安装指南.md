@@ -46,7 +46,7 @@ scripts/macos/build-deploy-self-use.sh
 launchctl print "gui/$(id -u)/top.plfjy.SensitiveFileGuard.guard-notify" 2>/dev/null || true
 ```
 
-当前版本中，关闭“防护服务”会同时注销并停止 `guard-notify`；重新打开防护服务后才允许重新注册 helper。helper 不能脱离主服务单独轮询或发通知。
+当前版本中，关闭“防护服务”会同时注销并停止 `guard-notify`；重新打开防护服务后才允许重新注册 helper。helper 不能脱离主服务单独轮询或发通知。检测到新的浏览器迁移或 SSH 确认请求时，helper 通过 macOS LaunchServices 打开/激活当前 `Guard.app`，所以即使你已经关闭 Guard 窗口，也会重新唤起应用；包含空格的安装路径也会安全处理。
 
 ## 三种构建模式
 
