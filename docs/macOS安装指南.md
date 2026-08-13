@@ -25,7 +25,7 @@ scripts/macos/build-deploy-self-use.sh
    ```
 
 3. 重启进入 macOS Recovery，手动执行 `csrutil disable`，再重启回系统并运行 `csrutil status`。Guard 不执行这一步。
-4. 执行 `sudo systemextensionsctl developer on`，打开 `Guard.app`，在 Protection 页面安装防护扩展，并按系统提示批准完全磁盘访问。
+4. 执行 `sudo systemextensionsctl developer on`，打开 `Guard.app`，在 Protection 页面点击“安装/更新防护扩展”，并按系统提示批准完全磁盘访问。重复点击不是无条件跳过：macOS 会按当前包版本提交安装或替换更新请求；页面会明确显示 Active、等待批准、需要重启或失败原因。
 5. 先登记合成浏览器 profile 和临时 SSH key，打开策略后运行现有 `scripts/macos/run-*-acceptance.sh`。
 
 ## 确认助手和通知自检

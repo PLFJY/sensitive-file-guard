@@ -310,9 +310,9 @@ pub fn mac_setup_readiness() -> MacSetupReadiness {
         (Ok(true), Ok(true)) => MacSetupReadiness {
             can_request_extension_install: true,
             explanation: if self_use {
-                "SIP-off 自用模式的静态检查已通过：SIP 已关闭，宿主安装 entitlement 与包内 Endpoint Security entitlement 均存在。确认已手动运行 sudo systemextensionsctl developer on 后，才能点击“安装防护扩展”。".into()
+                "SIP-off 自用模式检查已通过：SIP 已关闭，签名 entitlement 齐全。按钮会向 macOS 提交安装或更新请求；如果旧扩展已激活，macOS 将请求替换为当前包内版本。确认已手动运行 sudo systemextensionsctl developer on 后再点击。".into()
             } else {
-                "此应用的宿主安装 entitlement 与包内 Endpoint Security entitlement 均存在，可以请求安装防护扩展。".into()
+                "宿主安装 entitlement 与包内 Endpoint Security entitlement 均存在，可以请求安装或更新防护扩展。".into()
             },
         },
         (Ok(false), _) => MacSetupReadiness {
@@ -336,6 +336,8 @@ pub fn mac_setup_readiness() -> MacSetupReadiness {
 
 #[cfg(target_os = "macos")]
 pub fn request_system_extension_install() -> anyhow::Result<String> {
+    use platform_macos::system_extension::LifecycleState;
+
     let readiness = mac_setup_readiness();
     anyhow::ensure!(
         readiness.can_request_extension_install,
@@ -346,7 +348,31 @@ pub fn request_system_extension_install() -> anyhow::Result<String> {
         platform_macos::DEFAULT_EXTENSION_BUNDLE_ID,
     )?;
     controller.activate()?;
-    Ok("macOS 已收到安装请求。如果出现批准提示，请在 macOS 弹窗或系统设置中选择“允许”，然后回到此页面；状态会自动刷新。接着点击“授予完全磁盘访问权限”。".into())
+    let status = wait_for_lifecycle(&controller, std::time::Duration::from_secs(30))?;
+    match status.state {
+        LifecycleState::Active => Ok(
+            "macOS 已完成防护扩展安装/更新，当前版本已激活。请回到页面确认 Endpoint Security 状态为 Active；如完全磁盘访问仍显示 Required，请单独授予权限。"
+                .into(),
+        ),
+        LifecycleState::UserApprovalRequired => Ok(
+            "macOS 已收到防护扩展安装/更新请求，等待用户批准。请在系统设置的 Endpoint Security 扩展页面允许 Guard，然后回到此页面刷新状态。"
+                .into(),
+        ),
+        LifecycleState::RestartRequired => Ok(
+            "macOS 已接受防护扩展更新，但需要重启后生效。重启前不会宣称新版本已激活。".into(),
+        ),
+        LifecycleState::Deactivated => anyhow::bail!(
+            "macOS 返回扩展未激活：{}。请确认系统设置中的 Guard 扩展没有被停用。",
+            status.diagnostic
+        ),
+        LifecycleState::Failed | LifecycleState::Unknown | LifecycleState::Submitted => {
+            anyhow::bail!(
+                "macOS 未完成防护扩展安装/更新：state={:?}, diagnostic={}",
+                status.state,
+                status.diagnostic
+            )
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]

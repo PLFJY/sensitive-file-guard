@@ -506,7 +506,7 @@ fn protection_page(state: &UiState) -> gtk::Box {
         page.append(&group);
         let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         actions.set_halign(gtk::Align::Start);
-        let install = gtk::Button::with_label("1. 安装防护扩展");
+        let install = gtk::Button::with_label("1. 安装/更新防护扩展");
         let fda = gtk::Button::with_label("2. 授予完全磁盘访问权限");
         let readiness = platform_service::mac_setup_readiness();
         install.set_sensitive(readiness.can_request_extension_install);
@@ -2406,7 +2406,7 @@ fn spawn_user_agent_change(
 
 fn spawn_system_extension_install(button: gtk::Button, message: gtk::Label) {
     button.set_sensitive(false);
-    message.set_text("正在请求 macOS 安装防护扩展…");
+    message.set_text("正在请求 macOS 安装或更新防护扩展…");
     glib::MainContext::default().spawn_local(async move {
         let result = gio::spawn_blocking(platform_service::request_system_extension_install).await;
         button.set_sensitive(true);
