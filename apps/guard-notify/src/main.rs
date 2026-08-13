@@ -293,9 +293,13 @@ fn activate_guard_ui_macos_with_args(args: &[&str]) -> anyhow::Result<()> {
         // GUI process has exited. The bundle path is passed as one argv item,
         // so spaces in the installation path remain safe.
         let bundle = guard_ui_bundle(&guard)?;
+        // A pending confirmation is a short-lived presenter, not a second
+        // control-center instance. Pass `--pending-only` to a newly launched
+        // app so it exits after the queue is empty. LaunchServices still
+        // activates an already-running Guard process, where the normal UI
+        // polling path owns the existing window.
         Command::new("/usr/bin/open")
-            .arg("-a")
-            .arg(&bundle)
+            .args(launchservices_pending_args(&bundle))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -312,6 +316,16 @@ fn activate_guard_ui_macos_with_args(args: &[&str]) -> anyhow::Result<()> {
             .map(|_| ())
             .map_err(|error| anyhow::anyhow!("could not activate {}: {error}", guard.display()))
     }
+}
+
+#[cfg(target_os = "macos")]
+fn launchservices_pending_args(bundle: &Path) -> Vec<std::ffi::OsString> {
+    vec![
+        "-a".into(),
+        bundle.as_os_str().to_owned(),
+        "--args".into(),
+        "--pending-only".into(),
+    ]
 }
 
 #[cfg(target_os = "macos")]
@@ -679,5 +693,18 @@ mod tests {
         );
         assert!(guard_ui_executable(Path::new("/tmp/guard-notify")).is_err());
         assert!(guard_ui_bundle(Path::new("/tmp/Guard")).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pending_helper_launch_uses_pending_only_launchservices_args() {
+        // Keep the LaunchServices contract explicit: a newly launched helper
+        // must not become a permanent Dock application after the decision.
+        let args = launchservices_pending_args(Path::new("/Applications/Guard Test.app"));
+        assert_eq!(args.len(), 4);
+        assert_eq!(args[0], "-a");
+        assert_eq!(args[1], "/Applications/Guard Test.app");
+        assert_eq!(args[2], "--args");
+        assert_eq!(args[3], "--pending-only");
     }
 }

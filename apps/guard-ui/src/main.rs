@@ -199,8 +199,14 @@ fn build_ui(app: &adw::Application, pending_only: bool, layout_smoke_page: Optio
     // process, so creating another UiState here would poll the same pending ID
     // independently and show duplicate confirmation dialogs.
     if let Some(window) = app.active_window() {
-        window.present();
-        return;
+        // GTK can retain a closed window object while GApplication is still
+        // servicing an activation from LaunchServices. Do not treat that
+        // invisible object as the control center: create a fresh window so a
+        // pending helper activation cannot leave a Dock-only process.
+        if window.is_visible() {
+            window.present();
+            return;
+        }
     }
 
     let status = gtk::Label::new(Some("Connecting to guardd…"));
@@ -365,7 +371,13 @@ fn build_ui(app: &adw::Application, pending_only: bool, layout_smoke_page: Optio
             // center, not a menu-bar agent: closing its window must quit the
             // GUI process. The Endpoint Security extension is independent and
             // remains active; pending-only helper invocations exit here too.
-            app_for_close.quit();
+            // Finish the native window-close transaction first. Calling
+            // `quit` synchronously from `close-request` can leave GTK's
+            // GApplication resident with no window on macOS, which appears
+            // as an unresponsive white Dock dot. The idle callback runs once
+            // the close signal has returned and terminates the GUI cleanly.
+            let app_for_close = app_for_close.clone();
+            glib::idle_add_local_once(move || app_for_close.quit());
             glib::Propagation::Proceed
         });
     }
