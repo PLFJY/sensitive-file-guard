@@ -180,6 +180,14 @@ fn main() {
     // deprecated GtkSettings dark-theme toggle from the desktop session.
     adw::StyleManager::default().set_color_scheme(adw::ColorScheme::Default);
     let app = adw::Application::new(Some(APP_ID), gio::ApplicationFlags::empty());
+    #[cfg(target_os = "macos")]
+    {
+        let quit = gio::SimpleAction::new("quit", None);
+        let app_for_quit = app.clone();
+        quit.connect_activate(move |_, _| app_for_quit.quit());
+        app.add_action(&quit);
+        app.set_accels_for_action("app.quit", &["<Primary>q"]);
+    }
     app.connect_activate(move |app| build_ui(app, pending_only, layout_smoke_page));
     let process_name = std::env::args().next().unwrap_or_else(|| "guard-ui".into());
     app.run_with_args(&[process_name]);
@@ -348,6 +356,19 @@ fn build_ui(app: &adw::Application, pending_only: bool, layout_smoke_page: Optio
     window.set_title(Some("Sensitive File Guard"));
     window.set_default_size(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT);
     window.set_content(Some(&overlay));
+    #[cfg(target_os = "macos")]
+    {
+        let app_for_close = app.clone();
+        window.connect_close_request(move |_| {
+            // GTK's default macOS behavior closes only the window and keeps
+            // the GApplication resident in the Dock. Guard is a control
+            // center, not a menu-bar agent: closing its window must quit the
+            // GUI process. The Endpoint Security extension is independent and
+            // remains active; pending-only helper invocations exit here too.
+            app_for_close.quit();
+            glib::Propagation::Proceed
+        });
+    }
     let state_for_refresh = state.clone();
     let refresh_window = window.clone();
     refresh_status.connect_clicked(move |button| {
