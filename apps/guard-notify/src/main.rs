@@ -677,19 +677,21 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn pending_helper_launches_only_the_sibling_guard_pending_client() {
-        let helper = Path::new("/Applications/Guard.app/Contents/MacOS/guard-notify");
+        let helper =
+            Path::new("/Applications/Sensitive File Guard.app/Contents/MacOS/guard-notify");
         assert_eq!(
             guard_ui_executable(helper).unwrap(),
-            PathBuf::from("/Applications/Guard.app/Contents/MacOS/Guard")
+            PathBuf::from("/Applications/Sensitive File Guard.app/Contents/MacOS/Guard")
         );
         assert_eq!(
             guard_ui_bundle(&guard_ui_executable(helper).unwrap()).unwrap(),
-            PathBuf::from("/Applications/Guard.app")
+            PathBuf::from("/Applications/Sensitive File Guard.app")
         );
-        let spaced = Path::new("/Applications/Guard Test.app/Contents/MacOS/guard-notify");
+        let spaced =
+            Path::new("/Applications/Sensitive File Guard Test.app/Contents/MacOS/guard-notify");
         assert_eq!(
             guard_ui_bundle(&guard_ui_executable(spaced).unwrap()).unwrap(),
-            PathBuf::from("/Applications/Guard Test.app")
+            PathBuf::from("/Applications/Sensitive File Guard Test.app")
         );
         assert!(guard_ui_executable(Path::new("/tmp/guard-notify")).is_err());
         assert!(guard_ui_bundle(Path::new("/tmp/Guard")).is_err());

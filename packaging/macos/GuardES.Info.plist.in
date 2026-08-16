@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleDisplayName</key>
-    <string>Guard Endpoint Security</string>
+    <string>Sensitive File Guard Endpoint Security</string>
     <key>CFBundleExecutable</key>
     <string>guard-es</string>
     <key>CFBundleIdentifier</key>

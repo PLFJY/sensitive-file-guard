@@ -8,7 +8,7 @@ fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH= cd -- "$script_dir/../.." && pwd)
-app=${1:-"$repo_dir/build/macos-release/Guard.app"}
+app=${1:-"$repo_dir/build/macos-release/Sensitive File Guard.app"}
 expected_arch=${EXPECTED_ARCH:-$(uname -m)}
 signing_mode=${VERIFY_SIGNING_MODE:-release}
 
@@ -50,7 +50,7 @@ codesign --verify --deep --strict --verbose=2 "$app"
 # valid release artifact, even if the rest of its code signature is valid.
 if strings "$app/Contents/MacOS/Guard" "$app/Contents/MacOS/guard-notify" \
     | grep -Eiq '/usr/bin/osascript|display notification|Script Editor'; then
-    echo "legacy Script Editor notification path remains in Guard.app" >&2
+    echo "legacy Script Editor notification path remains in Sensitive File Guard.app" >&2
     exit 2
 fi
 
@@ -128,4 +128,4 @@ grep -q '@GUARD_APP@/Contents/Resources/gdk-pixbuf/loaders' \
 if [ "${VERIFY_GATEKEEPER:-0}" = 1 ]; then
     spctl --assess --type execute --verbose=4 "$app"
 fi
-echo "PASS: self-contained $signing_mode-signed Guard.app verified for $expected_arch"
+echo "PASS: self-contained $signing_mode-signed Sensitive File Guard.app verified for $expected_arch"

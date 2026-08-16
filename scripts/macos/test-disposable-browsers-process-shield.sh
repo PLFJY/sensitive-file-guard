@@ -15,8 +15,8 @@ watchdog_log="$work/watchdog.log"
 watchdog_stop="$work/stop-watchdog"
 audit_db="/Library/Application Support/Sensitive Data Firewall/audit.db"
 release_root=${MACOS_RELEASE_ROOT:-"$repo_dir/build/macos-release"}
-app="$release_root/Guard.app"
-installed_app="/Applications/Guard.app"
+app="$release_root/Sensitive File Guard.app"
+installed_app="/Applications/Sensitive File Guard.app"
 extension_bundle_id=top.plfjy.SensitiveFileGuard.guard-es
 watchdog_pid=
 
@@ -51,18 +51,18 @@ check() {
     fi
 }
 
-# Install the new production build over the old Guard.app. Stale leftovers
+# Install the new production build over the old Sensitive File Guard.app. Stale leftovers
 # from previous test runs may be root-owned and unremovable by a normal user;
 # in that case install to a side-by-side path and activate from there.
 test -f "$app/Contents/MacOS/Guard" || { echo "release app missing: $app" >&2; exit 2; }
-rm -rf "/Applications/Guard.app.pre-mps11" "/Applications/Guard.app.new" || true
+rm -rf "/Applications/Sensitive File Guard.app.pre-mps11" "/Applications/Sensitive File Guard.app.new" || true
 if ! rm -rf "$installed_app" 2>/dev/null; then
     echo "cannot remove $installed_app (root-owned leftover); installing alongside instead" >&2
-    installed_app="/Applications/Guard.app.new"
+    installed_app="/Applications/Sensitive File Guard.app.new"
     rm -rf "$installed_app"
 fi
 ditto "$app" "$installed_app"
-echo "installed production Guard.app with new Process Shield build"
+echo "installed production Sensitive File Guard.app with new Process Shield build"
 
 GUARD_EXTENSION_WATCHDOG_SECONDS=120 \
 GUARD_EXTENSION_WATCHDOG_STOP_FILE="$watchdog_stop" \

@@ -20,9 +20,9 @@ protected="$fixture_dir/protected-synthetic.txt"
 compromise_file="$fixture_dir/compromise.pid"
 watchdog_log="$fixture_dir/watchdog.log"
 watchdog_stop="$fixture_dir/stop-watchdog"
-installed_app="/Applications/Guard ES POC.app"
+installed_app="/Applications/Sensitive File Guard PoC.app"
 app_root=${MACOS_ES_POC_ROOT:-"$repo_dir/build/macos-es-poc"}
-app="$app_root/Guard.app"
+app="$app_root/Sensitive File Guard.app"
 # Use the already user-approved production bundle id so the temporary test
 # extension does not require a new System Settings approval. The production
 # build is redeployed immediately after the suite (MPS12).

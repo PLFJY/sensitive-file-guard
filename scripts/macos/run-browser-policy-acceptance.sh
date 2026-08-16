@@ -2,7 +2,7 @@
 set -eu
 
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
-app=${GUARD_APP:-$repo_dir/build/macos/Guard.app}
+app=${GUARD_APP:-$repo_dir/build/macos/Sensitive File Guard.app}
 guardctl="$app/Contents/MacOS/guardctl"
 chrome='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
 firefox='/Applications/Firefox.app/Contents/MacOS/firefox'

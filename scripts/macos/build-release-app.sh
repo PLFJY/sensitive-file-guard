@@ -9,7 +9,7 @@ fi
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH= cd -- "$script_dir/../.." && pwd)
 build_root=${MACOS_RELEASE_ROOT:-"$repo_dir/build/macos-release"}
-app="$build_root/Guard.app"
+app="$build_root/Sensitive File Guard.app"
 version=${GUARD_VERSION:-0.1.0}
 architecture=$(uname -m)
 local_only=${LOCAL_SIGNING_ONLY:-0}
@@ -147,7 +147,7 @@ if [ "$signing_mode" = release ]; then
     }
 fi
 
-archive="$build_root/Guard-$version-$architecture.zip"
+archive="$build_root/Sensitive-File-Guard-$version-$architecture.zip"
 rm -f -- "$archive"
 ditto -c -k --keepParent "$app" "$archive"
 echo "release bundle: $app"

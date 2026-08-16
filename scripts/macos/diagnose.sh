@@ -8,14 +8,14 @@ fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH= cd -- "$script_dir/../.." && pwd)
-app=${1:-"$repo_dir/build/macos-release/Guard.app"}
+app=${1:-"$repo_dir/build/macos-release/Sensitive File Guard.app"}
 guard="$app/Contents/MacOS/Guard"
 guardctl="$app/Contents/MacOS/guardctl"
 
 echo "Guard macOS diagnostics (metadata only)"
 echo "app=$app"
 if [ ! -x "$guard" ]; then
-    echo "backend_state=EXTENSION_NOT_INSTALLED diagnostic=Guard.app is unavailable"
+    echo "backend_state=EXTENSION_NOT_INSTALLED diagnostic=Sensitive File Guard.app is unavailable"
     exit 1
 fi
 

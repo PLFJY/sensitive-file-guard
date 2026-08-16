@@ -8,7 +8,7 @@ fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH= cd -- "$script_dir/../.." && pwd)
-app_bundle=${1:-"$repo_dir/build/macos/Guard.app"}
+app_bundle=${1:-"$repo_dir/build/macos/Sensitive File Guard.app"}
 case "$app_bundle" in
     /*) ;;
     *) app_bundle=$(CDPATH= cd -- "$(dirname -- "$app_bundle")" && pwd)/$(basename -- "$app_bundle") ;;

@@ -289,9 +289,9 @@ enum ProtectionScope {
         resources: Arc<MacProtectedResources>,
         trust: Arc<RwLock<MacBrowserTrustStore>>,
         /// Exact Guard component executable paths (guard-es itself, the
-        /// Guard.app GUI binary, guard-notify) admitted as shielded on
-        /// AUTH_EXEC. guardctl is deliberately excluded so CLI/debug
-        /// workflows are not harmed by always-on shielding.
+        /// Sensitive File Guard.app GUI binary, guard-notify) admitted as
+        /// shielded on AUTH_EXEC. guardctl is deliberately excluded so
+        /// CLI/debug workflows are not harmed by always-on shielding.
         guard_component_paths: Vec<PathBuf>,
     },
 }

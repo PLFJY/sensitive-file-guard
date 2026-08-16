@@ -8,7 +8,7 @@ fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH= cd -- "$script_dir/../.." && pwd)
-app=${GUARD_APP:-"$repo_dir/build/macos-release/Guard.app"}
+app=${GUARD_APP:-"$repo_dir/build/macos-release/Sensitive File Guard.app"}
 remove_data=0
 remove_app=0
 dry_run=0
@@ -22,7 +22,7 @@ for argument in "$@"; do
         --preserve-data) remove_data=0 ;;
         *.app) app=$argument ;;
         *)
-            echo "usage: $0 [Guard.app] [--preserve-data|--remove-product-data] [--remove-app] [--dry-run] --confirm" >&2
+            echo "usage: $0 [Sensitive File Guard.app] [--preserve-data|--remove-product-data] [--remove-app] [--dry-run] --confirm" >&2
             exit 2
             ;;
     esac

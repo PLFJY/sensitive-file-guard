@@ -7,7 +7,7 @@ if [ "$(uname -s)" != "Darwin" ]; then
 fi
 
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
-app=${1:-${GUARD_APP:-"$repo_dir/build/macos/Guard.app"}}
+app=${1:-${GUARD_APP:-"$repo_dir/build/macos/Sensitive File Guard.app"}}
 guardctl="$app/Contents/MacOS/guardctl"
 test -x "$guardctl" || {
     echo "BLOCKED: signed guardctl is unavailable: $guardctl" >&2

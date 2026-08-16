@@ -34,7 +34,7 @@ build() {
 }
 
 build 0.1.0 1
-app="$release_root/Guard.app"
+app="$release_root/Sensitive File Guard.app"
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
     "$app/Contents/Info.plist")" = 0.1.0
 HOME="$home" "$app/Contents/MacOS/Guard" --packaging-smoke

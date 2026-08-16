@@ -51,8 +51,8 @@ activated=0
 watchdog_pid=
 installed_by_script=0
 app_root=${MACOS_ES_POC_ROOT:-"$repo_dir/build/macos-es-poc"}
-app="$app_root/Guard.app"
-installed_app=${MACOS_ES_POC_INSTALLED_APP:-"/Applications/Guard ES PoC.app"}
+app="$app_root/Sensitive File Guard.app"
+installed_app=${MACOS_ES_POC_INSTALLED_APP:-"/Applications/Sensitive File Guard PoC.app"}
 poc_app_bundle_id=${APP_BUNDLE_ID:-top.plfjy.SensitiveFileGuard.poc}
 extension_bundle_id=${SYSTEM_EXTENSION_BUNDLE_ID:-"$poc_app_bundle_id.guard-es"}
 watchdog_log="$fixture_dir/watchdog.log"
@@ -142,7 +142,7 @@ else
 GUARD_ES_POC_FILE="$fixture" \
 GUARD_ES_POC_ALLOW_EXE="$probe" \
 scripts/macos/build-dev-app.sh
-    app="$repo_dir/build/macos/Guard.app"
+    app="$repo_dir/build/macos/Sensitive File Guard.app"
     scripts/macos/inspect-signing.sh "$app"
     if [ "$build_only" = 1 ]; then
         echo "PASS: Endpoint Security PoC bundle built and inspected without activation"

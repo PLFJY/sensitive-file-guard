@@ -9,7 +9,7 @@ fi
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH= cd -- "$script_dir/../.." && pwd)
 build_root=${MACOS_BUILD_ROOT:-"$repo_dir/build/macos"}
-app_bundle="$build_root/Guard.app"
+app_bundle="$build_root/Sensitive File Guard.app"
 app_bundle_id=${APP_BUNDLE_ID:-top.plfjy.SensitiveFileGuard}
 extension_bundle_id=${SYSTEM_EXTENSION_BUNDLE_ID:-"$app_bundle_id.guard-es"}
 guard_xpc_service_name=${GUARD_XPC_SERVICE_NAME:-"$extension_bundle_id.control"}

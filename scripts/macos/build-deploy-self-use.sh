@@ -10,8 +10,8 @@ fi
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH= cd -- "$script_dir/../.." && pwd)
 build_root=${MACOS_RELEASE_ROOT:-"$repo_dir/build/macos-release"}
-app="$build_root/Guard.app"
-destination=${MACOS_INSTALL_DESTINATION:-/Applications/Guard.app}
+app="$build_root/Sensitive File Guard.app"
+destination=${MACOS_INSTALL_DESTINATION:-/Applications/Sensitive File Guard.app}
 identity=${SELF_USE_SIGNING_IDENTITY:-Guard Local Development Certificate}
 keychain=${SELF_USE_SIGNING_KEYCHAIN:-"$HOME/Library/Keychains/GuardSelfUse.keychain-db"}
 build_number=${GUARD_BUILD_NUMBER:-$(date +%s)}
@@ -21,15 +21,15 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
 用法：scripts/macos/build-deploy-self-use.sh
 
 检查 SIP 已关闭后，创建/复用本地 Guard 自用签名身份，构建并验证
-SELF_USE_SIP_OFF 包，将旧的 /Applications/Guard.app 可恢复地移入废纸篓，
+SELF_USE_SIP_OFF 包，将旧的 /Applications/Sensitive File Guard.app 可恢复地移入废纸篓，
 再安装新包。脚本不会自动激活系统扩展、修改 TCC 或读取受保护文件。
 EOF
     exit 0
 fi
 
 case "$destination" in
-    /Applications/Guard.app) ;;
-    *) echo "为避免误覆盖，MACOS_INSTALL_DESTINATION 必须是 /Applications/Guard.app" >&2; exit 2 ;;
+    "/Applications/Sensitive File Guard.app") ;;
+    *) echo "为避免误覆盖，MACOS_INSTALL_DESTINATION 必须是 /Applications/Sensitive File Guard.app" >&2; exit 2 ;;
 esac
 case "${APP_BUNDLE_ID:-top.plfjy.SensitiveFileGuard}" in
     top.plfjy.*) ;;
@@ -66,7 +66,7 @@ echo "==> 再次验证最终签名包"
 VERIFY_SIGNING_MODE=self-use "$script_dir/verify-bundle.sh" "$app"
 
 # Remove a previously registered helper before replacing the app. This is
-# important when an older Guard.app was moved to Trash: launchd otherwise may
+# important when an older Sensitive File Guard.app was moved to Trash: launchd otherwise may
 # continue running that old guard-notify binary and its historical Script
 # Editor notification bridge.
 notify_label="${APP_BUNDLE_ID:-top.plfjy.SensitiveFileGuard}.guard-notify"
@@ -74,7 +74,7 @@ echo "==> 停止旧版 guard-notify：$notify_label"
 launchctl bootout "gui/$(id -u)/$notify_label" >/dev/null 2>&1 || true
 
 if [ -e "$destination" ]; then
-    backup="$HOME/.Trash/Guard.app.backup.$(date +%Y%m%d-%H%M%S)"
+    backup="$HOME/.Trash/Sensitive File Guard.app.backup.$(date +%Y%m%d-%H%M%S)"
     mkdir -p "$HOME/.Trash"
     echo "==> 将旧包可恢复地移到：$backup"
     sudo mv "$destination" "$backup"

@@ -193,8 +193,8 @@ pub fn guard_self_runtime_posture() -> Vec<RuntimePostureReport> {
         candidates.push(current_exe);
     }
     for path in [
-        "/Applications/Guard.app/Contents/MacOS/Guard",
-        "/Applications/Guard.app/Contents/MacOS/guard-notify",
+        "/Applications/Sensitive File Guard.app/Contents/MacOS/Guard",
+        "/Applications/Sensitive File Guard.app/Contents/MacOS/guard-notify",
     ] {
         candidates.push(PathBuf::from(path));
     }

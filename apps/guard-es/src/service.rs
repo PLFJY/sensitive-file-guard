@@ -364,8 +364,8 @@ pub fn run() -> ExitCode {
         guard_component_paths.push(current_exe);
     }
     for path in [
-        "/Applications/Guard.app/Contents/MacOS/Guard",
-        "/Applications/Guard.app/Contents/MacOS/guard-notify",
+        "/Applications/Sensitive File Guard.app/Contents/MacOS/Guard",
+        "/Applications/Sensitive File Guard.app/Contents/MacOS/guard-notify",
     ] {
         guard_component_paths.push(std::path::PathBuf::from(path));
     }

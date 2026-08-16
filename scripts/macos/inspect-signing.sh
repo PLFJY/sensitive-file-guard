@@ -8,7 +8,7 @@ fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH= cd -- "$script_dir/../.." && pwd)
-app_bundle=${1:-"$repo_dir/build/macos/Guard.app"}
+app_bundle=${1:-"$repo_dir/build/macos/Sensitive File Guard.app"}
 
 if [ ! -d "$app_bundle/Contents/Library/SystemExtensions" ]; then
     echo "not a Guard development app bundle: $app_bundle" >&2
