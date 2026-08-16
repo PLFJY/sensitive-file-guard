@@ -19,7 +19,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::identity::{AncestorSummary, ProcessIdentity, ProcessStableId};
+use crate::identity::{AncestorSummary, ProcessIdentity, ProcessIntegrity, ProcessStableId};
 use crate::lease::{LeaseId, LeaseSet, MigrationLeaseState};
 use crate::resource::{BrowserId, ProfileId, ProtectedResource, ProtectedResourceKind};
 
@@ -40,6 +40,11 @@ pub enum Decision {
     AllowByLease(LeaseId),
     RequireMigrationConfirmation(MigrationCandidate),
     RequireSshKeyConfirmation,
+    /// Audit-only: a notify-only signal (task-capability obtained, trace,
+    /// remote thread, code-signing invalidation) was observed against a
+    /// shielded target. Never returned by `evaluate`; DETECTED + CONTAINED,
+    /// never PREVENTED.
+    Detected,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +59,9 @@ pub enum DenyReason {
     WrongUid,
     IdentityMismatch,
     OneShotLeaseUsed,
+    /// The exact live process instance has been marked Compromised by Process
+    /// Shield and must not receive further protected-resource authority.
+    ProcessIntegrityCompromised,
 }
 
 impl DenyReason {
@@ -83,6 +91,9 @@ impl DenyReason {
             Self::IdentityMismatch => "identity_mismatch",
             // The one-shot SshLoadLease was already consumed.
             Self::OneShotLeaseUsed => "one_shot_lease_used",
+            // The exact live process instance was confirmed compromised by
+            // Process Shield; it must not receive further secret authority.
+            Self::ProcessIntegrityCompromised => "process_integrity_compromised",
         }
     }
 }
@@ -107,7 +118,16 @@ pub struct AccessEvent {
 /// Evaluate the deterministic allow/deny decision.
 ///
 /// `now` is in the same clock/units as `expires_at` on the leases.
+///
+/// Process Shield gate: a `Compromised` exact live process instance fails
+/// closed before any browser/SSH policy is evaluated, so a compromised browser
+/// cannot keep receiving Allow merely because its path/signature/BrowserId
+/// still match. This function is only consulted for protected resources, so
+/// the gate never affects unrelated processes.
 pub fn evaluate(event: &AccessEvent, leases: &LeaseSet, now: u64) -> Decision {
+    if event.process.integrity != ProcessIntegrity::Normal {
+        return Decision::Deny(DenyReason::ProcessIntegrityCompromised);
+    }
     match event.resource.kind {
         ProtectedResourceKind::SshPrivateKey => decide_ssh(event, leases, now),
         _ => decide_browser(event, leases, now),
@@ -327,7 +347,19 @@ mod tests {
             trust_tier: tier,
             cmdline: vec![],
             ancestors: vec![],
+            integrity: ProcessIntegrity::Normal,
         }
+    }
+
+    fn compromised_proc(
+        browser: Option<&str>,
+        tier: TrustTier,
+        uid: u32,
+        s: ProcessStableId,
+    ) -> ProcessIdentity {
+        let mut process = browser_proc(browser, tier, uid, s);
+        process.integrity = ProcessIntegrity::Compromised;
+        process
     }
 
     fn event(res: ProtectedResource, proc: ProcessIdentity) -> AccessEvent {
@@ -866,6 +898,7 @@ mod tests {
             trust_tier: tier,
             cmdline: vec![],
             ancestors,
+            integrity: ProcessIntegrity::Normal,
         }
     }
 
@@ -1075,6 +1108,10 @@ mod tests {
             DenyReason::OneShotLeaseUsed.reason_code(),
             "one_shot_lease_used"
         );
+        assert_eq!(
+            DenyReason::ProcessIntegrityCompromised.reason_code(),
+            "process_integrity_compromised"
+        );
     }
 
     #[test]
@@ -1091,12 +1128,243 @@ mod tests {
             DenyReason::WrongUid,
             DenyReason::IdentityMismatch,
             DenyReason::OneShotLeaseUsed,
+            DenyReason::ProcessIntegrityCompromised,
         ]
         .iter()
         .map(|r| r.reason_code())
         .collect();
         let unique: std::collections::HashSet<&str> = codes.iter().copied().collect();
         assert_eq!(codes.len(), unique.len(), "duplicate reason codes detected");
+    }
+
+    // --- MPS0: Process Shield integrity gate ---
+
+    #[test]
+    fn compromised_browser_own_profile_is_denied() {
+        // A Compromised exact live instance must not receive Allow even though
+        // path, signature and BrowserId still match its own profile.
+        let res = browser_resource(
+            ProtectedResourceKind::CookieStore,
+            "chrome",
+            "Default",
+            1000,
+        );
+        let proc = compromised_proc(
+            Some("chrome"),
+            TrustTier::SystemPackage,
+            1000,
+            stable(1, 100, "/usr/bin/chrome"),
+        );
+        assert_eq!(
+            evaluate(&event(res, proc), &LeaseSet::default(), NOW),
+            Decision::Deny(DenyReason::ProcessIntegrityCompromised)
+        );
+    }
+
+    #[test]
+    fn compromised_process_denied_before_any_browser_or_ssh_policy() {
+        // Table-driven: every existing decision category must fail closed to
+        // process_integrity_compromised before the browser/SSH policy branch
+        // can grant anything.
+        let cases = [
+            // (resource kind, browser role, trust tier, operation)
+            (
+                ProtectedResourceKind::CookieStore,
+                Some("chrome"),
+                TrustTier::SystemPackage,
+            ),
+            (
+                ProtectedResourceKind::SessionStore,
+                None,
+                TrustTier::Unknown,
+            ),
+            (
+                ProtectedResourceKind::SshPrivateKey,
+                None,
+                TrustTier::Unknown,
+            ),
+        ];
+        for (kind, browser, tier) in cases {
+            let res = if kind == ProtectedResourceKind::SshPrivateKey {
+                ssh_resource(1000)
+            } else {
+                browser_resource(kind, "chrome", "Default", 1000)
+            };
+            let proc = compromised_proc(browser, tier, 1000, stable(9, 900, "/usr/bin/proc"));
+            assert_eq!(
+                evaluate(&event(res, proc), &LeaseSet::default(), NOW),
+                Decision::Deny(DenyReason::ProcessIntegrityCompromised),
+                "{kind:?} must fail closed for a compromised instance"
+            );
+        }
+    }
+
+    #[test]
+    fn compromised_process_denied_even_with_valid_leases() {
+        // Valid migration and SSH-read leases must not re-grant authority to a
+        // confirmed compromised instance.
+        let cookie_res = browser_resource(
+            ProtectedResourceKind::CookieStore,
+            "chrome",
+            "Default",
+            1000,
+        );
+        let compromised_firefox = compromised_proc(
+            Some("firefox"),
+            TrustTier::SystemPackage,
+            1000,
+            stable(2, 200, "/usr/bin/firefox"),
+        );
+        let migration_lease = migration(
+            30,
+            "chrome",
+            "Default",
+            "firefox",
+            1000,
+            exe_ident("/usr/bin/firefox"),
+            FUTURE,
+        );
+        let ls_with_migration = LeaseSet {
+            migration: vec![migration_lease],
+            ssh: vec![],
+            ssh_read: vec![],
+        };
+        assert_eq!(
+            evaluate(
+                &event(cookie_res, compromised_firefox),
+                &ls_with_migration,
+                NOW
+            ),
+            Decision::Deny(DenyReason::ProcessIntegrityCompromised),
+            "a migration lease must not rescue a compromised instance"
+        );
+
+        let ssh_res = ssh_resource(1000);
+        let compromised_ssh = compromised_proc(
+            None,
+            TrustTier::EnrolledUserWritable,
+            1000,
+            stable(6, 600, "/usr/bin/ssh-add"),
+        );
+        let ssh_lease = ssh_lease(40, &ssh_res, 1000, ident(600, "/usr/bin/ssh-add"), FUTURE);
+        let ls_with_ssh = LeaseSet {
+            migration: vec![],
+            ssh: vec![ssh_lease],
+            ssh_read: vec![],
+        };
+        assert_eq!(
+            evaluate(&event(ssh_res, compromised_ssh), &ls_with_ssh, NOW),
+            Decision::Deny(DenyReason::ProcessIntegrityCompromised),
+            "an SSH lease must not rescue a compromised instance"
+        );
+    }
+
+    #[test]
+    fn pid_reuse_new_normal_instance_is_not_contaminated() {
+        // Same PID, different start time = a new stable instance. The old
+        // instance is Compromised; the new one must be evaluated normally.
+        let res = browser_resource(
+            ProtectedResourceKind::CookieStore,
+            "chrome",
+            "Default",
+            1000,
+        );
+        let old_instance = compromised_proc(
+            Some("chrome"),
+            TrustTier::SystemPackage,
+            1000,
+            stable(1, 100, "/usr/bin/chrome"),
+        );
+        let new_instance = browser_proc(
+            Some("chrome"),
+            TrustTier::SystemPackage,
+            1000,
+            stable(1, 9999, "/usr/bin/chrome"),
+        );
+        assert_eq!(
+            evaluate(&event(res.clone(), old_instance), &LeaseSet::default(), NOW),
+            Decision::Deny(DenyReason::ProcessIntegrityCompromised)
+        );
+        assert_eq!(
+            evaluate(&event(res, new_instance), &LeaseSet::default(), NOW),
+            Decision::Allow,
+            "PID reuse must not inherit compromise from the previous instance"
+        );
+    }
+
+    #[test]
+    fn normal_processes_keep_existing_decisions() {
+        // Regression table: adding the integrity gate must not change any
+        // existing decision for Normal processes.
+        let cookie = browser_resource(
+            ProtectedResourceKind::CookieStore,
+            "chrome",
+            "Default",
+            1000,
+        );
+        let ssh = ssh_resource(1000);
+        let trusted = browser_proc(
+            Some("chrome"),
+            TrustTier::SystemPackage,
+            1000,
+            stable(1, 100, "/usr/bin/chrome"),
+        );
+        let importer = browser_proc(
+            Some("firefox"),
+            TrustTier::SystemPackage,
+            1000,
+            stable(2, 200, "/usr/bin/firefox"),
+        );
+        let unknown = browser_proc(
+            None,
+            TrustTier::Unknown,
+            1000,
+            stable(3, 300, "/usr/bin/python3"),
+        );
+        let cat = browser_proc(
+            None,
+            TrustTier::Unknown,
+            1000,
+            stable(5, 500, "/usr/bin/cat"),
+        );
+        assert_eq!(
+            evaluate(&event(cookie.clone(), trusted), &LeaseSet::default(), NOW),
+            Decision::Allow
+        );
+        assert_eq!(
+            evaluate(&event(cookie, importer), &LeaseSet::default(), NOW),
+            Decision::RequireMigrationConfirmation(MigrationCandidate {
+                source_browser: BrowserId("chrome".into()),
+                source_profile: ProfileId("Default".into()),
+                target_browser: BrowserId("firefox".into()),
+            })
+        );
+        assert_eq!(
+            evaluate(&event(ssh.clone(), cat), &LeaseSet::default(), NOW),
+            Decision::RequireSshKeyConfirmation
+        );
+        // A browser field with an Unknown trust tier is still NotTrustedIdentity
+        // for Normal processes.
+        let fake = browser_proc(
+            Some("chrome"),
+            TrustTier::Unknown,
+            1000,
+            stable(4, 400, "/home/u/fakechrome"),
+        );
+        assert_eq!(
+            evaluate(&event(ssh, unknown.clone()), &LeaseSet::default(), NOW),
+            Decision::RequireSshKeyConfirmation
+        );
+        let cookie2 = browser_resource(
+            ProtectedResourceKind::CookieStore,
+            "chrome",
+            "Default",
+            1000,
+        );
+        assert_eq!(
+            evaluate(&event(cookie2, fake), &LeaseSet::default(), NOW),
+            Decision::Deny(DenyReason::NotTrustedIdentity)
+        );
     }
 
     #[test]
@@ -1129,5 +1397,6 @@ mod tests {
             ProtectedResourceKind::SshPrivateKey.kind_code(),
             "ssh_private_key"
         );
+        assert_eq!(ProtectedResourceKind::Other.kind_code(), "other");
     }
 }

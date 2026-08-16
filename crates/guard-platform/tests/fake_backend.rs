@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use guard_core::identity::{ProcessIdentity, ProcessStableId, TrustTier};
+use guard_core::identity::{ProcessIdentity, ProcessIntegrity, ProcessStableId, TrustTier};
 use guard_core::resource::{
     BrowserId, ProfileId, ProtectedResource, ProtectedResourceId, ProtectedResourceKind,
 };
@@ -76,6 +76,7 @@ fn process(browser: Option<&str>, uid: u32) -> ProcessIdentity {
         trust_tier: TrustTier::SystemPackage,
         cmdline: Vec::new(),
         ancestors: Vec::new(),
+        integrity: ProcessIntegrity::Normal,
     }
 }
 

@@ -20,6 +20,10 @@ use crate::pending::{
 pub use crate::pending::{
     MacPendingPermission, ReadOnlyMacPendingPermission, ES_FFLAG_READ, ES_FFLAG_WRITE,
 };
+use crate::process_shield::{
+    ExecLaunchFacts, MacProcessShield, ShieldReasonKind, StrongSignalOutcome, TaskAccessKind,
+    TaskNotifyKind,
+};
 use crate::resource_index::FileIdentity;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -217,6 +221,57 @@ impl MacProtectedResources {
     }
 }
 
+/// Metadata-only audit handoff for Process Shield events that happen inside
+/// the Endpoint Security callback (AUTH_EXEC admission). Never carries secret
+/// contents: only process/exe metadata, decision facts and diagnostics.
+#[derive(Debug, Clone)]
+pub enum ShieldAuditEvent {
+    /// A shield-eligible exec was admitted and the exact target was registered
+    /// as shielded before the ALLOW response.
+    ExecAdmitted {
+        target: MacProcessFacts,
+        reason: ShieldReasonKind,
+    },
+    /// A shield-eligible exec was denied because it carried prohibited
+    /// code-loading / search-path DYLD launch state.
+    ExecDeniedLaunchInjection {
+        target: MacProcessFacts,
+        present_vars: Vec<&'static str>,
+    },
+    /// A shield-eligible exec was denied because critical target identity
+    /// facts were missing/truncated (fail closed for that exec). The
+    /// requester's UID is retained so the audit row is attributable even
+    /// though the target itself could not be normalized.
+    ExecDeniedMalformed {
+        requester_uid: u32,
+        diagnostic: String,
+    },
+    /// A task capability request against a shielded target was denied
+    /// (prevention). The denied attempt does NOT compromise the target.
+    TaskDenied {
+        kind: TaskAccessKind,
+        requester: MacProcessFacts,
+        target: MacProcessFacts,
+    },
+    /// A notify-only task/trace/thread/CS signal involving a shielded target
+    /// (DETECTED + CONTAINED, never PREVENTED). Strong signals feed MPS4's
+    /// compromise transition; TRACE remains telemetry.
+    TaskNotify {
+        kind: TaskNotifyKind,
+        requester: MacProcessFacts,
+        target: MacProcessFacts,
+    },
+    /// A strong notify-only signal transitioned the exact shielded target to
+    /// Compromised (idempotent; emitted only for the new transition). Callers
+    /// (guard-es) run capability-revocation hooks, audit, notify and optional
+    /// containment AFTER this event, in that order.
+    Compromised {
+        target: MacProcessFacts,
+        signal: TaskNotifyKind,
+        requester: MacProcessFacts,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub struct EndpointSecurityConfig {
     scope: ProtectionScope,
@@ -224,15 +279,35 @@ pub struct EndpointSecurityConfig {
 
 #[derive(Debug, Clone)]
 enum ProtectionScope {
-    Synthetic(HashSet<PathBuf>),
+    Synthetic {
+        protected_exact_paths: HashSet<PathBuf>,
+        /// Executables whose AUTH_EXEC targets are admitted as shielded in
+        /// synthetic test mode (never real browsers).
+        shield_executables: HashSet<PathBuf>,
+    },
     Browser {
         resources: Arc<MacProtectedResources>,
         trust: Arc<RwLock<MacBrowserTrustStore>>,
+        /// Exact Guard component executable paths (guard-es itself, the
+        /// Guard.app GUI binary, guard-notify) admitted as shielded on
+        /// AUTH_EXEC. guardctl is deliberately excluded so CLI/debug
+        /// workflows are not harmed by always-on shielding.
+        guard_component_paths: Vec<PathBuf>,
     },
 }
 
 impl EndpointSecurityConfig {
     pub fn synthetic_exact_paths(paths: impl IntoIterator<Item = PathBuf>) -> anyhow::Result<Self> {
+        Self::synthetic_with_shield(paths, std::iter::empty())
+    }
+
+    /// Synthetic test scope with an explicit set of shield-eligible
+    /// executables whose AUTH_EXEC targets are admitted into Process Shield.
+    /// Never points at real browser executables.
+    pub fn synthetic_with_shield(
+        paths: impl IntoIterator<Item = PathBuf>,
+        shield_executables: impl IntoIterator<Item = PathBuf>,
+    ) -> anyhow::Result<Self> {
         let mut protected_exact_paths = HashSet::new();
         for path in paths {
             anyhow::ensure!(path.is_absolute(), "protected test path must be absolute");
@@ -247,8 +322,24 @@ impl EndpointSecurityConfig {
             !protected_exact_paths.is_empty(),
             "at least one synthetic protected path is required"
         );
+        let mut shield = HashSet::new();
+        for path in shield_executables {
+            anyhow::ensure!(
+                path.is_absolute(),
+                "shield test executable must be absolute"
+            );
+            shield.insert(std::fs::canonicalize(&path).map_err(|error| {
+                anyhow::anyhow!(
+                    "cannot canonicalize shield test executable {}: {error}",
+                    path.display()
+                )
+            })?);
+        }
         Ok(Self {
-            scope: ProtectionScope::Synthetic(protected_exact_paths),
+            scope: ProtectionScope::Synthetic {
+                protected_exact_paths,
+                shield_executables: shield,
+            },
         })
     }
 
@@ -257,14 +348,108 @@ impl EndpointSecurityConfig {
         trust: Arc<RwLock<MacBrowserTrustStore>>,
     ) -> Self {
         Self {
-            scope: ProtectionScope::Browser { resources, trust },
+            scope: ProtectionScope::Browser {
+                resources,
+                trust,
+                guard_component_paths: Vec::new(),
+            },
+        }
+    }
+
+    /// Browser scope plus Guard's own security-critical component executable
+    /// paths (guard-es, Guard GUI, guard-notify). guardctl is intentionally
+    /// absent so CLI/debug workflows are not harmed.
+    pub fn browser_with_guard_components(
+        resources: Arc<MacProtectedResources>,
+        trust: Arc<RwLock<MacBrowserTrustStore>>,
+        guard_component_paths: impl IntoIterator<Item = PathBuf>,
+    ) -> Self {
+        let guard_component_paths = guard_component_paths.into_iter().collect();
+        Self {
+            scope: ProtectionScope::Browser {
+                resources,
+                trust,
+                guard_component_paths,
+            },
         }
     }
 
     fn has_protected_scope(&self) -> bool {
         match &self.scope {
-            ProtectionScope::Synthetic(paths) => !paths.is_empty(),
+            ProtectionScope::Synthetic {
+                protected_exact_paths,
+                ..
+            } => !protected_exact_paths.is_empty(),
             ProtectionScope::Browser { resources, .. } => resources.has_protected_scope(),
+        }
+    }
+
+    /// Does an AUTH_EXEC target executable look shield-eligible? Uses only
+    /// cheap path facts (possibly truncated), never process-name authority.
+    fn shield_eligible_raw(&self, raw: &RawProcessFacts) -> bool {
+        let Some(path) = raw.candidate_executable_path() else {
+            return false;
+        };
+        match &self.scope {
+            ProtectionScope::Synthetic {
+                shield_executables, ..
+            } => shield_executables
+                .iter()
+                .any(|enrolled| path.starts_with(enrolled)),
+            ProtectionScope::Browser {
+                trust,
+                guard_component_paths,
+                ..
+            } => {
+                let enrolled = trust
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .enrolled_executable_paths();
+                enrolled.iter().any(|enrolled| path.starts_with(enrolled))
+                    || guard_component_paths
+                        .iter()
+                        .any(|component| path.starts_with(component))
+            }
+        }
+    }
+
+    /// Resolve the shield reason for a fully normalized AUTH_EXEC target, or
+    /// None when the exec is unrelated and must stay fast/allowed.
+    pub fn shield_eligible(
+        &self,
+        target: &MacProcessFacts,
+        synthetic_owner_uid: u32,
+    ) -> Option<ShieldReasonKind> {
+        match &self.scope {
+            ProtectionScope::Synthetic {
+                shield_executables, ..
+            } => {
+                if shield_executables.contains(&target.executable.path) {
+                    return Some(ShieldReasonKind::Browser);
+                }
+                None
+            }
+            ProtectionScope::Browser {
+                trust,
+                guard_component_paths,
+                ..
+            } => {
+                // Guard components first: exact executable path match.
+                if guard_component_paths
+                    .iter()
+                    .any(|component| component == &target.executable.path)
+                {
+                    return Some(ShieldReasonKind::GuardComponent);
+                }
+                let trusted = trust
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .classify(target, synthetic_owner_uid);
+                if trusted.browser.is_some() && trusted.tier.is_trusted() {
+                    return Some(ShieldReasonKind::Browser);
+                }
+                None
+            }
         }
     }
 
@@ -274,27 +459,34 @@ impl EndpointSecurityConfig {
         synthetic_owner_uid: u32,
     ) -> Option<ProtectedResource> {
         match &self.scope {
-            ProtectionScope::Synthetic(paths) if paths.contains(&facts.target) => {
-                Some(ProtectedResource {
-                    id: ProtectedResourceId(facts.target.to_string_lossy().into_owned()),
-                    kind: ProtectedResourceKind::CookieStore,
-                    owner_uid: synthetic_owner_uid,
-                    browser: Some(BrowserId("synthetic".into())),
-                    profile: Some(ProfileId("fixture".into())),
-                    path: facts.target.clone(),
-                })
-            }
-            ProtectionScope::Synthetic(_) => None,
+            ProtectionScope::Synthetic {
+                protected_exact_paths,
+                ..
+            } if protected_exact_paths.contains(&facts.target) => Some(ProtectedResource {
+                id: ProtectedResourceId(facts.target.to_string_lossy().into_owned()),
+                kind: ProtectedResourceKind::CookieStore,
+                owner_uid: synthetic_owner_uid,
+                browser: Some(BrowserId("synthetic".into())),
+                profile: Some(ProfileId("fixture".into())),
+                path: facts.target.clone(),
+            }),
+            ProtectionScope::Synthetic { .. } => None,
             ProtectionScope::Browser { resources, .. } => resources.classify(facts),
         }
     }
 
     fn authorize_namespace(&self, facts: &NamespaceFacts) -> bool {
         match &self.scope {
-            ProtectionScope::Synthetic(paths) => {
-                !paths.contains(&facts.source) && !paths.contains(&facts.destination)
+            ProtectionScope::Synthetic {
+                protected_exact_paths,
+                ..
+            } => {
+                !protected_exact_paths.contains(&facts.source)
+                    && !protected_exact_paths.contains(&facts.destination)
             }
-            ProtectionScope::Browser { resources, trust } => {
+            ProtectionScope::Browser {
+                resources, trust, ..
+            } => {
                 if !resources.enabled() {
                     return true;
                 }
@@ -360,8 +552,12 @@ impl EndpointSecurityConfig {
     /// damaged process graph from blocking unrelated filesystem activity.
     fn namespace_requires_authorization(&self, facts: &NamespaceTargetFacts) -> bool {
         match &self.scope {
-            ProtectionScope::Synthetic(paths) => {
-                paths.contains(&facts.source) || paths.contains(&facts.destination)
+            ProtectionScope::Synthetic {
+                protected_exact_paths,
+                ..
+            } => {
+                protected_exact_paths.contains(&facts.source)
+                    || protected_exact_paths.contains(&facts.destination)
             }
             ProtectionScope::Browser { resources, .. } => {
                 if !resources.enabled() {
@@ -461,6 +657,9 @@ pub struct EndpointSecurityBackend {
     client: Option<NativeClient>,
     context: Box<CallbackContext>,
     receiver: mpsc::Receiver<MacAuthorizationEvent>,
+    shield_receiver: mpsc::Receiver<ShieldAuditEvent>,
+    task_read_supported: bool,
+    task_notify_supported: bool,
 }
 
 #[cfg(target_os = "macos")]
@@ -477,14 +676,18 @@ impl EndpointSecurityBackend {
             ClientCreateError::Internal
         })?;
         let (sender, receiver) = mpsc::sync_channel(MAX_PENDING_AUTHORIZATIONS);
+        let (shield_sender, shield_receiver) = mpsc::sync_channel(MAX_PENDING_AUTHORIZATIONS);
         let registry = Arc::new(Mutex::new(Vec::new()));
         let process_graph = Arc::new(Mutex::new(MacProcessGraph::default()));
+        let shield = Arc::new(Mutex::new(MacProcessShield::new()));
         let mut context = Box::new(CallbackContext {
             config,
             sender,
             scheduler: scheduler_handle,
             registry,
             process_graph,
+            shield,
+            shield_sender,
             health,
             sequences: Mutex::new(SequenceTracker::default()),
         });
@@ -495,14 +698,30 @@ impl EndpointSecurityBackend {
                 .degrade("Endpoint Security required subscription failed");
             return Err(ClientCreateError::Internal);
         }
-        context
-            .health
-            .note("Endpoint Security AUTH_OPEN/AUTH_LINK/AUTH_RENAME and bounded process graph subscriptions are active");
+        let task_read_supported = client.subscribe_task_read();
+        if !task_read_supported {
+            context.health.degrade(
+                "AUTH_GET_TASK_READ is unavailable on this host; task-read prevention is not enforced (Reduced)",
+            );
+        }
+        let task_notify_supported = client.subscribe_task_notify();
+        if !task_notify_supported {
+            context.health.degrade(
+                "Process Shield notify subscriptions are unavailable; compromise detection is degraded (Reduced)",
+            );
+        }
+        context.health.note(format!(
+            "Endpoint Security AUTH_OPEN/AUTH_EXEC/AUTH_GET_TASK{} and bounded process graph subscriptions are active; task-notify={task_notify_supported}",
+            if task_read_supported { "/AUTH_GET_TASK_READ" } else { "" }
+        ));
         Ok(Self {
             scheduler,
             client: Some(client),
             context,
             receiver,
+            shield_receiver,
+            task_read_supported,
+            task_notify_supported,
         })
     }
 
@@ -513,11 +732,36 @@ impl EndpointSecurityBackend {
         self.receiver.recv_timeout(timeout)
     }
 
+    /// Drain metadata-only Process Shield audit handoffs without blocking the
+    /// AUTH_OPEN channel.
+    pub fn recv_shield_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<ShieldAuditEvent, mpsc::RecvTimeoutError> {
+        self.shield_receiver.recv_timeout(timeout)
+    }
+
+    pub fn process_shield(&self) -> Arc<Mutex<MacProcessShield>> {
+        Arc::clone(&self.context.shield)
+    }
+
+    /// Whether AUTH_GET_TASK_READ is actually enforced on this host (SDK/OS
+    /// feature detection; never faked).
+    pub fn task_read_supported(&self) -> bool {
+        self.task_read_supported
+    }
+
+    /// Whether the Process Shield notify subscriptions (GET_TASK(_READ)/
+    /// TRACE/REMOTE_THREAD_CREATE/CS_INVALIDATED) are active on this host.
+    pub fn task_notify_supported(&self) -> bool {
+        self.task_notify_supported
+    }
+
     pub fn health(&self) -> BackendHealth {
         let snapshot = self.context.health.snapshot();
         let (alias_entries, alias_capacity, index_saturated) = match &self.context.config.scope {
             ProtectionScope::Browser { resources, .. } => resources.namespace_health(),
-            ProtectionScope::Synthetic(_) => (0, 0, false),
+            ProtectionScope::Synthetic { .. } => (0, 0, false),
         };
         let process_graph_degraded = self
             .context
@@ -525,6 +769,16 @@ impl EndpointSecurityBackend {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .is_degraded();
+        let shield = self
+            .context
+            .shield
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (task_control_allowed, task_control_denied, task_read_allowed, task_read_denied) =
+            shield.task_stats();
+        let (shield_admitted, shield_compromised, launch_injection, malformed, _) = shield.stats();
+        let (task_notify_obtained, trace_observed, remote_thread_observed, cs_invalidated) =
+            shield.notify_stats();
         BackendHealth {
             backend: "endpoint-security".to_owned(),
             state: if !snapshot.active {
@@ -552,7 +806,27 @@ impl EndpointSecurityBackend {
             namespace_alias_capacity: alias_capacity,
             namespace_index_saturated: index_saturated,
             process_graph_degraded,
+            task_control_allowed,
+            task_control_denied,
+            task_read_allowed,
+            task_read_denied,
+            task_read_supported: self.task_read_supported,
+            task_notify_supported: self.task_notify_supported,
+            shield_admitted,
+            shield_compromised,
+            shield_launch_injection_denied: launch_injection,
+            shield_malformed_denied: malformed,
+            shield_task_notify_obtained: task_notify_obtained,
+            shield_trace_observed: trace_observed,
+            shield_remote_thread_observed: remote_thread_observed,
+            shield_cs_invalidated_observed: cs_invalidated,
         }
+    }
+
+    /// Whether Process Shield is reduced because task-read or notify
+    /// subscriptions are unavailable on this host.
+    pub fn process_shield_reduced(&self) -> bool {
+        !self.task_read_supported || !self.task_notify_supported
     }
 
     pub fn process_graph(&self) -> Arc<Mutex<MacProcessGraph>> {
@@ -562,7 +836,7 @@ impl EndpointSecurityBackend {
     pub fn repair_if_needed(&self) -> anyhow::Result<bool> {
         match &self.context.config.scope {
             ProtectionScope::Browser { resources, .. } => resources.repair_if_needed(),
-            ProtectionScope::Synthetic(_) => Ok(false),
+            ProtectionScope::Synthetic { .. } => Ok(false),
         }
     }
 }
@@ -588,6 +862,9 @@ pub fn diagnose_client_creation() -> Result<(), ClientCreateError> {
         diagnostic_callback,
         diagnostic_process_callback,
         diagnostic_namespace_callback,
+        diagnostic_exec_callback,
+        diagnostic_task_callback,
+        diagnostic_task_notify_callback,
         diagnostic_sequence_callback,
         (&mut marker as *mut ()).cast(),
     )?;
@@ -607,6 +884,8 @@ struct CallbackContext {
     scheduler: DeadlineSchedulerHandle,
     registry: Arc<Mutex<Vec<Weak<PendingInner>>>>,
     process_graph: Arc<Mutex<MacProcessGraph>>,
+    shield: Arc<Mutex<MacProcessShield>>,
+    shield_sender: mpsc::SyncSender<ShieldAuditEvent>,
     health: Arc<HealthTracker>,
     sequences: Mutex<SequenceTracker>,
 }
@@ -677,7 +956,11 @@ fn scope_namespace(
 #[cfg(target_os = "macos")]
 #[derive(Default)]
 struct SequenceTracker {
-    per_kind: [Option<u64>; 7],
+    // Event kinds 1..=15: AUTH_OPEN, FORK, EXEC, EXIT, LINK, RENAME, AUTH_EXEC,
+    // AUTH_GET_TASK, AUTH_GET_TASK_READ, NOTIFY_GET_TASK, NOTIFY_GET_TASK_READ,
+    // NOTIFY_TRACE, NOTIFY_REMOTE_THREAD_CREATE, NOTIFY_CS_INVALIDATED,
+    // AUTH_MMAP.
+    per_kind: [Option<u64>; 16],
     global: Option<u64>,
 }
 
@@ -896,6 +1179,305 @@ impl CallbackContext {
         }
         self.respond_namespace(client, message, allow);
     }
+    fn handle_exec(
+        &self,
+        client: *const std::ffi::c_void,
+        message: *const std::ffi::c_void,
+        raw: &RawExecEvent,
+    ) {
+        // Requester facts are audit context only. The requester is the
+        // exec'ing process; for admission we need the exact post-exec target.
+        let _requester = raw.process.to_facts().ok();
+        let target = match raw.target.to_facts() {
+            Ok(target) => target,
+            Err(error) => {
+                // Fail closed ONLY when the target appears to be enrolled by
+                // cheap path facts. Unrelated malformed execs stay allowed so
+                // Process Shield never becomes a machine-wide launch firewall.
+                if self.config.shield_eligible_raw(&raw.target) {
+                    self.shield
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .note_malformed_denied();
+                    self.health.degrade(format!(
+                        "shield-eligible AUTH_EXEC failed closed during target normalization: {error}"
+                    ));
+                    self.send_shield_event(ShieldAuditEvent::ExecDeniedMalformed {
+                        requester_uid: raw.process.uid,
+                        diagnostic: format!("{error}"),
+                    });
+                    self.respond_exec(client, message, false);
+                    return;
+                }
+                self.respond_exec(client, message, true);
+                return;
+            }
+        };
+        let Some(reason) = self.config.shield_eligible(&target, target.uid) else {
+            // Unrelated execs stay fast and allowed by Process Shield.
+            self.respond_exec(client, message, true);
+            return;
+        };
+        if let Err(error) =
+            crate::deadline::response_budget(&crate::deadline::DarwinClock, raw.deadline)
+        {
+            self.health.insufficient_deadline();
+            self.health.degrade(format!(
+                "shield-eligible AUTH_EXEC had insufficient response deadline: {error}"
+            ));
+            self.respond_exec(client, message, false);
+            return;
+        }
+        let launch = raw.launch_facts();
+        if launch.has_prohibited_code_loading() {
+            self.shield
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .note_launch_injection_denied();
+            self.health.note(
+                "shield-eligible AUTH_EXEC denied: prohibited code-loading DYLD launch state",
+            );
+            self.send_shield_event(ShieldAuditEvent::ExecDeniedLaunchInjection {
+                target: target.clone(),
+                present_vars: launch.present_vars(),
+            });
+            self.respond_exec(client, message, false);
+            return;
+        }
+        // Register the exact post-exec target as shielded BEFORE responding
+        // ALLOW so no NOTIFY_EXEC round-trip is required before the first
+        // task-access decision against the new instance.
+        match self
+            .shield
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .admit(target.clone(), reason)
+        {
+            Ok(()) => {
+                self.send_shield_event(ShieldAuditEvent::ExecAdmitted { target, reason });
+                self.respond_exec(client, message, true);
+            }
+            Err(error) => {
+                self.health.degrade(format!(
+                    "shield-eligible AUTH_EXEC failed closed during shield admission: {error}"
+                ));
+                self.respond_exec(client, message, false);
+            }
+        }
+    }
+
+    fn handle_task(
+        &self,
+        client: *const std::ffi::c_void,
+        message: *const std::ffi::c_void,
+        raw: &RawTaskEvent,
+        kind: TaskAccessKind,
+    ) {
+        // Normalize the TARGET first: for a known shielded target, malformed
+        // or truncated identity must never become an allow.
+        let target = match raw.target.to_facts() {
+            Ok(target) => target,
+            Err(error) => {
+                if self.config.shield_eligible_raw(&raw.target) {
+                    self.shield
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .note_malformed_denied();
+                    self.health.degrade(format!(
+                        "shield-eligible task target failed closed during normalization: {error}"
+                    ));
+                    self.send_shield_event(ShieldAuditEvent::ExecDeniedMalformed {
+                        requester_uid: raw.process.uid,
+                        diagnostic: format!("task target normalization failed: {error}"),
+                    });
+                    self.respond_task(client, message, false);
+                    return;
+                }
+                // Unrelated target: Process Shield is not a global task firewall.
+                self.respond_task(client, message, true);
+                return;
+            }
+        };
+        let shielded = self
+            .shield
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_shielded_exact(&target);
+        if !shielded {
+            // Fast path: unrelated processes keep their existing task behavior.
+            self.respond_task(client, message, true);
+            return;
+        }
+        if let Err(error) =
+            crate::deadline::response_budget(&crate::deadline::DarwinClock, raw.deadline)
+        {
+            self.health.insufficient_deadline();
+            self.health.degrade(format!(
+                "shielded task authorization had insufficient response deadline: {error}"
+            ));
+            self.respond_task(client, message, false);
+            return;
+        }
+        let requester = match raw.process.to_facts() {
+            Ok(requester) => requester,
+            Err(error) => {
+                // Shielded target + unverifiable requester identity => deny.
+                self.health.degrade(format!(
+                    "shielded task request failed closed because requester identity was invalid: {error}"
+                ));
+                self.send_shield_event(ShieldAuditEvent::TaskDenied {
+                    kind,
+                    requester: target.clone(),
+                    target: target.clone(),
+                });
+                self.respond_task(client, message, false);
+                return;
+            }
+        };
+        // MPS2 starts with ZERO task-access allowlist entries; MPS11 adds the
+        // documented platform-binary exceptions. Same UID, Apple signature,
+        // same Team ID or a familiar basename never allow on their own.
+        let allow = crate::process_shield::task_access_allowlist(&requester, &target, kind);
+        if !allow {
+            self.shield
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .note_task_decision(kind, false);
+            self.health
+                .note(format!("shielded task {} denied", kind.label()));
+            self.send_shield_event(ShieldAuditEvent::TaskDenied {
+                kind,
+                requester,
+                target,
+            });
+            self.respond_task(client, message, false);
+            return;
+        }
+        self.shield
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .note_task_decision(kind, true);
+        self.respond_task(client, message, true);
+    }
+
+    fn handle_task_notify(&self, event_kind: u32, raw: &RawTaskEvent) {
+        // Telemetry only: notify events never authorize anything, so malformed
+        // identities are skipped, never converted into an allow or a deny.
+        let kind = match event_kind {
+            10 => TaskNotifyKind::GetTask,
+            11 => TaskNotifyKind::GetTaskRead,
+            12 => TaskNotifyKind::Trace,
+            13 => TaskNotifyKind::RemoteThreadCreate,
+            14 => TaskNotifyKind::CsInvalidated,
+            _ => {
+                self.health
+                    .degrade("task notify callback received an unknown event kind");
+                return;
+            }
+        };
+        let Ok(requester) = raw.process.to_facts() else {
+            return;
+        };
+        let Ok(target) = raw.target.to_facts() else {
+            return;
+        };
+        // Only notify signals involving an exact shielded target are in
+        // Process Shield scope; unrelated processes are untouched.
+        let mut shield = self
+            .shield
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // MPS11: a successful task-capability acquisition is a strong signal
+        // only when the acquisition was NOT legitimate under our own task
+        // allowlist. Routinely allowed relationships (e.g. Apple platform
+        // daemons managing processes/sessions) must not compromise every
+        // browser on every launch. Per MPS11 observed evidence, GET_TASK(_READ)
+        // notifies are telemetry, never an auto-compromise; TRACE stays
+        // telemetry; remote-thread and CS-invalidation are strong signals.
+        let legitimate = crate::process_shield::task_access_allowlist(
+            &requester,
+            &target,
+            TaskAccessKind::Control,
+        );
+        let outcome = if kind.is_strong_signal() && !legitimate {
+            shield.apply_strong_signal(&target)
+        } else {
+            StrongSignalOutcome::NotShielded
+        };
+        if outcome == StrongSignalOutcome::NotShielded {
+            // Still record telemetry for shielded targets; never transition.
+            let shielded = shield.is_shielded_exact(&target);
+            if shielded {
+                shield.note_task_notify(kind);
+            }
+            drop(shield);
+            self.send_shield_event(ShieldAuditEvent::TaskNotify {
+                kind,
+                requester,
+                target,
+            });
+            return;
+        }
+        shield.note_task_notify(kind);
+        drop(shield);
+        // MPS4 ordering: the shield state transition happens FIRST (done
+        // above); capability revocation / audit / notify / containment are
+        // driven by the Compromised event in guard-es.
+        if outcome == StrongSignalOutcome::CompromisedNow {
+            self.send_shield_event(ShieldAuditEvent::Compromised {
+                target,
+                signal: kind,
+                requester,
+            });
+            return;
+        }
+        self.send_shield_event(ShieldAuditEvent::TaskNotify {
+            kind,
+            requester,
+            target,
+        });
+    }
+
+    fn respond_task(
+        &self,
+        client: *const std::ffi::c_void,
+        message: *const std::ffi::c_void,
+        allow: bool,
+    ) {
+        // SAFETY: both pointers are supplied by the live ES callback and the
+        // bridge always disables authorization caching.
+        let result =
+            ResponseCode::from_raw(unsafe { guard_es_respond_auth(client, message, allow) });
+        if result != ResponseCode::Success {
+            self.health
+                .degrade(format!("Endpoint Security task response failed: {result}"));
+        }
+    }
+
+    fn respond_exec(
+        &self,
+        client: *const std::ffi::c_void,
+        message: *const std::ffi::c_void,
+        allow: bool,
+    ) {
+        // SAFETY: both pointers are supplied by the live ES callback and the
+        // bridge always disables authorization caching.
+        let result =
+            ResponseCode::from_raw(unsafe { guard_es_respond_auth(client, message, allow) });
+        if result != ResponseCode::Success {
+            self.health.degrade(format!(
+                "Endpoint Security AUTH_EXEC response failed: {result}"
+            ));
+        }
+    }
+
+    fn send_shield_event(&self, event: ShieldAuditEvent) {
+        if self.shield_sender.try_send(event).is_err() {
+            self.health.degrade(
+                "Process Shield audit handoff queue is full; shield audit event was dropped",
+            );
+        }
+    }
 
     fn observe_sequence(&self, event_kind: u32, sequence: Option<u64>, global: Option<u64>) {
         let (per_kind_gap, global_gap) = self
@@ -943,6 +1525,7 @@ impl CallbackContext {
             }
         };
         let now = std::time::Instant::now();
+        let process_key = process.key;
         let mut graph = self
             .process_graph
             .lock()
@@ -959,7 +1542,7 @@ impl CallbackContext {
             // is a new audit key and must pass the ordinary strict observer.
             2 => graph.observe(process, now),
             3 => {
-                graph.remove_terminal(process.key);
+                graph.remove_terminal(process_key);
                 Ok(())
             }
             _ => Err(anyhow::anyhow!("unknown process event kind {event_kind}")),
@@ -967,6 +1550,15 @@ impl CallbackContext {
         if let Err(error) = result {
             self.health
                 .degrade(format!("process graph update failed: {error}"));
+        }
+        // Process Shield live state mirrors process exit exactly: exit
+        // destroys the instance's shield/compromise state, so PID reuse can
+        // never inherit it.
+        if event_kind == 3 {
+            self.shield
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove_terminal(process_key);
         }
     }
 
@@ -1075,15 +1667,22 @@ impl NativeClient {
             auth_open_callback,
             process_callback,
             namespace_callback,
+            exec_callback,
+            task_callback,
+            task_notify_callback,
             sequence_callback,
             context.cast(),
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create_with_callback(
         callback: RawCallback,
         process_callback: RawProcessCallback,
         namespace_callback: RawNamespaceCallback,
+        exec_callback: RawExecCallback,
+        task_callback: RawTaskCallback,
+        task_notify_callback: RawTaskNotifyCallback,
         sequence_callback: RawSequenceCallback,
         context: *mut std::ffi::c_void,
     ) -> Result<Self, ClientCreateError> {
@@ -1096,6 +1695,9 @@ impl NativeClient {
                 callback,
                 process_callback,
                 namespace_callback,
+                exec_callback,
+                task_callback,
+                task_notify_callback,
                 sequence_callback,
                 context,
             )
@@ -1119,9 +1721,27 @@ impl NativeClient {
         // SAFETY: raw is a live guard_es_client_t owned by self.
         anyhow::ensure!(
             unsafe { guard_es_client_subscribe_required(self.raw) } == 0,
-            "es_subscribe(AUTH_OPEN/FORK/EXEC/EXIT) failed"
+            "es_subscribe(AUTH_OPEN/AUTH_EXEC/AUTH_GET_TASK/FORK/EXEC/EXIT) failed"
         );
         Ok(())
+    }
+
+    /// AUTH_GET_TASK_READ is feature-detected at runtime: when the running
+    /// OS/SDK does not support it, this returns false and Process Shield must
+    /// report Reduced rather than pretending read-port prevention exists.
+    fn subscribe_task_read(&self) -> bool {
+        // SAFETY: raw is a live guard_es_client_t owned by self.
+        let result = unsafe { guard_es_client_subscribe_task_read(self.raw) };
+        result == 0
+    }
+
+    /// NOTIFY_GET_TASK(_READ)/TRACE/REMOTE_THREAD_CREATE/CS_INVALIDATED
+    /// subscriptions; when unavailable, compromise detection is degraded and
+    /// health must reflect that.
+    fn subscribe_task_notify(&self) -> bool {
+        // SAFETY: raw is a live guard_es_client_t owned by self.
+        let result = unsafe { guard_es_client_subscribe_task_notify(self.raw) };
+        result == 0
     }
 }
 
@@ -1205,6 +1825,44 @@ struct RawProcessFacts {
     signing_id: *const u8,
     signing_id_len: usize,
     cdhash: [u8; 20],
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+#[repr(C)]
+struct RawExecEvent {
+    deadline: u64,
+    dyld_insert_libraries: bool,
+    dyld_library_path: bool,
+    dyld_framework_path: bool,
+    dyld_fallback_library_path: bool,
+    dyld_fallback_framework_path: bool,
+    dyld_root_path: bool,
+    process: RawProcessFacts,
+    target: RawProcessFacts,
+}
+
+#[cfg(target_os = "macos")]
+impl RawExecEvent {
+    fn launch_facts(&self) -> ExecLaunchFacts {
+        ExecLaunchFacts {
+            dyld_insert_libraries: self.dyld_insert_libraries,
+            dyld_library_path: self.dyld_library_path,
+            dyld_framework_path: self.dyld_framework_path,
+            dyld_fallback_library_path: self.dyld_fallback_library_path,
+            dyld_fallback_framework_path: self.dyld_fallback_framework_path,
+            dyld_root_path: self.dyld_root_path,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+#[repr(C)]
+struct RawTaskEvent {
+    deadline: u64,
+    process: RawProcessFacts,
+    target: RawProcessFacts,
 }
 
 #[cfg(target_os = "macos")]
@@ -1323,6 +1981,12 @@ impl RawNamespaceEvent {
 
 #[cfg(target_os = "macos")]
 impl RawProcessFacts {
+    /// Best-effort executable path for scope gating before strict
+    /// normalization (never an authority by itself).
+    fn candidate_executable_path(&self) -> Option<PathBuf> {
+        token_path_candidate(self.executable_path, self.executable_path_len)
+    }
+
     fn to_facts(&self) -> anyhow::Result<MacProcessFacts> {
         anyhow::ensure!(self.pid > 0, "invalid or missing process PID");
         anyhow::ensure!(self.pidversion >= 0, "invalid process PID version");
@@ -1477,6 +2141,26 @@ type RawNamespaceCallback = unsafe extern "C" fn(
 );
 
 #[cfg(target_os = "macos")]
+type RawExecCallback = unsafe extern "C" fn(
+    *mut std::ffi::c_void,
+    *const std::ffi::c_void,
+    *const std::ffi::c_void,
+    *const RawExecEvent,
+);
+
+#[cfg(target_os = "macos")]
+type RawTaskCallback = unsafe extern "C" fn(
+    *mut std::ffi::c_void,
+    u32,
+    *const std::ffi::c_void,
+    *const std::ffi::c_void,
+    *const RawTaskEvent,
+);
+
+#[cfg(target_os = "macos")]
+type RawTaskNotifyCallback = unsafe extern "C" fn(*mut std::ffi::c_void, u32, *const RawTaskEvent);
+
+#[cfg(target_os = "macos")]
 type RawSequenceCallback = unsafe extern "C" fn(*mut std::ffi::c_void, u32, bool, u64, bool, u64);
 
 #[cfg(target_os = "macos")]
@@ -1568,6 +2252,96 @@ unsafe extern "C" fn namespace_callback(
 }
 
 #[cfg(target_os = "macos")]
+unsafe extern "C" fn exec_callback(
+    context: *mut std::ffi::c_void,
+    client: *const std::ffi::c_void,
+    message: *const std::ffi::c_void,
+    event: *const RawExecEvent,
+) {
+    // SAFETY: context and event are owned by the live native callback.
+    let context = unsafe { &*context.cast::<CallbackContext>() };
+    if event.is_null() {
+        context
+            .health
+            .degrade("exec callback omitted normalized event facts");
+        // Defensive: a bridge bug must not brick process launches; the exec
+        // proceeds unshielded and File Shield still polices protected files.
+        let _ = unsafe { guard_es_respond_auth(client, message, true) };
+        return;
+    }
+    let event = unsafe { &*event };
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        context.handle_exec(client, message, event);
+    }))
+    .is_err()
+    {
+        std::process::abort();
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn task_callback(
+    context: *mut std::ffi::c_void,
+    event_kind: u32,
+    client: *const std::ffi::c_void,
+    message: *const std::ffi::c_void,
+    event: *const RawTaskEvent,
+) {
+    // SAFETY: context and event are owned by the live native callback.
+    let context = unsafe { &*context.cast::<CallbackContext>() };
+    if event.is_null() {
+        context
+            .health
+            .degrade("task callback omitted normalized event facts");
+        let _ = unsafe { guard_es_respond_auth(client, message, true) };
+        return;
+    }
+    let event = unsafe { &*event };
+    let kind = match event_kind {
+        8 => TaskAccessKind::Control,
+        9 => TaskAccessKind::Read,
+        _ => {
+            context
+                .health
+                .degrade("task callback received an unknown task event kind");
+            let _ = unsafe { guard_es_respond_auth(client, message, true) };
+            return;
+        }
+    };
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        context.handle_task(client, message, event, kind);
+    }))
+    .is_err()
+    {
+        std::process::abort();
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn task_notify_callback(
+    context: *mut std::ffi::c_void,
+    event_kind: u32,
+    event: *const RawTaskEvent,
+) {
+    // SAFETY: context and event are owned by the live native callback.
+    let context = unsafe { &*context.cast::<CallbackContext>() };
+    if event.is_null() {
+        context
+            .health
+            .degrade("task notify callback omitted normalized event facts");
+        return;
+    }
+    let event = unsafe { &*event };
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        context.handle_task_notify(event_kind, event);
+    }))
+    .is_err()
+    {
+        std::process::abort();
+    }
+}
+
+#[cfg(target_os = "macos")]
 unsafe extern "C" fn sequence_callback(
     context: *mut std::ffi::c_void,
     event_kind: u32,
@@ -1627,6 +2401,39 @@ unsafe extern "C" fn diagnostic_namespace_callback(
 }
 
 #[cfg(target_os = "macos")]
+unsafe extern "C" fn diagnostic_exec_callback(
+    _context: *mut std::ffi::c_void,
+    client: *const std::ffi::c_void,
+    message: *const std::ffi::c_void,
+    event: *const RawExecEvent,
+) {
+    if !event.is_null() {
+        let _ = unsafe { guard_es_respond_auth(client, message, true) };
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn diagnostic_task_callback(
+    _context: *mut std::ffi::c_void,
+    _event_kind: u32,
+    client: *const std::ffi::c_void,
+    message: *const std::ffi::c_void,
+    event: *const RawTaskEvent,
+) {
+    if !event.is_null() {
+        let _ = unsafe { guard_es_respond_auth(client, message, true) };
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn diagnostic_task_notify_callback(
+    _context: *mut std::ffi::c_void,
+    _event_kind: u32,
+    _event: *const RawTaskEvent,
+) {
+}
+
+#[cfg(target_os = "macos")]
 unsafe extern "C" fn diagnostic_sequence_callback(
     _context: *mut std::ffi::c_void,
     _event_kind: u32,
@@ -1638,16 +2445,22 @@ unsafe extern "C" fn diagnostic_sequence_callback(
 }
 
 #[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
 extern "C" {
     fn guard_es_client_create(
         client: *mut *mut std::ffi::c_void,
         callback: RawCallback,
         process_callback: RawProcessCallback,
         namespace_callback: RawNamespaceCallback,
+        exec_callback: RawExecCallback,
+        task_callback: RawTaskCallback,
+        task_notify_callback: RawTaskNotifyCallback,
         sequence_callback: RawSequenceCallback,
         context: *mut std::ffi::c_void,
     ) -> i32;
     fn guard_es_client_subscribe_required(client: *mut std::ffi::c_void) -> i32;
+    fn guard_es_client_subscribe_task_read(client: *mut std::ffi::c_void) -> i32;
+    fn guard_es_client_subscribe_task_notify(client: *mut std::ffi::c_void) -> i32;
     fn guard_es_client_delete(client: *mut std::ffi::c_void) -> i32;
     fn guard_es_message_retain(message: *const std::ffi::c_void);
     fn guard_es_message_release(message: *const std::ffi::c_void);
@@ -1743,6 +2556,145 @@ mod tests {
             EndpointSecurityConfig::synthetic_exact_paths([PathBuf::from("relative")]).is_err()
         );
         assert!(EndpointSecurityConfig::synthetic_exact_paths(Vec::<PathBuf>::new()).is_err());
+    }
+
+    #[test]
+    fn raw_exec_normalizes_target_and_launch_facts() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let target_exe = temp.path().join("shield-target");
+        std::fs::write(&target_exe, b"synthetic shield target").unwrap();
+        let target_exe = std::fs::canonicalize(&target_exe).unwrap();
+        let metadata = std::fs::metadata(&target_exe).unwrap();
+        let path_bytes = target_exe.as_os_str().as_bytes();
+        let mut raw = RawExecEvent {
+            deadline: 1_000,
+            dyld_insert_libraries: true,
+            ..RawExecEvent::default()
+        };
+        raw.target = RawProcessFacts {
+            pid: 4242,
+            pidversion: 7,
+            uid: 501,
+            gid: 20,
+            start_time_us: 123_456,
+            executable_dev: metadata.dev(),
+            executable_ino: metadata.ino(),
+            executable_mode: 0o100755,
+            executable_owner_uid: 501,
+            executable_size: metadata.len(),
+            executable_path: path_bytes.as_ptr(),
+            executable_path_len: path_bytes.len(),
+            ..RawProcessFacts::default()
+        };
+        let launch = raw.launch_facts();
+        assert!(launch.has_prohibited_code_loading());
+        assert_eq!(launch.present_vars(), vec!["DYLD_INSERT_LIBRARIES"]);
+        let target = raw.target.to_facts().unwrap();
+        assert_eq!(target.key.pid, 4242);
+        assert_eq!(target.executable.path, target_exe);
+        let clean = RawExecEvent::default().launch_facts();
+        assert!(!clean.has_prohibited_code_loading());
+    }
+
+    #[test]
+    fn shield_eligible_resolves_synthetic_and_unrelated_execs() {
+        let temp = tempfile::tempdir().unwrap();
+        let protected = temp.path().join("protected");
+        std::fs::write(&protected, b"synthetic protected").unwrap();
+        let target_exe = temp.path().join("shield-target");
+        std::fs::write(&target_exe, b"synthetic shield target").unwrap();
+        let target_exe = std::fs::canonicalize(&target_exe).unwrap();
+        let other_exe = temp.path().join("unrelated");
+        std::fs::write(&other_exe, b"synthetic unrelated").unwrap();
+        let other_exe = std::fs::canonicalize(&other_exe).unwrap();
+        let config =
+            EndpointSecurityConfig::synthetic_with_shield([protected], [target_exe.clone()])
+                .unwrap();
+        let mut eligible = fixture_process("fixture.browser");
+        eligible.executable.path = target_exe;
+        let mut unrelated = fixture_process("fixture.browser");
+        unrelated.executable.path = other_exe;
+        assert_eq!(
+            config.shield_eligible(&eligible, 501),
+            Some(ShieldReasonKind::Browser)
+        );
+        assert_eq!(config.shield_eligible(&unrelated, 501), None);
+    }
+
+    #[test]
+    fn task_target_truncation_only_fails_closed_when_shield_eligible() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let protected = temp.path().join("protected");
+        std::fs::write(&protected, b"synthetic protected").unwrap();
+        let target_exe = temp.path().join("shield-target");
+        std::fs::write(&target_exe, b"synthetic shield target").unwrap();
+        let target_exe = std::fs::canonicalize(&target_exe).unwrap();
+        let unrelated = temp.path().join("python3");
+        std::fs::write(&unrelated, b"synthetic unrelated").unwrap();
+        let unrelated = std::fs::canonicalize(&unrelated).unwrap();
+        let config =
+            EndpointSecurityConfig::synthetic_with_shield([protected], [target_exe.clone()])
+                .unwrap();
+        let target_bytes = target_exe.as_os_str().as_bytes();
+        let unrelated_bytes = unrelated.as_os_str().as_bytes();
+        let truncated = |path_bytes: &[u8]| RawProcessFacts {
+            executable_path: path_bytes.as_ptr(),
+            executable_path_len: path_bytes.len(),
+            executable_path_truncated: true,
+            ..RawProcessFacts::default()
+        };
+        assert!(config.shield_eligible_raw(&truncated(target_bytes)));
+        assert!(!config.shield_eligible_raw(&truncated(unrelated_bytes)));
+    }
+
+    #[test]
+    fn shield_eligible_recognizes_guard_components() {
+        let temp = tempfile::tempdir().unwrap();
+        let guard_es = temp.path().join("guard-es");
+        std::fs::write(&guard_es, b"synthetic guard-es").unwrap();
+        let guard_es = std::fs::canonicalize(&guard_es).unwrap();
+        let bundle = temp.path().join("Browser.app");
+        let browser = bundle.join("Contents/MacOS/browser");
+        std::fs::create_dir_all(browser.parent().unwrap()).unwrap();
+        std::fs::write(&browser, b"synthetic browser").unwrap();
+        let bundle = std::fs::canonicalize(&bundle).unwrap();
+        let browser = std::fs::canonicalize(&browser).unwrap();
+        let enrollment = MacBrowserEnrollment {
+            browser_id: BrowserId("chrome".into()),
+            family: BrowserFamily::Chromium,
+            profile_root: temp.path().join("profile"),
+            owner_uid: 501,
+            app_bundle: Some(bundle),
+            executables: vec![MacExecutableEnrollment::Signed {
+                role: BrowserExecutableRole::Main,
+                path: browser.clone(),
+                bundle_suffix: None,
+                team_id: "TEAM123456".into(),
+                signing_id: "fixture.browser".into(),
+            }],
+        };
+        let trust = MacBrowserTrustStore::load_and_revalidate(vec![enrollment]).unwrap();
+        let config = EndpointSecurityConfig::browser_with_guard_components(
+            Arc::new(MacProtectedResources::new(true, Default::default())),
+            Arc::new(RwLock::new(trust)),
+            [guard_es.clone()],
+        );
+        let mut guard_process = fixture_process("fixture.guard");
+        guard_process.executable.path = guard_es;
+        let mut browser_process = fixture_process("fixture.browser");
+        browser_process.executable.path = browser;
+        assert_eq!(
+            config.shield_eligible(&guard_process, 501),
+            Some(ShieldReasonKind::GuardComponent)
+        );
+        assert_eq!(
+            config.shield_eligible(&browser_process, 501),
+            Some(ShieldReasonKind::Browser)
+        );
     }
 
     #[cfg(target_os = "macos")]

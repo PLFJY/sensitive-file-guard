@@ -746,6 +746,7 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                         guard_core::policy::Decision::RequireSshKeyConfirmation => {
                             "SSH_KEY_CONFIRMATION_REQUIRED".into()
                         }
+                        guard_core::policy::Decision::Detected => "DETECTED".into(),
                     },
                     allow
                 );

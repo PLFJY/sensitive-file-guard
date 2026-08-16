@@ -388,6 +388,20 @@ impl MacBackendConfig {
         Ok(())
     }
 
+    /// MPS7 runtime posture of every enrolled browser executable plus Guard's
+    /// own self-use binaries. Metadata only; does not change browser identity
+    /// semantics. `Reduced` browsers are reported, never silently rejected.
+    pub fn runtime_posture_report(&self) -> Vec<crate::code_signature::RuntimePostureReport> {
+        let mut report = Vec::new();
+        for browser in &self.browser_trust {
+            for executable in &browser.executables {
+                report.push(crate::code_signature::runtime_posture_of(executable.path()));
+            }
+        }
+        report.extend(crate::code_signature::guard_self_runtime_posture());
+        report
+    }
+
     /// Build a peer-scoped configuration update for one SSH key. Enrollment
     /// canonicalizes/stats the file and applies shared name rules without
     /// opening or parsing private-key contents.

@@ -14,11 +14,23 @@ pub enum ProtectedResourceKind {
     SavedCredentials,
     History,
     SshPrivateKey,
+    /// Audit-only neutral kind for Process Shield events (AUTH_EXEC admission,
+    /// launch-injection deny) that do not target a protected resource. Never
+    /// flows through the protected-resource policy engine.
+    Other,
 }
 
 impl ProtectedResourceKind {
     pub fn is_browser(&self) -> bool {
-        !matches!(self, Self::SshPrivateKey)
+        matches!(
+            self,
+            Self::CookieStore
+                | Self::SessionStore
+                | Self::BrowserKeyMaterial
+                | Self::WebStorage
+                | Self::SavedCredentials
+                | Self::History
+        )
     }
     pub fn is_ssh(&self) -> bool {
         matches!(self, Self::SshPrivateKey)
@@ -41,6 +53,7 @@ impl ProtectedResourceKind {
             Self::SavedCredentials => "browser_saved_credentials",
             Self::History => "browser_history",
             Self::SshPrivateKey => "ssh_private_key",
+            Self::Other => "other",
         }
     }
 }

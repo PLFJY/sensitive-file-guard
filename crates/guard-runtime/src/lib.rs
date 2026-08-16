@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 
+use guard_core::identity::ExeIdentity;
 use guard_core::lease::{
     LeaseId, LeaseSet, MigrationAccessLease, MigrationLeaseState, SshReadAccessLease,
 };
@@ -75,6 +76,9 @@ impl AuthorizationRuntime {
         now: u64,
         duration_secs: u64,
     ) -> Result<(LeaseId, u64), String> {
+        if current.integrity != guard_core::ProcessIntegrity::Normal {
+            return Err("target browser process integrity is compromised".to_owned());
+        }
         if current.stable != pending.target.stable
             || current.uid != pending.target.uid
             || !current.is_trusted_browser()
@@ -109,6 +113,9 @@ impl AuthorizationRuntime {
         now: u64,
         duration_secs: u64,
     ) -> Result<(LeaseId, u64), String> {
+        if current.integrity != guard_core::ProcessIntegrity::Normal {
+            return Err("SSH reader process integrity is compromised".to_owned());
+        }
         if current.stable != pending.target.stable
             || current.uid != pending.target.uid
             || current.uid != pending.resource.owner_uid
@@ -456,6 +463,14 @@ impl PendingMigrationStore {
             .is_some_and(|until| now < *until)
     }
 
+    /// Drop recent-approval grace for a compromised target executable + uid so
+    /// it cannot silently re-authorize the same compromised process/root
+    /// (MPS5).
+    pub fn revoke_recent_approvals_for(&mut self, uid: u32, target_exe: &ExeIdentity) {
+        self.recent_approvals
+            .retain(|key, _| !(key.uid == uid && &key.target_exe == target_exe));
+    }
+
     fn cleanup(&mut self, now: u64) {
         self.blocked.retain(|_, until| now < *until);
         self.recent_approvals.retain(|_, until| now < *until);
@@ -704,7 +719,7 @@ impl PendingSshReadStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use guard_core::identity::{AncestorSummary, TrustTier};
+    use guard_core::identity::{AncestorSummary, ProcessIntegrity, TrustTier};
     use guard_core::resource::{BrowserId, ProfileId, ProtectedResourceKind};
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
@@ -760,7 +775,14 @@ mod tests {
             trust_tier: TrustTier::SystemPackage,
             cmdline: Vec::new(),
             ancestors: Vec::new(),
+            integrity: ProcessIntegrity::Normal,
         }
+    }
+
+    fn compromised_process(browser: Option<&str>) -> ProcessIdentity {
+        let mut process = process(browser);
+        process.integrity = ProcessIntegrity::Compromised;
+        process
     }
 
     fn browser_details() -> MigrationPendingDetails {
@@ -848,6 +870,46 @@ mod tests {
         assert_eq!(*terminal.lock().unwrap(), Terminal::Allowed);
         assert_eq!(runtime.leases().migration[0].id, lease);
         assert!(matches!(runtime.evaluate(&event, 102), Decision::AllowByLease(id) if id == lease));
+    }
+
+    #[test]
+    fn no_new_lease_binds_to_a_compromised_instance() {
+        // MPS5: approve_migration and approve_ssh_read must reject a
+        // Compromised exact instance even when everything else matches.
+        let details = browser_details();
+        let mut runtime = AuthorizationRuntime::default();
+        let compromised = compromised_process(Some("browser-b"));
+        let resolver = FakeResolver {
+            current: compromised.clone(),
+            live: true,
+        };
+        let root_live = resolver.is_live_instance(&details.target_root).unwrap();
+        assert!(runtime
+            .approve_migration(&details, &compromised, root_live, 101, 600)
+            .is_err());
+
+        let ssh = ssh_details();
+        assert!(runtime
+            .approve_ssh_read(&ssh, &compromised, 101, 10)
+            .is_err());
+        assert!(runtime.leases().migration.is_empty());
+        assert!(runtime.leases().ssh_read.is_empty());
+    }
+
+    #[test]
+    fn recent_approval_grace_is_revoked_for_compromised_executable() {
+        let details = browser_details();
+        let mut pending = PendingMigrationStore::default();
+        pending.record_recent_approval(&details, 100);
+        assert!(pending.is_recently_approved(&details, 150));
+        let exe = details.target.stable.exe_identity();
+        pending.revoke_recent_approvals_for(details.target.uid, &exe);
+        assert!(!pending.is_recently_approved(&details, 150));
+        // Unrelated exe grace is untouched.
+        pending.record_recent_approval(&details, 200);
+        let other = browser_details();
+        pending.revoke_recent_approvals_for(9999, &other.target.stable.exe_identity());
+        assert!(pending.is_recently_approved(&details, 250));
     }
 
     #[test]

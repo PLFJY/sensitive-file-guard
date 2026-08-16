@@ -2,7 +2,9 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use guard_core::identity::{ProcessIdentity, ProcessStableId, TrustTier};
+use guard_core::identity::{ProcessIdentity, ProcessIntegrity, ProcessStableId, TrustTier};
+
+use crate::process_shield::MacProcessShield;
 use guard_core::resource::{BrowserFamily, BrowserId};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -76,9 +78,24 @@ pub struct MacBrowserTrustStore {
     browsers: Vec<MacBrowserEnrollment>,
 }
 
+impl MacBrowserTrustStore {
+    /// All enrolled executable paths (signed and explicit-hash entries) for
+    /// cheap Process Shield AUTH_EXEC scope gating. Path matching here is
+    /// deliberately not an authority: the full identity/signature verify
+    /// happens on the normalized target before any admission.
+    pub fn enrolled_executable_paths(&self) -> Vec<PathBuf> {
+        self.browsers
+            .iter()
+            .flat_map(|browser| &browser.executables)
+            .map(|executable| executable.path().to_path_buf())
+            .collect()
+    }
+}
+
 pub struct MacProcessIdentityResolver {
     graph: std::sync::Arc<std::sync::Mutex<MacProcessGraph>>,
     trust: std::sync::Arc<std::sync::RwLock<MacBrowserTrustStore>>,
+    shield: Option<std::sync::Arc<std::sync::Mutex<MacProcessShield>>>,
 }
 
 impl MacProcessIdentityResolver {
@@ -89,6 +106,7 @@ impl MacProcessIdentityResolver {
         Self {
             graph,
             trust: std::sync::Arc::new(std::sync::RwLock::new(trust)),
+            shield: None,
         }
     }
 
@@ -96,7 +114,25 @@ impl MacProcessIdentityResolver {
         graph: std::sync::Arc<std::sync::Mutex<MacProcessGraph>>,
         trust: std::sync::Arc<std::sync::RwLock<MacBrowserTrustStore>>,
     ) -> Self {
-        Self { graph, trust }
+        Self {
+            graph,
+            trust,
+            shield: None,
+        }
+    }
+
+    /// Shared resolver that also consults the live Process Shield state so a
+    /// Compromised exact instance fails closed before any browser/SSH policy.
+    pub fn new_shared_with_shield(
+        graph: std::sync::Arc<std::sync::Mutex<MacProcessGraph>>,
+        trust: std::sync::Arc<std::sync::RwLock<MacBrowserTrustStore>>,
+        shield: std::sync::Arc<std::sync::Mutex<MacProcessShield>>,
+    ) -> Self {
+        Self {
+            graph,
+            trust,
+            shield: Some(shield),
+        }
     }
 
     pub fn replace_trust(&self, trust: MacBrowserTrustStore) -> anyhow::Result<()> {
@@ -129,6 +165,16 @@ impl guard_platform::ProcessIdentityResolver for MacProcessIdentityResolver {
             .read()
             .map_err(|_| anyhow::anyhow!("macOS browser trust lock is poisoned"))?
             .classify(&facts, resource_owner_uid);
+        let integrity = self
+            .shield
+            .as_ref()
+            .map(|shield| {
+                shield
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .integrity_of_pid(pid)
+            })
+            .unwrap_or(ProcessIntegrity::Normal);
         Ok(ProcessIdentity {
             stable: facts.stable_id(),
             uid: facts.uid,
@@ -138,6 +184,10 @@ impl guard_platform::ProcessIdentityResolver for MacProcessIdentityResolver {
             trust_tier: trust.tier,
             cmdline: Vec::new(),
             ancestors,
+            // Process Shield live state: a Compromised exact instance is
+            // surfaced here so the portable policy fails it closed before any
+            // browser/SSH rule. Without a shield (tests/legacy), Normal.
+            integrity,
         })
     }
 
@@ -158,6 +208,23 @@ impl guard_platform::ProcessIdentityResolver for MacProcessIdentityResolver {
             .current(pid)
             .ok_or_else(|| anyhow::anyhow!("current process graph entry is missing"))?;
         graph.ancestors(facts.key, std::time::Instant::now())
+    }
+}
+
+impl MacProcessIdentityResolver {
+    /// The live Process Shield state, when wired (MPS5/MPS6).
+    pub fn shield(&self) -> Option<std::sync::Arc<std::sync::Mutex<MacProcessShield>>> {
+        self.shield.clone()
+    }
+
+    /// Current graph facts for a PID, for dynamic lease-root shielding
+    /// (MPS6).
+    pub fn current_facts(&self, pid: u32) -> Option<MacProcessFacts> {
+        self.graph
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .current(pid)
+            .cloned()
     }
 }
 

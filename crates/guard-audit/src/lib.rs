@@ -437,6 +437,7 @@ fn reconstruct_decision(
             Decision::Deny(deny_reason.unwrap_or(DenyReason::CrossBrowserWithoutLease))
         }
         "ssh_key_confirmation_required" => Decision::RequireSshKeyConfirmation,
+        "detected" => Decision::Detected,
         _ => Decision::Deny(deny_reason.unwrap_or(DenyReason::UnknownProcess)),
     }
 }
@@ -448,6 +449,7 @@ fn decision_str(d: &Decision) -> &'static str {
         Decision::AllowByLease(_) => "allow_by_lease",
         Decision::RequireMigrationConfirmation(_) => "migration_confirmation_required",
         Decision::RequireSshKeyConfirmation => "ssh_key_confirmation_required",
+        Decision::Detected => "detected",
     }
 }
 
@@ -463,6 +465,7 @@ fn deny_reason_str(r: DenyReason) -> &'static str {
         DenyReason::WrongUid => "wrong_uid",
         DenyReason::IdentityMismatch => "identity_mismatch",
         DenyReason::OneShotLeaseUsed => "one_shot_lease_used",
+        DenyReason::ProcessIntegrityCompromised => "process_integrity_compromised",
     }
 }
 fn parse_deny_reason(s: String) -> DenyReason {
@@ -477,6 +480,7 @@ fn parse_deny_reason(s: String) -> DenyReason {
         "wrong_uid" => DenyReason::WrongUid,
         "identity_mismatch" => DenyReason::IdentityMismatch,
         "one_shot_lease_used" => DenyReason::OneShotLeaseUsed,
+        "process_integrity_compromised" => DenyReason::ProcessIntegrityCompromised,
         _ => DenyReason::UnknownProcess,
     }
 }
@@ -490,6 +494,7 @@ fn resource_kind_str(k: ProtectedResourceKind) -> &'static str {
         ProtectedResourceKind::SavedCredentials => "saved_credentials",
         ProtectedResourceKind::History => "history",
         ProtectedResourceKind::SshPrivateKey => "ssh_private_key",
+        ProtectedResourceKind::Other => "other",
     }
 }
 fn parse_resource_kind(s: String) -> ProtectedResourceKind {
@@ -501,6 +506,7 @@ fn parse_resource_kind(s: String) -> ProtectedResourceKind {
         "saved_credentials" => ProtectedResourceKind::SavedCredentials,
         "history" => ProtectedResourceKind::History,
         "ssh_private_key" => ProtectedResourceKind::SshPrivateKey,
+        "other" => ProtectedResourceKind::Other,
         _ => ProtectedResourceKind::History,
     }
 }

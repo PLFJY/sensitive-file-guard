@@ -16,6 +16,7 @@ use platform_macos::endpoint_security::{
     EndpointSecurityBackend, EndpointSecurityConfig, MacProtectedResources,
 };
 use platform_macos::identity::MacProcessGraph;
+use platform_macos::process_shield::MacProcessShield;
 use platform_macos::xpc::{
     AuthenticatedPeer, MacXpcServer, SigningRequirements, XpcRequestHandler,
 };
@@ -238,6 +239,9 @@ impl ControlHandler {
             && (health.degraded
                 || stats.classifier_failures > 0
                 || self.policy.audit_dropped() > 0);
+        // Built before any field move so the backend health can be borrowed.
+        let process_shield =
+            process_shield_info(&health, self.policy.config_optional().ok().flatten());
         Response::ok(ResponseBody::Status(Box::new(StatusInfo {
             version: env!("CARGO_PKG_VERSION").into(),
             backend_kind: "macos-endpoint-security".into(),
@@ -280,6 +284,21 @@ impl ControlHandler {
                 namespace_alias_capacity: health.namespace_alias_capacity,
                 namespace_index_saturated: health.namespace_index_saturated,
                 process_graph_degraded: health.process_graph_degraded,
+                task_control_allowed: health.task_control_allowed,
+                task_control_denied: health.task_control_denied,
+                task_read_allowed: health.task_read_allowed,
+                task_read_denied: health.task_read_denied,
+                task_read_supported: health.task_read_supported,
+                task_notify_supported: health.task_notify_supported,
+                shield_admitted: health.shield_admitted,
+                shield_compromised: health.shield_compromised,
+                shield_launch_injection_denied: health.shield_launch_injection_denied,
+                shield_malformed_denied: health.shield_malformed_denied,
+                shield_task_notify_obtained: health.shield_task_notify_obtained,
+                shield_trace_observed: health.shield_trace_observed,
+                shield_remote_thread_observed: health.shield_remote_thread_observed,
+                shield_cs_invalidated_observed: health.shield_cs_invalidated_observed,
+                process_shield: Some(Box::new(process_shield)),
             })),
             protected_files,
             ssh_protected_keys: self.policy.ssh_key_count(),
@@ -337,23 +356,46 @@ pub fn run() -> ExitCode {
     };
     let resources = Arc::new(MacProtectedResources::new(enabled, index));
     let shared_trust = Arc::new(RwLock::new(trust));
+    // MPS6 Guard self-protection: exact Guard component executable paths. The
+    // running guard-es itself plus the deployed GUI and helper. guardctl is
+    // deliberately excluded so CLI/debug workflows are not harmed.
+    let mut guard_component_paths = Vec::new();
+    if let Ok(current_exe) = std::env::current_exe() {
+        guard_component_paths.push(current_exe);
+    }
+    for path in [
+        "/Applications/Guard.app/Contents/MacOS/Guard",
+        "/Applications/Guard.app/Contents/MacOS/guard-notify",
+    ] {
+        guard_component_paths.push(std::path::PathBuf::from(path));
+    }
     let mut startup_error = None;
-    let mut backend = match EndpointSecurityBackend::start(EndpointSecurityConfig::browser(
-        Arc::clone(&resources),
-        Arc::clone(&shared_trust),
-    )) {
-        Ok(backend) => Some(backend),
-        Err(error) => {
-            eprintln!("guard-es: {error}; enforcement is not active");
-            startup_error = Some(error);
-            None
-        }
-    };
+    let mut backend =
+        match EndpointSecurityBackend::start(EndpointSecurityConfig::browser_with_guard_components(
+            Arc::clone(&resources),
+            Arc::clone(&shared_trust),
+            guard_component_paths,
+        )) {
+            Ok(backend) => Some(backend),
+            Err(error) => {
+                eprintln!("guard-es: {error}; enforcement is not active");
+                startup_error = Some(error);
+                None
+            }
+        };
     let graph = backend
         .as_ref()
         .map(EndpointSecurityBackend::process_graph)
         .unwrap_or_else(|| Arc::new(Mutex::new(MacProcessGraph::default())));
-    let resolver = Arc::new(MacProcessIdentityResolver::new_shared(graph, shared_trust));
+    let shield = backend
+        .as_ref()
+        .map(EndpointSecurityBackend::process_shield)
+        .unwrap_or_else(|| Arc::new(Mutex::new(MacProcessShield::new())));
+    let resolver = Arc::new(MacProcessIdentityResolver::new_shared_with_shield(
+        graph,
+        shared_trust,
+        shield,
+    ));
     let audit = match open_audit_store() {
         Ok(audit) => Arc::new(audit),
         Err(error) if backend.is_none() => {
@@ -417,6 +459,20 @@ pub fn run() -> ExitCode {
                 namespace_alias_capacity: 0,
                 namespace_index_saturated: false,
                 process_graph_degraded: false,
+                task_control_allowed: 0,
+                task_control_denied: 0,
+                task_read_allowed: 0,
+                task_read_denied: 0,
+                task_read_supported: false,
+                task_notify_supported: false,
+                shield_admitted: 0,
+                shield_compromised: 0,
+                shield_launch_injection_denied: 0,
+                shield_malformed_denied: 0,
+                shield_task_notify_obtained: 0,
+                shield_trace_observed: 0,
+                shield_remote_thread_observed: 0,
+                shield_cs_invalidated_observed: 0,
             }
         },
         EndpointSecurityBackend::health,
@@ -464,12 +520,123 @@ pub fn run() -> ExitCode {
             }
         }
         policy.maintenance();
+        // Drain ALL metadata-only Process Shield audit handoffs without
+        // blocking the AUTH_OPEN authorization loop. A burst of exec/task
+        // events (browser launch) must not leave shield handoffs queued past
+        // the next maintenance window.
+        loop {
+            match backend.recv_shield_timeout(Duration::ZERO) {
+                Ok(shield_event) => policy.handle_shield(shield_event),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    eprintln!("guard-es: Process Shield audit handoff queue disconnected");
+                    break;
+                }
+            }
+        }
         if let Err(error) = backend.repair_if_needed() {
             eprintln!("guard-es: bounded namespace repair failed: {error}");
         }
         *backend_health
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = backend.health();
+    }
+}
+
+/// Build the truthful Process Shield status section (MPS8). Distinguishes
+/// Active / Reduced / Unavailable with exact reasons; never a fake global flag.
+fn process_shield_info(
+    health: &BackendHealth,
+    config: Option<MacBackendConfig>,
+) -> guard_ipc::ProcessShieldInfo {
+    use guard_ipc::ProcessShieldInfo;
+    use platform_macos::code_signature::RuntimePosture;
+
+    let backend_live = health.active && !health.state.is_empty();
+    let task_read_active = health.task_read_supported;
+    let notify_active = health.task_notify_supported;
+    let reduced = !task_read_active || !notify_active || health.process_graph_degraded;
+    let (state, reason) = if !backend_live {
+        (
+            "Unavailable".into(),
+            Some("Endpoint Security client is not active; Process Shield is not enforcing".into()),
+        )
+    } else if reduced {
+        let mut reasons = Vec::new();
+        if !task_read_active {
+            reasons.push("AUTH_GET_TASK_READ is unavailable on this host");
+        }
+        if !notify_active {
+            reasons.push("Process Shield notify subscriptions are unavailable");
+        }
+        if health.process_graph_degraded {
+            reasons.push("process graph is degraded");
+        }
+        ("Reduced".into(), Some(reasons.join("; ")))
+    } else {
+        ("Active".into(), None)
+    };
+
+    let (mut strong, mut reduced, mut unverifiable) = (0usize, 0usize, 0usize);
+    if let Some(config) = config {
+        for report in config.runtime_posture_report() {
+            match report.posture {
+                RuntimePosture::Strong => strong += 1,
+                RuntimePosture::Reduced => reduced += 1,
+                RuntimePosture::Unverifiable => unverifiable += 1,
+            }
+        }
+    }
+    let runtime_posture = if strong + reduced + unverifiable == 0 {
+        "not-applicable".to_owned()
+    } else if reduced > 0 {
+        "reduced".to_owned()
+    } else if unverifiable > 0 {
+        "unverifiable".to_owned()
+    } else {
+        "strong".to_owned()
+    };
+
+    ProcessShieldInfo {
+        state,
+        reason,
+        task_control_protection: if backend_live {
+            "active".into()
+        } else {
+            "unavailable".into()
+        },
+        task_read_protection: if backend_live && task_read_active {
+            "active".into()
+        } else {
+            "unavailable".into()
+        },
+        task_read_supported: health.task_read_supported,
+        task_notify_supported: health.task_notify_supported,
+        launch_integrity: if backend_live {
+            "active".into()
+        } else {
+            "unavailable".into()
+        },
+        runtime_posture,
+        runtime_posture_strong: strong,
+        runtime_posture_reduced: reduced,
+        runtime_posture_unverifiable: unverifiable,
+        injection_telemetry: if notify_active {
+            "active".into()
+        } else {
+            "unavailable".into()
+        },
+        task_control_allowed: health.task_control_allowed,
+        task_control_denied: health.task_control_denied,
+        task_read_allowed: health.task_read_allowed,
+        task_read_denied: health.task_read_denied,
+        shield_admitted: health.shield_admitted,
+        shield_compromised: health.shield_compromised,
+        launch_injection_denied: health.shield_launch_injection_denied,
+        trace_observed: health.shield_trace_observed,
+        remote_thread_observed: health.shield_remote_thread_observed,
+        cs_invalidated_observed: health.shield_cs_invalidated_observed,
+        library_mapping_protection: "disabled".into(),
     }
 }
 

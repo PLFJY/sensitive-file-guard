@@ -758,13 +758,34 @@ fn mac_notification_text(event: &guard_ipc::EventInfo) -> (String, String) {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "a process".into());
-    (
-        "Sensitive File Guard blocked access".into(),
-        format!(
-            "{executable} attempted to access protected {}.",
-            event.resource_kind_code
+    match event.event_code.as_str() {
+        "process_shield_compromised" => (
+            "Sensitive File Guard: protected process compromised".into(),
+            format!(
+                "{executable} was confirmed compromised ({}); its secret-reading authority has been revoked.",
+                event.backend_diag
+            ),
         ),
-    )
+        "process_shield_task_control_denied" | "process_shield_task_read_denied" => (
+            "Sensitive File Guard: process attack blocked".into(),
+            format!(
+                "{executable} was denied task access to a protected process.",
+            ),
+        ),
+        "process_shield_launch_injection_denied" => (
+            "Sensitive File Guard: code-loading injection blocked".into(),
+            format!(
+                "{executable} launch was denied because of prohibited DYLD code-loading state.",
+            ),
+        ),
+        _ => (
+            "Sensitive File Guard blocked access".into(),
+            format!(
+                "{executable} attempted to access protected {}.",
+                event.resource_kind_code
+            ),
+        ),
+    }
 }
 
 fn event_row_with_decision(event: &guard_ipc::EventInfo, decision: &str) -> gtk::ListBoxRow {
@@ -1658,14 +1679,18 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
             }
             for event in recent_events {
                 #[cfg(target_os = "macos")]
-                if after_id.is_some()
-                    && event.id > last_notified_event_id.get()
-                    && event.decision.starts_with("Deny")
-                    && event.event_code != "system_process_access_suppressed"
-                {
-                    let (title, body) = mac_notification_text(&event);
-                    if let Err(error) = platform_macos::notifications::send(&title, &body) {
-                        eprintln!("Guard: macOS system notification failed: {error:#}");
+                if after_id.is_some() && event.id > last_notified_event_id.get() {
+                    // Denied task-attempt events surface as security
+                    // notifications (no popup decision). A confirmed
+                    // compromise is high priority.
+                    let notify = (event.decision.starts_with("Deny")
+                        && event.event_code != "system_process_access_suppressed")
+                        || event.event_code == "process_shield_compromised";
+                    if notify {
+                        let (title, body) = mac_notification_text(&event);
+                        if let Err(error) = platform_macos::notifications::send(&title, &body) {
+                            eprintln!("Guard: macOS system notification failed: {error:#}");
+                        }
                     }
                 }
                 let decision = match event.event_code.as_str() {

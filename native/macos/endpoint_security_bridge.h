@@ -84,6 +84,51 @@ typedef void (*guard_es_process_callback_t)(
     const guard_es_process_facts_t *process,
     const guard_es_process_facts_t *related_process);
 
+typedef struct {
+    uint64_t deadline;
+    // Code-loading / search-path DYLD environment presence flags for launch
+    // integrity policy. Presence is enough to deny a shielded-eligible exec;
+    // the variable values are never copied (they may be arbitrary size).
+    bool dyld_insert_libraries;
+    bool dyld_library_path;
+    bool dyld_framework_path;
+    bool dyld_fallback_library_path;
+    bool dyld_fallback_framework_path;
+    bool dyld_root_path;
+    // Requester is message->process (the process performing the exec);
+    // target is message->event.exec.target (the post-exec process instance).
+    guard_es_process_facts_t process;
+    guard_es_process_facts_t target;
+} guard_es_exec_event_t;
+
+typedef void (*guard_es_exec_callback_t)(
+    void *context,
+    const void *client,
+    const void *message,
+    const guard_es_exec_event_t *event);
+
+typedef struct {
+    uint64_t deadline;
+    // Requester is message->process; target is event.get_task(.read).target.
+    guard_es_process_facts_t process;
+    guard_es_process_facts_t target;
+} guard_es_task_event_t;
+
+typedef void (*guard_es_task_callback_t)(
+    void *context,
+    uint32_t event_kind,
+    const void *client,
+    const void *message,
+    const guard_es_task_event_t *event);
+
+// Notify-only task/trace/thread/CS events. No response is required. For
+// CS_INVALIDATED the affected process is message->process and the target field
+// is copied from it; for all other kinds the target is the event target.
+typedef void (*guard_es_task_notify_callback_t)(
+    void *context,
+    uint32_t event_kind,
+    const guard_es_task_event_t *event);
+
 typedef void (*guard_es_namespace_callback_t)(
     void *context,
     const void *client,
@@ -103,8 +148,13 @@ int guard_es_client_create(
     guard_es_auth_open_callback_t callback,
     guard_es_process_callback_t process_callback,
     guard_es_namespace_callback_t namespace_callback,
+    guard_es_exec_callback_t exec_callback,
+    guard_es_task_callback_t task_callback,
+    guard_es_task_notify_callback_t task_notify_callback,
     guard_es_sequence_callback_t sequence_callback,
     void *context);
+int guard_es_client_subscribe_task_read(guard_es_client_t *client);
+int guard_es_client_subscribe_task_notify(guard_es_client_t *client);
 int guard_es_client_subscribe_required(guard_es_client_t *client);
 int guard_es_client_delete(guard_es_client_t *client);
 

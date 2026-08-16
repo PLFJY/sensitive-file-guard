@@ -43,6 +43,58 @@ static void GuardSignatureCopyCertificateSha1(SecCertificateRef certificate,
     }
 }
 
+int guard_code_signature_runtime_inspect(
+    const char *path,
+    guard_code_signature_runtime_info_t *info,
+    char *error,
+    size_t error_len) {
+    if (path == NULL || info == NULL) {
+        GuardSignatureCopyString(CFSTR("missing runtime-signature path or output"), error, error_len);
+        return -1;
+    }
+    memset(info, 0, sizeof(*info));
+    CFURLRef url = CFURLCreateFromFileSystemRepresentation(
+        kCFAllocatorDefault, (const UInt8 *)path, strlen(path), false);
+    if (url == NULL) {
+        GuardSignatureCopyString(CFSTR("invalid executable path"), error, error_len);
+        return -1;
+    }
+    SecStaticCodeRef code = NULL;
+    OSStatus status = SecStaticCodeCreateWithPath(url, kSecCSDefaultFlags, &code);
+    CFRelease(url);
+    if (status != errSecSuccess) {
+        GuardSignatureError(status, error, error_len);
+        return -1;
+    }
+    CFDictionaryRef signingInformation = NULL;
+    OSStatus informationStatus = SecCodeCopySigningInformation(
+        code, kSecCSSigningInformation, &signingInformation);
+    CFRelease(code);
+    if (informationStatus != errSecSuccess) {
+        GuardSignatureError(informationStatus, error, error_len);
+        return -1;
+    }
+    CFDictionaryRef entitlements = CFDictionaryGetValue(
+        signingInformation, kSecCodeInfoEntitlementsDict);
+    if (entitlements != NULL) {
+        info->has_entitlements = true;
+        info->get_task_allow = CFDictionaryGetValue(entitlements,
+            CFSTR("com.apple.security.get-task-allow")) != NULL;
+        info->allow_dyld_environment_variables = CFDictionaryGetValue(entitlements,
+            CFSTR("com.apple.security.cs.allow-dyld-environment-variables")) != NULL;
+        info->disable_library_validation = CFDictionaryGetValue(entitlements,
+            CFSTR("com.apple.security.cs.disable-library-validation")) != NULL;
+        info->disable_executable_page_protection = CFDictionaryGetValue(entitlements,
+            CFSTR("com.apple.security.cs.disable-executable-page-protection")) != NULL;
+        info->allow_unsigned_executable_memory = CFDictionaryGetValue(entitlements,
+            CFSTR("com.apple.security.cs.allow-unsigned-executable-memory")) != NULL;
+        info->allow_jit = CFDictionaryGetValue(entitlements,
+            CFSTR("com.apple.security.cs.allow-jit")) != NULL;
+    }
+    CFRelease(signingInformation);
+    return 0;
+}
+
 int guard_code_signature_inspect(
     const char *path,
     guard_code_signature_info_t *info,

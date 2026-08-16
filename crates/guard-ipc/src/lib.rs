@@ -434,6 +434,75 @@ pub struct MacHealthInfo {
     pub namespace_alias_capacity: usize,
     pub namespace_index_saturated: bool,
     pub process_graph_degraded: bool,
+    // Process Shield health (MPS2+). Serde-optional so older UI clients can
+    // still deserialize status responses.
+    #[serde(default)]
+    pub task_control_allowed: u64,
+    #[serde(default)]
+    pub task_control_denied: u64,
+    #[serde(default)]
+    pub task_read_allowed: u64,
+    #[serde(default)]
+    pub task_read_denied: u64,
+    #[serde(default)]
+    pub task_read_supported: bool,
+    #[serde(default)]
+    pub task_notify_supported: bool,
+    #[serde(default)]
+    pub shield_admitted: u64,
+    #[serde(default)]
+    pub shield_compromised: u64,
+    #[serde(default)]
+    pub shield_launch_injection_denied: u64,
+    #[serde(default)]
+    pub shield_malformed_denied: u64,
+    #[serde(default)]
+    pub shield_task_notify_obtained: u64,
+    #[serde(default)]
+    pub shield_trace_observed: u64,
+    #[serde(default)]
+    pub shield_remote_thread_observed: u64,
+    #[serde(default)]
+    pub shield_cs_invalidated_observed: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_shield: Option<Box<ProcessShieldInfo>>,
+}
+
+/// Separate Process Shield status (MPS8). Truthful per-capability state, never
+/// a fake global "Protected" flag.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProcessShieldInfo {
+    /// Active | Reduced | Unavailable with the exact reason.
+    pub state: String,
+    pub reason: Option<String>,
+    /// task control protection: active / unavailable
+    pub task_control_protection: String,
+    /// task read protection: active / unavailable (host feature-detected)
+    pub task_read_protection: String,
+    pub task_read_supported: bool,
+    pub task_notify_supported: bool,
+    /// launch integrity (AUTH_EXEC admission + DYLD code-loading deny)
+    pub launch_integrity: String,
+    /// runtime integrity posture summary over enrolled executables
+    pub runtime_posture: String,
+    pub runtime_posture_strong: usize,
+    pub runtime_posture_reduced: usize,
+    pub runtime_posture_unverifiable: usize,
+    /// notify-only compromise-signal telemetry
+    pub injection_telemetry: String,
+    pub task_control_allowed: u64,
+    pub task_control_denied: u64,
+    pub task_read_allowed: u64,
+    pub task_read_denied: u64,
+    pub shield_admitted: u64,
+    pub shield_compromised: u64,
+    pub launch_injection_denied: u64,
+    pub trace_observed: u64,
+    pub remote_thread_observed: u64,
+    pub cs_invalidated_observed: u64,
+    /// optional library-mapping (AUTH_MMAP) protection: disabled by decision
+    /// unless MPS10 enables it with measurements
+    pub library_mapping_protection: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

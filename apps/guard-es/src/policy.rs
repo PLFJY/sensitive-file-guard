@@ -8,7 +8,9 @@ use std::os::unix::fs::MetadataExt;
 use guard_audit::{AuditRecord, AuditStore};
 use guard_core::lease::MigrationLeaseState;
 use guard_core::policy::{AccessEvent, AccessOperation, Decision, DenyReason};
-use guard_core::{ProcessIdentity, ProtectedResource, ProtectedResourceKind};
+use guard_core::{
+    ProcessIdentity, ProcessStableId, ProtectedResource, ProtectedResourceKind, TrustTier,
+};
 use guard_platform::{PendingPermission, ProcessIdentityResolver};
 use guard_runtime::{
     AuthorizationRuntime, MigrationEnqueueResult, MigrationPendingDetails, PendingMigrationStore,
@@ -18,8 +20,9 @@ use platform_macos::browser_trust::{MacBrowserTrustStore, MacProcessIdentityReso
 use platform_macos::config::MacBackendConfig;
 use platform_macos::endpoint_security::{
     AuthOpenFacts, MacAuthorizationEvent, MacPendingPermission, MacProtectedResources,
-    ES_FFLAG_READ, ES_FFLAG_WRITE,
+    ShieldAuditEvent, ES_FFLAG_READ, ES_FFLAG_WRITE,
 };
+use platform_macos::identity::MacProcessFacts;
 use platform_macos::resource_index::MacResourceIndex;
 
 pub const MIGRATION_LEASE_SECS: u64 = 10 * 60;
@@ -296,6 +299,29 @@ impl MacPolicy {
                 return;
             }
         };
+        // Process Shield File-Shield gate (MPS5): a confirmed Compromised
+        // exact live instance fails closed before ANY browser/SSH policy —
+        // including write-only opens, system-process metadata exceptions and
+        // trusted-tool exceptions — so a compromised browser cannot keep
+        // receiving Allow merely because path/signature/BrowserId match.
+        if process.integrity != guard_core::ProcessIntegrity::Normal {
+            inner.stats.denied = inner.stats.denied.saturating_add(1);
+            drop(inner);
+            self.record(
+                if event.resource.kind == ProtectedResourceKind::SshPrivateKey {
+                    "ssh_key_access_blocked"
+                } else {
+                    "browser_access_denied"
+                },
+                &event.resource,
+                Some(&process),
+                Decision::Deny(DenyReason::ProcessIntegrityCompromised),
+                "process integrity is Compromised; protected-resource authority revoked".into(),
+                now,
+            );
+            let _ = event.permission.deny();
+            return;
+        }
         if event.resource.kind == ProtectedResourceKind::SshPrivateKey
             && event.permission.requested_fflags() & ES_FFLAG_READ == 0
         {
@@ -384,6 +410,13 @@ impl MacPolicy {
         }
         let decision = inner.runtime.evaluate(&access, now);
         match decision.clone() {
+            Decision::Detected => {
+                // evaluate() never returns Detected; defensive fail-closed for
+                // the protected open.
+                inner.stats.denied = inner.stats.denied.saturating_add(1);
+                drop(inner);
+                let _ = event.permission.deny();
+            }
             Decision::Allow => {
                 inner.stats.allowed = inner.stats.allowed.saturating_add(1);
                 drop(inner);
@@ -586,6 +619,239 @@ impl MacPolicy {
         }
     }
 
+    /// Record metadata-only Process Shield audit handoffs (AUTH_EXEC
+    /// admission / launch-injection deny / malformed fail-closed). Never
+    /// carries secret contents.
+    pub fn handle_shield(&self, event: ShieldAuditEvent) {
+        if let ShieldAuditEvent::Compromised { target, .. } = &event {
+            // MPS4 ordering: the exact instance was already transitioned to
+            // Compromised in the ES callback; now run capability revocation
+            // hooks BEFORE auditing.
+            self.revoke_capabilities_for_compromised(target);
+        }
+        self.handle_shield_at(event, epoch_seconds());
+    }
+
+    /// MPS6: dynamically shield the exact lease root for the lease lifetime.
+    /// The root becomes a Process Shield target so a same-user attacker cannot
+    /// take over the approved reader via a task port.
+    fn shield_dynamic_lease_root(&self, root: &ProcessStableId) {
+        let Some(shield) = self.resolver.shield() else {
+            return;
+        };
+        let Some(facts) = self.resolver.current_facts(root.pid) else {
+            return;
+        };
+        if facts.stable_id() != *root {
+            return;
+        }
+        let _ = shield
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .admit(
+                facts,
+                platform_macos::process_shield::ShieldReasonKind::DynamicLeaseRoot,
+            );
+    }
+
+    /// Remove the dynamic lease-root shield reason. Other reasons (browser,
+    /// guard component) keep the instance shielded. A Compromised instance
+    /// keeps its entry (quarantine) until process exit, so the File Shield
+    /// deny cannot be lost by dropping the last reason.
+    fn unshield_dynamic_lease_root(&self, root: &ProcessStableId) {
+        let Some(shield) = self.resolver.shield() else {
+            return;
+        };
+        let Some(facts) = self.resolver.current_facts(root.pid) else {
+            return;
+        };
+        if facts.stable_id() != *root {
+            return;
+        }
+        let mut shield = shield
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if shield.integrity_of_pid(root.pid) != guard_core::ProcessIntegrity::Normal {
+            return;
+        }
+        shield.remove_reason(
+            &facts.key,
+            platform_macos::process_shield::ShieldReasonKind::DynamicLeaseRoot,
+        );
+    }
+
+    /// MPS5: revoke every capability that could preserve secret authority for
+    /// a confirmed Compromised instance — bound migration leases, SSH read
+    /// leases, and recent-import approval grace for the same executable/root.
+    fn revoke_capabilities_for_compromised(&self, target: &MacProcessFacts) {
+        let target_stable = target.stable_id();
+        let target_uid = target.uid;
+        let target_exe = target_stable.exe_identity();
+        // Ancestor walk for tree-scoped leases (compromised member of a
+        // lease-rooted tree). Degrades to exact-root revocation only when the
+        // process graph cannot produce ancestry.
+        let ancestors = self.resolver.ancestors(target.key.pid).unwrap_or_default();
+        let in_tree = |root: &ProcessStableId| {
+            root == &target_stable
+                || ancestors.iter().any(|ancestor| {
+                    ancestor.pid == root.pid
+                        && ancestor.start_time == root.start_time
+                        && ancestor.exe == root.exe
+                        && ancestor.exe_dev == root.exe_dev
+                        && ancestor.exe_ino == root.exe_ino
+                })
+        };
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for lease in &mut inner.runtime.leases_mut().migration {
+            if let MigrationLeaseState::Bound { root } = &lease.state {
+                if in_tree(root) {
+                    lease.revoked = true;
+                    lease.state = MigrationLeaseState::Dead;
+                }
+            }
+        }
+        for lease in &mut inner.runtime.leases_mut().ssh_read {
+            if in_tree(&lease.root) {
+                lease.revoked = true;
+            }
+        }
+        // Recent-approval grace must not silently re-authorize a new instance
+        // of the same compromised executable/root.
+        inner
+            .pending
+            .revoke_recent_approvals_for(target_uid, &target_exe);
+    }
+
+    fn handle_shield_at(&self, event: ShieldAuditEvent, now: u64) {
+        let (event_code, target, uid_override, decision, diagnostic) = match event {
+            ShieldAuditEvent::ExecAdmitted { target, reason } => (
+                "process_shield_exec_admitted",
+                Some(target),
+                None,
+                Decision::Allow,
+                format!("shield_reason={}", reason.label()),
+            ),
+            ShieldAuditEvent::ExecDeniedLaunchInjection {
+                target,
+                present_vars,
+            } => (
+                "process_shield_launch_injection_denied",
+                Some(target),
+                None,
+                Decision::Deny(DenyReason::NotTrustedIdentity),
+                format!("prohibited_dyld={}", present_vars.join(",")),
+            ),
+            ShieldAuditEvent::ExecDeniedMalformed {
+                requester_uid,
+                diagnostic,
+            } => (
+                "process_shield_exec_malformed_denied",
+                None,
+                Some(requester_uid),
+                Decision::Deny(DenyReason::UnknownProcess),
+                diagnostic,
+            ),
+            ShieldAuditEvent::TaskDenied {
+                kind,
+                requester,
+                target,
+            } => {
+                // Attribute to the TARGET's owner (the victim), so a same-user
+                // observer can see task-attack denials against their shielded
+                // browser even when the requester is a system daemon.
+                let victim_uid = target.uid;
+                let requester_exe = requester.executable.path.display().to_string();
+                let requester_uid = requester.uid;
+                (
+                    kind.event_code(),
+                    Some(target),
+                    Some(victim_uid),
+                    Decision::Deny(DenyReason::UnknownProcess),
+                    format!(
+                        "requester_exe={requester_exe} requester_uid={requester_uid} kind={}",
+                        kind.label()
+                    ),
+                )
+            }
+            ShieldAuditEvent::TaskNotify {
+                kind,
+                requester,
+                target,
+            } => (
+                kind.event_code(),
+                Some(target),
+                Some(requester.uid),
+                Decision::Detected,
+                format!(
+                    "requester_exe={} signal={} notify_only=true",
+                    requester.executable.path.display(),
+                    kind.label()
+                ),
+            ),
+            ShieldAuditEvent::Compromised {
+                target,
+                signal,
+                requester,
+            } => (
+                "process_shield_compromised",
+                Some(target),
+                Some(requester.uid),
+                Decision::Detected,
+                format!(
+                    "signal={} requester_exe={} integrity=Compromised",
+                    signal.label(),
+                    requester.executable.path.display()
+                ),
+            ),
+        };
+        let uid = uid_override
+            .or_else(|| target.as_ref().map(|facts| facts.uid))
+            .unwrap_or(0);
+        self.record_shield_audit(event_code, target.as_ref(), uid, decision, diagnostic, now);
+    }
+
+    fn record_shield_audit(
+        &self,
+        event_code: &str,
+        target: Option<&MacProcessFacts>,
+        uid: u32,
+        decision: Decision,
+        diagnostic: String,
+        now: u64,
+    ) {
+        let path = target
+            .map(|facts| facts.executable.path.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let deny_reason = match &decision {
+            Decision::Deny(reason) => Some(*reason),
+            _ => None,
+        };
+        self.audit.record(AuditRecord {
+            event_code: event_code.into(),
+            ts_ms: now.saturating_mul(1000),
+            uid,
+            pid: target.map_or(0, |facts| facts.key.pid),
+            start_time: target.map_or(0, |facts| facts.start_time_us),
+            decision,
+            deny_reason,
+            resource_kind: ProtectedResourceKind::Other,
+            resource_browser: None,
+            resource_profile: None,
+            path: path.clone(),
+            exe: path,
+            exe_owner_uid: target.map_or(0, |facts| facts.executable.owner_uid),
+            trust_tier: TrustTier::Unknown,
+            process_browser: None,
+            parent_pid: None,
+            parent_exe: None,
+            lease_id: None,
+            backend_diag: diagnostic,
+        });
+    }
+
     pub fn pending_for_uid(&self, uid: u32) -> Vec<guard_ipc::MigrationPendingInfo> {
         self.inner
             .lock()
@@ -682,6 +948,9 @@ impl MacPolicy {
             let siblings = inner.pending.take_recent_approval_siblings(&details);
             (lease_id, siblings)
         };
+        // MPS6: the bound lease root is dynamically shielded for the lease
+        // lifetime.
+        self.shield_dynamic_lease_root(&details.target_root);
         if let Err(error) = request.try_resolve(true) {
             self.revoke_lease(lease_id);
             anyhow::bail!("retained AUTH_OPEN was no longer resolvable: {error}");
@@ -815,7 +1084,13 @@ impl MacPolicy {
                 .runtime
                 .approve_ssh_read(&details, &current, now, SSH_READ_LEASE_SECS)
             {
-                Ok((lease_id, _)) => lease_id,
+                Ok((lease_id, _)) => {
+                    drop(inner);
+                    // MPS6: the SSH-read lease root is dynamically shielded
+                    // for the capability lifetime.
+                    self.shield_dynamic_lease_root(&details.target_root);
+                    lease_id
+                }
                 Err(error) => {
                     drop(inner);
                     request.resolve(false);
@@ -896,22 +1171,32 @@ impl MacPolicy {
     }
 
     fn maintenance_at(&self, now: u64) {
-        let (expired_migrations, expired_ssh_reads) = {
+        let (expired_migrations, expired_ssh_reads, expired_lease_roots) = {
             let mut inner = self
                 .inner
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut expired_lease_roots = Vec::new();
             for lease in &mut inner.runtime.leases_mut().migration {
                 if let MigrationLeaseState::Bound { root } = &lease.state {
                     if !self.resolver.is_live_instance(root).unwrap_or(false) {
+                        expired_lease_roots.push(root.clone());
                         lease.revoked = true;
                         lease.state = MigrationLeaseState::Dead;
+                    } else if now >= lease.expires_at || lease.revoked {
+                        // Capability ended while the root is still alive: the
+                        // dynamic shield reason may be removed (unless the
+                        // instance is quarantined).
+                        expired_lease_roots.push(root.clone());
                     }
                 }
             }
             for lease in &mut inner.runtime.leases_mut().ssh_read {
                 if !self.resolver.is_live_instance(&lease.root).unwrap_or(false) {
+                    expired_lease_roots.push(lease.root.clone());
                     lease.revoked = true;
+                } else if now >= lease.expires_at || lease.revoked {
+                    expired_lease_roots.push(lease.root.clone());
                 }
             }
             let expired_migrations = inner.pending.expire(now, self.resolver.as_ref());
@@ -923,8 +1208,13 @@ impl MacPolicy {
                 .stats
                 .denied
                 .saturating_add(u64::try_from(expired_count).unwrap_or(u64::MAX));
-            (expired_migrations, expired_ssh_reads)
+            (expired_migrations, expired_ssh_reads, expired_lease_roots)
         };
+        // MPS6: drop the dynamic lease-root shield reason for lease roots that
+        // exited; other shield reasons keep the instance protected.
+        for root in expired_lease_roots {
+            self.unshield_dynamic_lease_root(&root);
+        }
         for request in expired_migrations {
             let details = request.details.clone();
             request.resolve(false);
@@ -1089,6 +1379,8 @@ impl MacPolicy {
         });
         match approved {
             Ok((lease_id, _)) => {
+                // MPS6: dynamically shield the grace-approved root too.
+                self.shield_dynamic_lease_root(&details.target_root);
                 if permission.allow().is_ok() {
                     let mut inner = self
                         .inner
@@ -1138,6 +1430,8 @@ impl MacPolicy {
         });
         match approved {
             Ok((lease_id, _)) => {
+                // MPS6: dynamically shield the coalesced root too.
+                self.shield_dynamic_lease_root(&details.target_root);
                 if request.try_resolve(true).is_ok() {
                     let mut inner = self
                         .inner
@@ -1370,6 +1664,7 @@ mod tests {
     use platform_macos::identity::{
         AuditProcessKey, ExecutableSnapshot, MacCodeIdentity, MacProcessFacts, MacProcessGraph,
     };
+    use platform_macos::process_shield::MacProcessShield;
 
     use super::*;
 
@@ -1417,6 +1712,7 @@ mod tests {
     struct Fixture {
         _root: tempfile::TempDir,
         graph: Arc<Mutex<MacProcessGraph>>,
+        shield: Arc<Mutex<MacProcessShield>>,
         policy: MacPolicy,
         resources: HashMap<String, ProtectedResource>,
         executables: HashMap<String, std::path::PathBuf>,
@@ -1503,7 +1799,12 @@ mod tests {
             let (index, trust, enabled) = prepare_config(Some(&config)).unwrap();
             let protected = Arc::new(MacProtectedResources::new(enabled, index));
             let graph = Arc::new(Mutex::new(MacProcessGraph::default()));
-            let resolver = Arc::new(MacProcessIdentityResolver::new(Arc::clone(&graph), trust));
+            let shield = Arc::new(Mutex::new(MacProcessShield::new()));
+            let resolver = Arc::new(MacProcessIdentityResolver::new_shared_with_shield(
+                Arc::clone(&graph),
+                Arc::new(RwLock::new(trust)),
+                Arc::clone(&shield),
+            ));
             let audit_path = root.path().join("audit.db");
             let policy = MacPolicy::new(
                 protected,
@@ -1514,6 +1815,7 @@ mod tests {
             Self {
                 _root: root,
                 graph,
+                shield,
                 policy,
                 resources,
                 executables,
@@ -2025,5 +2327,363 @@ mod tests {
         let (event, no_budget) = fixture.event(no_budget_reader, "ssh", ES_FFLAG_READ, None);
         fixture.policy.handle_at(event, now + 1);
         assert_eq!(*no_budget.lock().unwrap(), Terminal::Flags(0));
+    }
+
+    #[test]
+    fn process_shield_exec_audit_is_metadata_only() {
+        let fixture = Fixture::new();
+        let target = fixture.facts("browser-a", 900, None);
+        fixture
+            .policy
+            .handle_shield(ShieldAuditEvent::ExecAdmitted {
+                target: target.clone(),
+                reason: platform_macos::process_shield::ShieldReasonKind::Browser,
+            });
+        fixture
+            .policy
+            .handle_shield(ShieldAuditEvent::ExecDeniedLaunchInjection {
+                target: target.clone(),
+                present_vars: vec!["DYLD_INSERT_LIBRARIES"],
+            });
+        fixture
+            .policy
+            .handle_shield(ShieldAuditEvent::ExecDeniedMalformed {
+                requester_uid: fixture.uid,
+                diagnostic: "truncated target executable path".into(),
+            });
+        let attacker = fixture.facts("reader", 901, None);
+        fixture.policy.handle_shield(ShieldAuditEvent::TaskDenied {
+            kind: platform_macos::process_shield::TaskAccessKind::Control,
+            requester: attacker,
+            target: target.clone(),
+        });
+        let tracer = fixture.facts("reader", 902, None);
+        fixture.policy.handle_shield(ShieldAuditEvent::TaskNotify {
+            kind: platform_macos::process_shield::TaskNotifyKind::Trace,
+            requester: tracer,
+            target: target.clone(),
+        });
+        fixture.policy.handle_shield(ShieldAuditEvent::TaskNotify {
+            kind: platform_macos::process_shield::TaskNotifyKind::RemoteThreadCreate,
+            requester: fixture.facts("reader", 903, None),
+            target: target.clone(),
+        });
+        fixture.policy.handle_shield(ShieldAuditEvent::Compromised {
+            target,
+            signal: platform_macos::process_shield::TaskNotifyKind::CsInvalidated,
+            requester: fixture.facts("reader", 904, None),
+        });
+        let events = fixture
+            .policy
+            .recent_events(fixture.uid, 100, None, None)
+            .unwrap();
+        for required in [
+            "process_shield_exec_admitted",
+            "process_shield_launch_injection_denied",
+            "process_shield_exec_malformed_denied",
+            "process_shield_task_control_denied",
+            "process_shield_trace_observed",
+            "process_shield_remote_thread_observed",
+            "process_shield_compromised",
+        ] {
+            assert!(
+                events.iter().any(|event| event.event_code == required),
+                "missing shield audit event {required}"
+            );
+        }
+        assert!(events
+            .iter()
+            .filter(|event| event.event_code == "process_shield_compromised")
+            .all(|event| event.backend_diag.contains("integrity=Compromised")
+                && event.backend_diag.contains("signal=notify_cs_invalidated")));
+        // Notify-only signals are DETECTED, never PREVENTED.
+        assert!(events
+            .iter()
+            .filter(|event| event.event_code == "process_shield_trace_observed")
+            .all(|event| event.backend_diag.contains("notify_only=true")
+                && event.decision == "Detected"));
+        // Audit payload must be metadata only: never protected file contents.
+        let json = serde_json::to_string(&events).unwrap();
+        assert!(!json.contains("synthetic cookies"));
+        assert!(!json.contains("synthetic ephemeral private-key fixture"));
+        // The exec path is the executable path, never a protected file path.
+        assert!(events
+            .iter()
+            .all(|event| !event.path.contains("Network/Cookies")));
+    }
+
+    #[test]
+    fn compromised_instance_fails_closed_for_all_file_shield_paths() {
+        let fixture = Fixture::new();
+        let now = 100;
+        // A shielded trusted browser becomes Compromised.
+        let browser = fixture.facts("browser-a", 1000, None);
+        fixture.observe(browser.clone());
+        fixture
+            .shield
+            .lock()
+            .unwrap()
+            .admit(
+                browser.clone(),
+                platform_macos::process_shield::ShieldReasonKind::Browser,
+            )
+            .unwrap();
+        fixture
+            .shield
+            .lock()
+            .unwrap()
+            .mark_compromised(&browser.key);
+        // Own-profile read: previously Allow, now must fail closed with the
+        // stable process_integrity_compromised reason.
+        let (event, state) = fixture.event(
+            browser,
+            "browser-a",
+            ES_FFLAG_READ,
+            Some(Duration::from_secs(20)),
+        );
+        fixture.policy.handle_at(event, now);
+        assert_eq!(*state.lock().unwrap(), Terminal::Flags(0));
+        let events = fixture
+            .policy
+            .recent_events(fixture.uid, 100, None, None)
+            .unwrap();
+        assert!(events.iter().any(|event| {
+            event.reason_code.as_deref() == Some("process_integrity_compromised")
+                && event.event_code == "browser_access_denied"
+        }));
+
+        // SSH write-only open from a compromised process must NOT take the
+        // write-only allow path.
+        let reader = fixture.facts("reader", 1001, None);
+        fixture.observe(reader.clone());
+        fixture
+            .shield
+            .lock()
+            .unwrap()
+            .admit(
+                reader.clone(),
+                platform_macos::process_shield::ShieldReasonKind::Browser,
+            )
+            .unwrap();
+        fixture.shield.lock().unwrap().mark_compromised(&reader.key);
+        let (event, write_state) =
+            fixture.event(reader, "ssh", ES_FFLAG_WRITE, Some(Duration::from_secs(20)));
+        fixture.policy.handle_at(event, now + 1);
+        assert_eq!(
+            *write_state.lock().unwrap(),
+            Terminal::Flags(0),
+            "compromised instance must not be allowed by the write-only path"
+        );
+
+        // A Normal process keeps existing behavior on the same fixture.
+        let normal = fixture.facts("browser-a", 1002, None);
+        fixture.observe(normal.clone());
+        let (event, normal_state) = fixture.event(
+            normal,
+            "browser-a",
+            ES_FFLAG_READ,
+            Some(Duration::from_secs(20)),
+        );
+        fixture.policy.handle_at(event, now + 2);
+        assert_eq!(
+            *normal_state.lock().unwrap(),
+            Terminal::Flags(ES_FFLAG_READ),
+            "Normal instances must keep their existing allow"
+        );
+    }
+
+    #[test]
+    fn compromise_revokes_bound_leases_direct_and_tree_scoped() {
+        let fixture = Fixture::new();
+        // Pending resolution uses the real clock (epoch_seconds); drive the
+        // whole flow on real time with small offsets.
+        let now = epoch_seconds();
+        let importer = fixture.facts("browser-b", 2000, None);
+        fixture.observe(importer.clone());
+        let (event, state) = fixture.event(
+            importer.clone(),
+            "browser-a",
+            ES_FFLAG_READ,
+            Some(Duration::from_secs(20)),
+        );
+        fixture.policy.handle_at(event, now);
+        let pending = fixture.policy.pending_for_uid(fixture.uid);
+        assert_eq!(pending.len(), 1);
+        fixture
+            .policy
+            .resolve_migration(&pending[0].id, fixture.uid, true)
+            .unwrap();
+        assert_eq!(*state.lock().unwrap(), Terminal::Flags(ES_FFLAG_READ));
+        assert!(fixture
+            .policy
+            .lease_infos_for_uid(fixture.uid)
+            .iter()
+            .any(|lease| lease.kind == "browser_migration" && !lease.revoked));
+
+        // SSH read lease bound to a reader in the importer's tree.
+        let reader = fixture.facts("reader", 2001, Some(importer.key));
+        fixture.observe(reader.clone());
+        let (ssh_event, ssh_state) = fixture.event(
+            reader.clone(),
+            "ssh",
+            ES_FFLAG_READ,
+            Some(Duration::from_secs(20)),
+        );
+        fixture.policy.handle_at(ssh_event, now + 1);
+        let ssh_pending = fixture.policy.ssh_pending_for_uid(fixture.uid);
+        fixture
+            .policy
+            .resolve_ssh_read_at(&ssh_pending[0].id, fixture.uid, true, now + 2)
+            .unwrap();
+        assert_eq!(*ssh_state.lock().unwrap(), Terminal::Flags(ES_FFLAG_READ));
+
+        // An unrelated compromised process must not revoke anything.
+        let unrelated = fixture.facts("reader", 2005, None);
+        fixture.observe(unrelated.clone());
+        fixture.policy.handle_shield(ShieldAuditEvent::Compromised {
+            target: unrelated,
+            signal: platform_macos::process_shield::TaskNotifyKind::CsInvalidated,
+            requester: fixture.facts("reader", 2006, None),
+        });
+        let leases = fixture.policy.lease_infos_for_uid(fixture.uid);
+        assert!(
+            leases.iter().all(|lease| !lease.revoked),
+            "unrelated compromise must not revoke leases"
+        );
+
+        // The reader (in the importer's tree) becomes Compromised: the SSH
+        // lease rooted at it is revoked directly, and the migration lease is
+        // revoked because the compromised process is in its trusted tree.
+        fixture.policy.handle_shield(ShieldAuditEvent::Compromised {
+            target: reader,
+            signal: platform_macos::process_shield::TaskNotifyKind::CsInvalidated,
+            requester: fixture.facts("reader", 2003, None),
+        });
+        let leases = fixture.policy.lease_infos_for_uid(fixture.uid);
+        assert!(leases
+            .iter()
+            .filter(|lease| lease.kind == "browser_migration")
+            .all(|lease| lease.revoked && lease.state.as_deref() == Some("dead")));
+        assert!(leases
+            .iter()
+            .filter(|lease| lease.kind == "ssh_read")
+            .all(|lease| lease.revoked));
+    }
+
+    #[test]
+    fn dynamic_lease_root_is_shielded_while_live_and_unshielded_on_expiry() {
+        let fixture = Fixture::new();
+        let now = epoch_seconds();
+        let importer = fixture.facts("browser-b", 3000, None);
+        fixture.observe(importer.clone());
+        let (event, state) = fixture.event(
+            importer.clone(),
+            "browser-a",
+            ES_FFLAG_READ,
+            Some(Duration::from_secs(20)),
+        );
+        fixture.policy.handle_at(event, now);
+        let pending = fixture.policy.pending_for_uid(fixture.uid);
+        fixture
+            .policy
+            .resolve_migration(&pending[0].id, fixture.uid, true)
+            .unwrap();
+        assert_eq!(*state.lock().unwrap(), Terminal::Flags(ES_FFLAG_READ));
+
+        // While the lease is live the root is dynamically shielded.
+        let shield = fixture.shield.lock().unwrap();
+        assert!(
+            shield.is_shielded_exact(&importer),
+            "lease root must be dynamically shielded while the lease is live"
+        );
+        drop(shield);
+
+        // A Normal lease-root remains task-port protected: the resolver
+        // surfaces Normal integrity (not compromised), so File Shield still
+        // allows the browser its own profile.
+        let (event, own_state) = fixture.event(
+            importer.clone(),
+            "browser-b",
+            ES_FFLAG_READ,
+            Some(Duration::from_secs(20)),
+        );
+        fixture.policy.handle_at(event, now + 1);
+        assert_eq!(*own_state.lock().unwrap(), Terminal::Flags(ES_FFLAG_READ));
+
+        // Capability expiry while the root is still alive removes ONLY the
+        // dynamic reason.
+        fixture
+            .policy
+            .maintenance_at(now + MIGRATION_LEASE_SECS + 1);
+        let shield = fixture.shield.lock().unwrap();
+        assert!(
+            !shield.is_shielded_exact(&importer),
+            "dynamic shield reason must disappear after lease expiry"
+        );
+    }
+
+    #[test]
+    fn compromise_denies_new_protected_access_and_no_new_lease_binds() {
+        let fixture = Fixture::new();
+        let now = epoch_seconds();
+        let importer = fixture.facts("browser-b", 2100, None);
+        fixture.observe(importer.clone());
+        let (event, state) = fixture.event(
+            importer.clone(),
+            "browser-a",
+            ES_FFLAG_READ,
+            Some(Duration::from_secs(20)),
+        );
+        fixture.policy.handle_at(event, now);
+        let pending = fixture.policy.pending_for_uid(fixture.uid);
+        fixture
+            .policy
+            .resolve_migration(&pending[0].id, fixture.uid, true)
+            .unwrap();
+        assert_eq!(*state.lock().unwrap(), Terminal::Flags(ES_FFLAG_READ));
+
+        // The importer becomes Compromised: the ES callback transitions the
+        // shield state first, then the Compromised handoff runs revocation.
+        fixture
+            .shield
+            .lock()
+            .unwrap()
+            .admit(
+                importer.clone(),
+                platform_macos::process_shield::ShieldReasonKind::Browser,
+            )
+            .unwrap();
+        fixture
+            .shield
+            .lock()
+            .unwrap()
+            .mark_compromised(&importer.key);
+        fixture.policy.handle_shield(ShieldAuditEvent::Compromised {
+            target: importer.clone(),
+            signal: platform_macos::process_shield::TaskNotifyKind::CsInvalidated,
+            requester: fixture.facts("reader", 2101, None),
+        });
+
+        // Same identity now: a new protected read must be denied with the
+        // stable reason (resolver surfaces Compromised via the shield).
+        let (event, after_state) = fixture.event(
+            importer,
+            "browser-a",
+            ES_FFLAG_READ,
+            Some(Duration::from_secs(20)),
+        );
+        fixture.policy.handle_at(event, now + 1);
+        assert_eq!(
+            *after_state.lock().unwrap(),
+            Terminal::Flags(0),
+            "compromised importer must be denied for protected access"
+        );
+        let events = fixture
+            .policy
+            .recent_events(fixture.uid, 100, None, None)
+            .unwrap();
+        assert!(events.iter().any(|event| {
+            event.reason_code.as_deref() == Some("process_integrity_compromised")
+        }));
     }
 }

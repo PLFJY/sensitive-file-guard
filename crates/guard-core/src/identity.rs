@@ -11,6 +11,23 @@ use serde::{Deserialize, Serialize};
 
 use crate::resource::BrowserId;
 
+/// Live-process integrity state (Process Shield).
+///
+/// A stable process instance can transition `Normal -> Compromised` exactly
+/// once and never returns to `Normal`. Process exit destroys its live state;
+/// a new invocation is a new stable instance, so compromise is never
+/// inherited across PID reuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum ProcessIntegrity {
+    /// No confirmed compromise signal against this exact live process instance.
+    #[default]
+    Normal,
+    /// A confirmed strong compromise signal (e.g. remote-thread injection or
+    /// code-signing invalidation) has been recorded for this exact instance.
+    /// It must no longer receive protected-resource authority.
+    Compromised,
+}
+
 /// Trust tier resolved by the platform identity resolver (Phase 04).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TrustTier {
@@ -140,6 +157,11 @@ pub struct ProcessIdentity {
     pub cmdline: Vec<String>,
     /// Bounded parent/ancestor chain (closest first), for audit context.
     pub ancestors: Vec<AncestorSummary>,
+    /// Live-process integrity (Process Shield). Ordinary processes are
+    /// `Normal`; a confirmed compromised instance fails closed before
+    /// any browser/SSH policy is evaluated.
+    #[serde(default)]
+    pub integrity: ProcessIntegrity,
 }
 
 impl ProcessIdentity {

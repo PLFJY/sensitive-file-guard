@@ -14,9 +14,25 @@ typedef struct {
     size_t cdhash_len;
 } guard_code_signature_info_t;
 
+typedef struct {
+    bool has_entitlements;
+    bool get_task_allow;
+    bool allow_dyld_environment_variables;
+    bool disable_library_validation;
+    bool disable_executable_page_protection;
+    bool allow_unsigned_executable_memory;
+    bool allow_jit;
+} guard_code_signature_runtime_info_t;
+
 int guard_code_signature_inspect(
     const char *path,
     guard_code_signature_info_t *info,
+    char *error,
+    size_t error_len);
+
+int guard_code_signature_runtime_inspect(
+    const char *path,
+    guard_code_signature_runtime_info_t *info,
     char *error,
     size_t error_len);
 

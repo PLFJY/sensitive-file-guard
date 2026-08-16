@@ -26,6 +26,8 @@ pub mod notifications;
 #[cfg(target_os = "macos")]
 mod pending;
 #[cfg(target_os = "macos")]
+pub mod process_shield;
+#[cfg(target_os = "macos")]
 pub mod resource_index;
 #[cfg(target_os = "macos")]
 pub mod system_extension;

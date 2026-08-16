@@ -29,7 +29,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::enrollment::EnrollmentStore;
-use guard_core::identity::{AncestorSummary, ProcessIdentity, ProcessStableId, TrustTier};
+use guard_core::identity::{
+    AncestorSummary, ProcessIdentity, ProcessIntegrity, ProcessStableId, TrustTier,
+};
 
 /// Adapter for the portable process-identity contract. `/proc` remains
 /// entirely inside this Linux crate; the daemon sees only domain identities.
@@ -172,6 +174,9 @@ pub fn resolve(
         trust_tier,
         cmdline,
         ancestors,
+        // Linux has no Process Shield in this harness; every resolved instance
+        // is Normal so the existing fanotify behavior is preserved.
+        integrity: ProcessIntegrity::Normal,
     })
 }
 

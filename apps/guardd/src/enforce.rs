@@ -32,7 +32,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use guard_audit::AuditRecord;
 use guard_browser::{CustomProfile, ProtectedResourceRegistry};
-use guard_core::identity::{ExeIdentity, ProcessIdentity};
+use guard_core::identity::{ExeIdentity, ProcessIdentity, ProcessIntegrity};
 use guard_core::lease::{LeaseId, LeaseSet, MigrationAccessLease, MigrationLeaseState};
 #[cfg(test)]
 use guard_core::policy::evaluate;
@@ -710,7 +710,9 @@ impl EnforcementEngine {
         match &decision {
             Decision::Allow | Decision::AllowByLease(_) => self.allowed += 1,
             Decision::Deny(_) => self.denied += 1,
-            Decision::RequireMigrationConfirmation(_) | Decision::RequireSshKeyConfirmation => {}
+            Decision::RequireMigrationConfirmation(_)
+            | Decision::RequireSshKeyConfirmation
+            | Decision::Detected => {}
         }
         // Phase 11: mark one-shot SSH load lease as used after a successful
         // allow. The lease binds to the exact ssh-add invocation; once it
@@ -2323,6 +2325,7 @@ mod tests {
             browser: None,
             cmdline: vec![],
             ancestors: vec![],
+            integrity: ProcessIntegrity::Normal,
         };
         let event = AccessEvent {
             resource: res,
@@ -2392,6 +2395,7 @@ mod tests {
             browser: Some(BrowserId(browser.into())),
             cmdline: vec![],
             ancestors: vec![],
+            integrity: ProcessIntegrity::Normal,
         }
     }
 }

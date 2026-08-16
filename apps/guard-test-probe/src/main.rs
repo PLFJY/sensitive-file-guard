@@ -15,9 +15,64 @@ use std::time::{Duration, Instant};
 const CANARY_PREFIX: &[u8] = b"SDF_CANARY_";
 const MAX_CANARY_LEN: usize = 256;
 
+/// Process Shield synthetic-target canary length (MPS9). The canary is a
+/// random in-memory buffer that must never be recoverable by an untrusted
+/// probe.
+const SHIELD_CANARY_LEN: usize = 64;
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
+        Some("shield-target") if (3..=5).contains(&args.len()) => {
+            let seconds = args.get(3).and_then(|value| value.parse::<u64>().ok());
+            let protected = args.get(4).map(PathBuf::from);
+            do_shield_target(Path::new(&args[2]), seconds, protected.as_deref())
+        }
+        Some("probe-task") if args.len() == 4 => {
+            let pid = match args[2].parse::<i32>() {
+                Ok(pid) => pid,
+                Err(_) => {
+                    eprintln!("guard-test-probe: TARGET_PID must be an integer");
+                    return ExitCode::from(2);
+                }
+            };
+            do_probe_task(pid, &args[3])
+        }
+        Some("probe-memory") if args.len() == 3 => {
+            let pid = match args[2].parse::<i32>() {
+                Ok(pid) => pid,
+                Err(_) => {
+                    eprintln!("guard-test-probe: TARGET_PID must be an integer");
+                    return ExitCode::from(2);
+                }
+            };
+            do_probe_memory(pid)
+        }
+        Some("shield-target") if (3..=5).contains(&args.len()) => {
+            let seconds = args.get(3).and_then(|value| value.parse::<u64>().ok());
+            let protected = args.get(4).map(PathBuf::from);
+            do_shield_target(Path::new(&args[2]), seconds, protected.as_deref())
+        }
+        Some("probe-task") if args.len() == 4 => {
+            let pid = match args[2].parse::<i32>() {
+                Ok(pid) => pid,
+                Err(_) => {
+                    eprintln!("guard-test-probe: TARGET_PID must be an integer");
+                    return ExitCode::from(2);
+                }
+            };
+            do_probe_task(pid, &args[3])
+        }
+        Some("probe-memory") if args.len() == 3 => {
+            let pid = match args[2].parse::<i32>() {
+                Ok(pid) => pid,
+                Err(_) => {
+                    eprintln!("guard-test-probe: TARGET_PID must be an integer");
+                    return ExitCode::from(2);
+                }
+            };
+            do_probe_memory(pid)
+        }
         Some("read") if args.len() == 3 => do_read(Path::new(&args[2])),
         Some("mmap") if args.len() == 3 => do_mmap(Path::new(&args[2])),
         Some("sqlite") if args.len() == 3 => do_sqlite(Path::new(&args[2])),
@@ -110,8 +165,217 @@ fn print_usage() {
            alias-race TARGET STAGING_DIR EXTERNAL_ALIAS ITERATIONS
            promote-rename STAGED TARGET EXTERNAL
            deny-rename-retry TARGET EXTERNAL
-           transit-rename STAGED TARGET EXTERNAL"
+           transit-rename STAGED TARGET EXTERNAL
+           shield-target READY_FILE [SECONDS] [PROTECTED_FILE]
+           probe-task TARGET_PID control|read
+           probe-memory TARGET_PID"
     );
+}
+
+/// MPS9 synthetic shielded target: allocates a random in-memory canary,
+/// writes its identity to READY_FILE (PID + hex canary), then stays alive
+/// (default 30s) so untrusted probes can attempt local task-port operations
+/// against it. No real browser/session data; no networking.
+fn do_shield_target(
+    ready_file: &Path,
+    seconds: Option<u64>,
+    protected_file: Option<&Path>,
+) -> ExitCode {
+    let mut canary = [0u8; SHIELD_CANARY_LEN];
+    // Fresh random canary per invocation from the system entropy source.
+    if let Ok(mut random) = File::open("/dev/urandom") {
+        use std::io::Read as _;
+        let _ = random.read_exact(&mut canary);
+    }
+    let hex = canary
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let pid = std::process::id();
+    let ready = format!("{pid} {hex}\n");
+    if let Err(error) = std::fs::write(ready_file, ready) {
+        eprintln!("guard-test-probe: cannot write shield-target ready file: {error}");
+        return ExitCode::from(2);
+    }
+    println!("SHIELD_TARGET pid={pid} canary={hex}");
+    let _ = std::io::stdout().flush();
+    let seconds = seconds.unwrap_or(30);
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(200));
+        // Keep the canary reachable so a successful vm_read would find it.
+        let _ = std::hint::black_box(canary);
+        if let Some(protected) = protected_file {
+            match std::fs::read(protected) {
+                Ok(bytes) => {
+                    println!("SHIELD_TARGET_READ ok bytes={}", bytes.len());
+                    let _ = std::io::stdout().flush();
+                }
+                Err(error) => {
+                    println!("SHIELD_TARGET_READ denied error={error}");
+                    let _ = std::io::stdout().flush();
+                }
+            }
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+fn self_task_port() -> u32 {
+    // SAFETY: mach_task_self() has no preconditions and returns the caller's
+    // own task port name.
+    unsafe { mach_task_self() }
+}
+
+/// MPS9 untrusted task-port probe: attempt to obtain a task control or task
+/// read port for TARGET_PID. Prints the kernel result. No networking.
+fn do_probe_task(target_pid: i32, kind: &str) -> ExitCode {
+    let mut port: u32 = 0;
+    let result = match kind {
+        "control" => unsafe { task_for_pid(self_task_port(), target_pid, &mut port) },
+        "read" => unsafe { task_read_for_pid(self_task_port(), target_pid, &mut port) },
+        _ => {
+            eprintln!("guard-test-probe: probe-task kind must be control or read");
+            return ExitCode::from(2);
+        }
+    };
+    println!("PROBE_TASK kind={kind} target={target_pid} result={result} port={port}");
+    if result == 0 && port != 0 {
+        eprintln!("guard-test-probe: UNEXPECTED: usable task port obtained");
+        return ExitCode::from(3);
+    }
+    if result == 0 {
+        return ExitCode::SUCCESS;
+    }
+    ExitCode::from(4)
+}
+
+/// MPS9 memory probe: after attempting task read acquisition, scan a bounded
+/// range of the target's address space with vm_read and report whether any
+/// readable page was recovered (the canary itself is never dumped). When the
+/// task read port was denied, the scan cannot run at all.
+fn do_probe_memory(target_pid: i32) -> ExitCode {
+    let mut port: u32 = 0;
+    let read_result = unsafe { task_read_for_pid(mach_task_self(), target_pid, &mut port) };
+    let mut recovered_pages = 0u64;
+    let mut page: u64 = 0x1000; // skip the null page
+    const PAGE_SIZE: u64 = 0x1000;
+    while page < 0x10_0000_0000 {
+        let mut data: u32 = 0;
+        let mut count: u32 = 0;
+        let result = unsafe { vm_read(port, page, PAGE_SIZE, &mut data, &mut count) };
+        if result == 0 && count > 0 {
+            recovered_pages += 1;
+            // SAFETY: vm_read returned a kernel-owned buffer of `count` bytes.
+            let bytes = unsafe { std::slice::from_raw_parts(data as *const u8, count as usize) };
+            let _ = std::hint::black_box(bytes);
+            unsafe { vm_deallocate(self_task_port(), data as u64, count as u64) };
+            if recovered_pages >= 64 {
+                break;
+            }
+        }
+        page += PAGE_SIZE;
+    }
+    println!(
+        "PROBE_MEMORY target={target_pid} task_read_result={read_result} recovered_pages={recovered_pages}"
+    );
+    if recovered_pages == 0 {
+        ExitCode::SUCCESS
+    } else {
+        // Any readable page would contain the canary; report as recoverable.
+        ExitCode::from(5)
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod mach {
+    #![allow(non_camel_case_types)]
+    pub type kern_return_t = i32;
+    pub type mach_port_t = u32;
+    pub type mach_vm_address_t = u64;
+    pub type mach_vm_size_t = u64;
+    pub type vm_offset_t = u32;
+    pub type mach_msg_type_number_t = u32;
+    #[allow(dead_code)]
+    pub type vm_size_t = u64;
+
+    #[link(name = "System", kind = "framework")]
+    extern "C" {
+        pub fn mach_task_self() -> mach_port_t;
+        pub fn task_for_pid(target: mach_port_t, pid: i32, task: *mut mach_port_t)
+            -> kern_return_t;
+        pub fn task_read_for_pid(
+            target: mach_port_t,
+            pid: i32,
+            task: *mut mach_port_t,
+        ) -> kern_return_t;
+        pub fn vm_read(
+            task: mach_port_t,
+            address: mach_vm_address_t,
+            size: mach_vm_size_t,
+            data: *mut vm_offset_t,
+            data_count: *mut mach_msg_type_number_t,
+        ) -> kern_return_t;
+        pub fn vm_deallocate(
+            task: mach_port_t,
+            address: mach_vm_address_t,
+            size: mach_vm_size_t,
+        ) -> kern_return_t;
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+mod mach {
+    #![allow(non_camel_case_types)]
+    pub type kern_return_t = i32;
+    pub type mach_port_t = u32;
+    pub type mach_vm_address_t = u64;
+    pub type mach_vm_size_t = u64;
+    pub type vm_offset_t = u32;
+    pub type mach_msg_type_number_t = u32;
+    pub type vm_size_t = u64;
+}
+
+#[cfg(target_os = "macos")]
+use mach::{mach_task_self, task_for_pid, task_read_for_pid, vm_deallocate, vm_read};
+
+#[cfg(not(target_os = "macos"))]
+unsafe fn task_for_pid(
+    _t: mach::mach_port_t,
+    _p: i32,
+    _task: *mut mach::mach_port_t,
+) -> mach::kern_return_t {
+    -5
+}
+#[cfg(not(target_os = "macos"))]
+unsafe fn task_read_for_pid(
+    _t: mach::mach_port_t,
+    _p: i32,
+    _task: *mut mach::mach_port_t,
+) -> mach::kern_return_t {
+    -5
+}
+#[cfg(not(target_os = "macos"))]
+unsafe fn vm_read(
+    _t: mach::mach_port_t,
+    _a: mach::mach_vm_address_t,
+    _s: mach::mach_vm_size_t,
+    _d: *mut mach::vm_offset_t,
+    _c: *mut mach::mach_msg_type_number_t,
+) -> mach::kern_return_t {
+    -5
+}
+#[cfg(not(target_os = "macos"))]
+unsafe fn vm_deallocate(
+    _t: mach::mach_port_t,
+    _a: mach::mach_vm_address_t,
+    _s: mach::mach_vm_size_t,
+) -> mach::kern_return_t {
+    -5
+}
+#[cfg(not(target_os = "macos"))]
+unsafe fn mach_task_self() -> mach::mach_port_t {
+    0
 }
 
 fn do_read(path: &Path) -> ExitCode {

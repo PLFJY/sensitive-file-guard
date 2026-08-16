@@ -115,6 +115,23 @@ pub struct BackendHealth {
     pub namespace_alias_capacity: usize,
     pub namespace_index_saturated: bool,
     pub process_graph_degraded: bool,
+    // Process Shield health (MPS2+). task_read_supported is runtime
+    // feature-detected and never faked: when false, task-read prevention is
+    // not enforced and health must report Reduced.
+    pub task_control_allowed: u64,
+    pub task_control_denied: u64,
+    pub task_read_allowed: u64,
+    pub task_read_denied: u64,
+    pub task_read_supported: bool,
+    pub task_notify_supported: bool,
+    pub shield_admitted: u64,
+    pub shield_compromised: u64,
+    pub shield_launch_injection_denied: u64,
+    pub shield_malformed_denied: u64,
+    pub shield_task_notify_obtained: u64,
+    pub shield_trace_observed: u64,
+    pub shield_remote_thread_observed: u64,
+    pub shield_cs_invalidated_observed: u64,
 }
 
 /// Portable artifact attribution input.  Quarantine mechanics remain an

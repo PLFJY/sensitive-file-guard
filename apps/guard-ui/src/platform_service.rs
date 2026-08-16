@@ -216,8 +216,24 @@ pub fn overview_detail(
                 )
             },
             |status| {
+                let shield = status
+                    .mac_health
+                    .as_ref()
+                    .and_then(|health| health.process_shield.as_ref())
+                    .map(|shield| {
+                        format!(
+                            " · Process Shield: {} (task control: {}, task read: {}, launch integrity: {}, injection telemetry: {}, posture: {})",
+                            shield.state,
+                            shield.task_control_protection,
+                            shield.task_read_protection,
+                            shield.launch_integrity,
+                            shield.injection_telemetry,
+                            shield.runtime_posture,
+                        )
+                    })
+                    .unwrap_or_default();
                 format!(
-                    "Backend: {} · Protection extension: {} · Full Disk Access: {} · Policy: {} · Read-only migration: {} · Confirmation helper: {} · Allowed: {} · Denied: {}",
+                    "Backend: {} · Protection extension: {} · Full Disk Access: {} · Policy: {} · Read-only migration: {} · Confirmation helper: {} · Allowed: {} · Denied: {}{}",
                     status.backend_kind,
                     overview.extension_state,
                     overview.full_disk_access,
@@ -229,7 +245,8 @@ pub fn overview_detail(
                     },
                     overview.helper_state,
                     status.allowed,
-                    status.denied
+                    status.denied,
+                    shield
                 )
             },
         );

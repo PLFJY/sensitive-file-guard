@@ -11,7 +11,9 @@ pub mod logging;
 pub mod policy;
 pub mod resource;
 
-pub use identity::{AncestorSummary, ProcessIdentity, ProcessStableId, StableIdentity, TrustTier};
+pub use identity::{
+    AncestorSummary, ProcessIdentity, ProcessIntegrity, ProcessStableId, StableIdentity, TrustTier,
+};
 pub use lease::{
     LeaseId, LeaseSet, MigrationAccessLease, MigrationLeaseState, SshLoadLease, SshReadAccessLease,
 };

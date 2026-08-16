@@ -3,6 +3,7 @@
 #include <EndpointSecurity/EndpointSecurity.h>
 #include <bsm/libbsm.h>
 #include <mach/mach_time.h>
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -13,6 +14,46 @@ struct guard_es_client {
 // Public ES headers expose codesigning_flags but the SDK does not install the
 // XNU cs_blobs header that names bit zero. Keep this one stable ABI bit local.
 #define GUARD_CS_VALID 0x00000001u
+
+// Code-loading / search-path DYLD variables that a shielded-eligible exec
+// must not carry. Harmless diagnostic DYLD variables (e.g. DYLD_PRINT_*,
+// DYLD_IMAGE_SUFFIX for debug builds) are deliberately NOT flagged here.
+typedef struct {
+    const char *name;
+    bool *flag;
+} guard_dyld_flag_slot;
+
+static void guard_inspect_exec_env(
+    const es_event_exec_t *event,
+    guard_es_exec_event_t *event_out) {
+    guard_dyld_flag_slot slots[] = {
+        {"DYLD_INSERT_LIBRARIES", &event_out->dyld_insert_libraries},
+        {"DYLD_LIBRARY_PATH", &event_out->dyld_library_path},
+        {"DYLD_FRAMEWORK_PATH", &event_out->dyld_framework_path},
+        {"DYLD_FALLBACK_LIBRARY_PATH", &event_out->dyld_fallback_library_path},
+        {"DYLD_FALLBACK_FRAMEWORK_PATH", &event_out->dyld_fallback_framework_path},
+        {"DYLD_ROOT_PATH", &event_out->dyld_root_path},
+    };
+    uint32_t count = es_exec_env_count(event);
+    for (uint32_t i = 0; i < count; i++) {
+        es_string_token_t token = es_exec_env(event, i);
+        // Each entry is "NAME=value"; only the name up to '=' is compared.
+        size_t name_len = token.length;
+        for (size_t j = 0; j < token.length; j++) {
+            if (token.data[j] == '=') {
+                name_len = j;
+                break;
+            }
+        }
+        for (size_t s = 0; s < sizeof(slots) / sizeof(slots[0]); s++) {
+            if (name_len == strlen(slots[s].name) &&
+                memcmp(token.data, slots[s].name, name_len) == 0) {
+                *slots[s].flag = true;
+                break;
+            }
+        }
+    }
+}
 
 static uint64_t guard_start_time_us(uint32_t message_version, const es_process_t *process) {
     if (message_version < 3 || process->start_time.tv_sec < 0 || process->start_time.tv_usec < 0) {
@@ -104,10 +145,15 @@ int guard_es_client_create(
     guard_es_auth_open_callback_t callback,
     guard_es_process_callback_t process_callback,
     guard_es_namespace_callback_t namespace_callback,
+    guard_es_exec_callback_t exec_callback,
+    guard_es_task_callback_t task_callback,
+    guard_es_task_notify_callback_t task_notify_callback,
     guard_es_sequence_callback_t sequence_callback,
     void *context) {
     if (client == NULL || callback == NULL || process_callback == NULL ||
-        namespace_callback == NULL || sequence_callback == NULL) {
+        namespace_callback == NULL || exec_callback == NULL ||
+        task_callback == NULL || task_notify_callback == NULL ||
+        sequence_callback == NULL) {
         return 1;
     }
     *client = NULL;
@@ -125,6 +171,15 @@ int guard_es_client_create(
             case ES_EVENT_TYPE_NOTIFY_EXIT: stable_event_kind = 4; break;
             case ES_EVENT_TYPE_AUTH_LINK: stable_event_kind = 5; break;
             case ES_EVENT_TYPE_AUTH_RENAME: stable_event_kind = 6; break;
+            case ES_EVENT_TYPE_AUTH_EXEC: stable_event_kind = 7; break;
+            case ES_EVENT_TYPE_AUTH_GET_TASK: stable_event_kind = 8; break;
+            case ES_EVENT_TYPE_AUTH_GET_TASK_READ: stable_event_kind = 9; break;
+            case ES_EVENT_TYPE_NOTIFY_GET_TASK: stable_event_kind = 10; break;
+            case ES_EVENT_TYPE_NOTIFY_GET_TASK_READ: stable_event_kind = 11; break;
+            case ES_EVENT_TYPE_NOTIFY_TRACE: stable_event_kind = 12; break;
+            case ES_EVENT_TYPE_NOTIFY_REMOTE_THREAD_CREATE: stable_event_kind = 13; break;
+            case ES_EVENT_TYPE_NOTIFY_CS_INVALIDATED: stable_event_kind = 14; break;
+            case ES_EVENT_TYPE_AUTH_MMAP: stable_event_kind = 15; break;
             default: break;
         }
         sequence_callback(
@@ -203,6 +258,81 @@ int guard_es_client_create(
             namespace_callback(context, es_client, message, &normalized);
             return;
         }
+        if (message->action_type == ES_ACTION_TYPE_AUTH &&
+            message->event_type == ES_EVENT_TYPE_AUTH_EXEC) {
+            guard_es_exec_event_t normalized;
+            memset(&normalized, 0, sizeof(normalized));
+            normalized.deadline = message->deadline;
+            guard_inspect_exec_env(&message->event.exec, &normalized);
+            guard_normalize_process(message->version, message->process, &normalized.process);
+            guard_normalize_process(message->version, message->event.exec.target, &normalized.target);
+            exec_callback(context, es_client, message, &normalized);
+            return;
+        }
+        if (message->action_type == ES_ACTION_TYPE_AUTH &&
+            (message->event_type == ES_EVENT_TYPE_AUTH_GET_TASK ||
+             message->event_type == ES_EVENT_TYPE_AUTH_GET_TASK_READ)) {
+            guard_es_task_event_t normalized;
+            memset(&normalized, 0, sizeof(normalized));
+            normalized.deadline = message->deadline;
+            guard_normalize_process(message->version, message->process, &normalized.process);
+            guard_normalize_process(
+                message->version,
+                message->event_type == ES_EVENT_TYPE_AUTH_GET_TASK
+                    ? message->event.get_task.target
+                    : message->event.get_task_read.target,
+                &normalized.target);
+            task_callback(
+                context,
+                message->event_type == ES_EVENT_TYPE_AUTH_GET_TASK ? 8u : 9u,
+                es_client,
+                message,
+                &normalized);
+            return;
+        }
+        if (message->action_type == ES_ACTION_TYPE_NOTIFY &&
+            (message->event_type == ES_EVENT_TYPE_NOTIFY_GET_TASK ||
+             message->event_type == ES_EVENT_TYPE_NOTIFY_GET_TASK_READ ||
+             message->event_type == ES_EVENT_TYPE_NOTIFY_TRACE ||
+             message->event_type == ES_EVENT_TYPE_NOTIFY_REMOTE_THREAD_CREATE ||
+             message->event_type == ES_EVENT_TYPE_NOTIFY_CS_INVALIDATED)) {
+            guard_es_task_event_t normalized;
+            memset(&normalized, 0, sizeof(normalized));
+            normalized.deadline = 0;
+            guard_normalize_process(message->version, message->process, &normalized.process);
+            switch (message->event_type) {
+                case ES_EVENT_TYPE_NOTIFY_GET_TASK:
+                    normalized.target = normalized.process;
+                    guard_normalize_process(
+                        message->version, message->event.get_task.target, &normalized.target);
+                    task_notify_callback(context, 10u, &normalized);
+                    return;
+                case ES_EVENT_TYPE_NOTIFY_GET_TASK_READ:
+                    guard_normalize_process(
+                        message->version, message->event.get_task_read.target, &normalized.target);
+                    task_notify_callback(context, 11u, &normalized);
+                    return;
+                case ES_EVENT_TYPE_NOTIFY_TRACE:
+                    guard_normalize_process(
+                        message->version, message->event.trace.target, &normalized.target);
+                    task_notify_callback(context, 12u, &normalized);
+                    return;
+                case ES_EVENT_TYPE_NOTIFY_REMOTE_THREAD_CREATE:
+                    guard_normalize_process(
+                        message->version,
+                        message->event.remote_thread_create.target,
+                        &normalized.target);
+                    task_notify_callback(context, 13u, &normalized);
+                    return;
+                case ES_EVENT_TYPE_NOTIFY_CS_INVALIDATED:
+                    // The affected process is message->process itself.
+                    normalized.target = normalized.process;
+                    task_notify_callback(context, 14u, &normalized);
+                    return;
+                default:
+                    break;
+            }
+        }
         if (message->action_type != ES_ACTION_TYPE_AUTH ||
             message->event_type != ES_EVENT_TYPE_AUTH_OPEN) {
             callback(context, es_client, message, NULL);
@@ -244,8 +374,35 @@ int guard_es_client_subscribe_required(guard_es_client_t *client) {
         ES_EVENT_TYPE_NOTIFY_EXIT,
         ES_EVENT_TYPE_AUTH_LINK,
         ES_EVENT_TYPE_AUTH_RENAME,
+        ES_EVENT_TYPE_AUTH_EXEC,
+        ES_EVENT_TYPE_AUTH_GET_TASK,
     };
-    return es_subscribe(client->client, events, 6) == ES_RETURN_SUCCESS ? 0 : -1;
+    if (es_subscribe(client->client, events, 8) != ES_RETURN_SUCCESS) {
+        return -1;
+    }
+    return 0;
+}
+
+int guard_es_client_subscribe_task_read(guard_es_client_t *client) {
+    if (client == NULL || client->client == NULL) {
+        return -1;
+    }
+    es_event_type_t event = ES_EVENT_TYPE_AUTH_GET_TASK_READ;
+    return es_subscribe(client->client, &event, 1) == ES_RETURN_SUCCESS ? 0 : -1;
+}
+
+int guard_es_client_subscribe_task_notify(guard_es_client_t *client) {
+    if (client == NULL || client->client == NULL) {
+        return -1;
+    }
+    es_event_type_t events[] = {
+        ES_EVENT_TYPE_NOTIFY_GET_TASK,
+        ES_EVENT_TYPE_NOTIFY_GET_TASK_READ,
+        ES_EVENT_TYPE_NOTIFY_TRACE,
+        ES_EVENT_TYPE_NOTIFY_REMOTE_THREAD_CREATE,
+        ES_EVENT_TYPE_NOTIFY_CS_INVALIDATED,
+    };
+    return es_subscribe(client->client, events, 5) == ES_RETURN_SUCCESS ? 0 : -1;
 }
 
 int guard_es_client_delete(guard_es_client_t *client) {

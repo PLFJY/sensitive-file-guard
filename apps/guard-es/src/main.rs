@@ -57,14 +57,16 @@ fn run_poc() -> ExitCode {
             return ExitCode::from(78);
         }
     };
-    let config =
-        match EndpointSecurityConfig::synthetic_exact_paths([PathBuf::from(protected_file)]) {
-            Ok(config) => config,
-            Err(error) => {
-                eprintln!("guard-es: invalid synthetic fixture configuration: {error}");
-                return ExitCode::from(78);
-            }
-        };
+    let config = match EndpointSecurityConfig::synthetic_with_shield(
+        [PathBuf::from(protected_file)],
+        [allowed_executable.clone()],
+    ) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("guard-es: invalid synthetic fixture configuration: {error}");
+            return ExitCode::from(78);
+        }
+    };
     let backend = match EndpointSecurityBackend::start(config) {
         Ok(backend) => backend,
         Err(error) => {
@@ -72,21 +74,64 @@ fn run_poc() -> ExitCode {
             return ExitCode::from(78);
         }
     };
-    eprintln!("guard-es: development AUTH_OPEN PoC active for one synthetic fixture; cache=false");
+    let shield = backend.process_shield();
+    // Optional controlled compromise fixture (test-only): when a PID is
+    // written to this file, the exact live instance is transitioned via the
+    // same strong-signal path used by real notify-only compromise events.
+    let compromise_file = option_env!("GUARD_ES_POC_COMPROMISE_FILE").map(PathBuf::from);
+    eprintln!("guard-es: development AUTH_OPEN+Process Shield PoC active for one synthetic fixture; cache=false");
     loop {
-        match backend.recv_timeout(Duration::from_secs(1)) {
-            Ok(event)
-                if event.facts.process.executable.path == allowed_executable
-                    && event.facts.process.executable.dev == allowed_metadata.dev()
-                    && event.facts.process.executable.ino == allowed_metadata.ino() =>
-            {
-                if let Err(error) = event.permission.allow() {
-                    eprintln!("guard-es: synthetic allow response failed: {error}");
+        // Drain metadata-only Process Shield audit handoffs.
+        match backend.recv_shield_timeout(Duration::from_millis(50)) {
+            Ok(event) => {
+                eprintln!("guard-es: shield event: {event:?}");
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                eprintln!("guard-es: Process Shield audit handoff queue disconnected");
+                return ExitCode::FAILURE;
+            }
+        }
+        if let Some(file) = &compromise_file {
+            if let Ok(pid_text) = std::fs::read_to_string(file) {
+                if let Ok(pid) = pid_text.trim().parse::<u32>() {
+                    let mut shield = shield
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if let Some(facts) = shield.current(pid).cloned() {
+                        let outcome = shield.apply_strong_signal(&facts);
+                        drop(shield);
+                        if outcome
+                            == platform_macos::process_shield::StrongSignalOutcome::CompromisedNow
+                        {
+                            eprintln!(
+                                "guard-es: synthetic compromise fixture applied to pid={pid}"
+                            );
+                        }
+                    }
+                    let _ = std::fs::remove_file(file);
                 }
             }
+        }
+        match backend.recv_timeout(Duration::from_secs(1)) {
             Ok(event) => {
-                if let Err(error) = event.permission.deny() {
-                    eprintln!("guard-es: synthetic deny response failed: {error}");
+                let compromised = shield
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .integrity_of_pid(event.facts.process.key.pid)
+                    != guard_core::ProcessIntegrity::Normal;
+                if !compromised
+                    && event.facts.process.executable.path == allowed_executable
+                    && event.facts.process.executable.dev == allowed_metadata.dev()
+                    && event.facts.process.executable.ino == allowed_metadata.ino()
+                {
+                    if let Err(error) = event.permission.allow() {
+                        eprintln!("guard-es: synthetic allow response failed: {error}");
+                    }
+                } else {
+                    if let Err(error) = event.permission.deny() {
+                        eprintln!("guard-es: synthetic deny response failed: {error}");
+                    }
                 }
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
