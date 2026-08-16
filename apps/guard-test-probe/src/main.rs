@@ -253,7 +253,10 @@ fn do_probe_task(target_pid: i32, kind: &str) -> ExitCode {
 /// MPS9 memory probe: after attempting task read acquisition, scan a bounded
 /// range of the target's address space with vm_read and report whether any
 /// readable page was recovered (the canary itself is never dumped). When the
-/// task read port was denied, the scan cannot run at all.
+/// task read port was denied, the scan cannot run at all, so `recovered_pages
+/// == 0` means no usable task-read capability was acquired (the denial was
+/// already proven by `probe-task read` exit 4); it is NOT a proof that the
+/// canary specifically is unreachable in every mapping.
 fn do_probe_memory(target_pid: i32) -> ExitCode {
     let mut port: u32 = 0;
     let read_result = unsafe { task_read_for_pid(mach_task_self(), target_pid, &mut port) };
@@ -282,7 +285,9 @@ fn do_probe_memory(target_pid: i32) -> ExitCode {
     if recovered_pages == 0 {
         ExitCode::SUCCESS
     } else {
-        // Any readable page would contain the canary; report as recoverable.
+        // Any readable page proves a usable task-read capability exists;
+        // report as recoverable (the canary-specific assertion is the
+        // probe-task read denial above).
         ExitCode::from(5)
     }
 }

@@ -39,12 +39,14 @@ extension active.
 | harmless diagnostic DYLD var (DYLD_PRINT_LIBRARIES) -> allowed | PASS |
 | controlled compromise fixture -> exact target Compromised; its protected read denied | PASS |
 | fresh instance of same executable after compromise -> Normal, read allowed | PASS |
-| shield audit handoffs observed (metadata only) | PASS |
+| shield audit events queryable via authenticated guardctl events (real check) | PASS |
+| audit rows contain no canary bytes and no protected-file contents | PASS |
 
-Summary line from the run:
+Summary line from the run (MPS Hardening re-run; the earlier `true`-only audit
+assertion was replaced by real guardctl events + canary-absence checks):
 
 ```text
-=== MPS9 SUMMARY pass=9 fail=0 ===
+=== MPS9 SUMMARY pass=11 fail=0 ===
 NATIVE SYNTHETIC ACCEPTANCE PASS
 ```
 

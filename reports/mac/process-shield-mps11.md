@@ -27,25 +27,34 @@ traced via coreservicesd logs:
   corerepaird, ...) routinely obtain task capabilities on GUI processes.
 - The MPS2 zero-exception policy denied all of these => browsers cannot launch.
 
-## Exceptions added (documented, narrow)
+## Exceptions added (documented, exact-ID + kind)
 
-`task_access_allowlist` (process_shield.rs) now allows task access from
-**kernel-verified Apple platform binaries** (uid 0 + `valid` +
-`platform_binary` + `com.apple.*` signing id or absent):
-- coreservicesd SCSession universe registration (the specific abort trigger);
-- general macOS session/process management by platform daemons.
-- The `platform_binary` flag is kernel-verified (Apple platform chain),
-  unforgeable by a same-user attacker; this is NOT an "Apple signed => allow"
-  rule (developer/App-Store certs and user processes never qualify), and it
-  is NOT Team-ID based.
+`task_access_allowlist` (process_shield.rs) is narrowed to EXACT signing-ID +
+TaskAccessKind pairs (MPS Hardening). A requester qualifies only when ALL of:
+- uid 0 + `valid` + kernel-verified `platform_binary` (unforgeable by a
+  same-user attacker; never Apple-signer developer/App-Store certs, user
+  processes, or Team-ID matches);
+- its exact signing ID is on the CONTROL allowlist for task control, or on
+  the strictly narrower READ allowlist for task read (memory contents).
+- task READ additionally requires the target to be signed (not unsigned).
 
-## MPS11 adjustment to compromise signals (documented)
+Control allowlist (observed managing processes/sessions): coreservicesd,
+launchd, amfid, watchdogd, configd, UserEventAgent, fseventsd, powerd, apsd,
+xprotectd, logd, dasd, notifyd, logind, autofsd, remoted, KernelEventAgent,
+opendirectoryd, kernelmanagerd, thermalmonitord, diskarbitrationd,
+corerepaird. Read allowlist: coreservicesd only (SCSession registration
+evidence). `lsd` is NOT allowed (removed by the narrowing).
 
-NOTIFY_GET_TASK/GET_TASK_READ fire routinely on real browsers for legitimate
-macOS + browser-internal task operations; treating them as strong signals
-marked every browser process Compromised on launch. Per observed evidence,
-task-capability notifies are now TELEMETRY (like TRACE); only
-NOTIFY_REMOTE_THREAD_CREATE and NOTIFY_CS_INVALIDATED remain strong signals.
+## MPS Hardening: contextual NOTIFY_GET_TASK(_READ) signals
+
+Apple semantics: NOTIFY_GET_TASK(_READ) fires AFTER the requester actually
+obtained the task capability. So an acquisition that was NOT legitimate
+under our own task allowlist means the requester got task capability despite
+our prevention -> strong compromise signal. Allowlisted Apple platform
+daemons stay telemetry; TRACE stays telemetry; NOTIFY_REMOTE_THREAD_CREATE
+and NOTIFY_CS_INVALIDATED remain always-strong. This replaces the earlier
+event-kind-level downgrade (all GET_TASK notifies as telemetry) with a
+contextual strong-signal decision.
 
 ## Disposable-browser results (real host, extension active)
 
@@ -80,11 +89,26 @@ same-user processes.
   event feed can see task-attack denials even when the requester is root.
 - Notify-only task telemetry records use `Decision::Detected` (never
   PREVENTED).
+- Notify events whose target is NOT a shielded exact instance are now
+  dropped entirely (no telemetry, no audit row): the system-wide notify
+  subscriptions cannot spam the Guard audit queue with unrelated traffic.
+
+## Warm-start coverage (MPS Hardening)
+
+A shield-eligible process (enrolled browser or Guard component) that was
+ALREADY RUNNING when guard-es/ES restarted was never admitted via AUTH_EXEC
+and previously allowed task access (the warm-start gap). `handle_task` now
+admits such a target as `PreexistingUnverified` (admission kind recorded in
+the shield entry) and falls through to the normal shielded decision path, so
+non-allowlisted requesters are DENIED and File Shield reports Reduced
+("N already-running shield-eligible process(es) predate Process Shield;
+restart them for Strong launch integrity") until the browser restarts and is
+re-admitted via AUTH_EXEC.
 
 ## Tests
 
 ```text
-cargo test -p platform-macos --lib (96 tests) PASS
+cargo test -p platform-macos --lib (98 tests incl. preexisting/contextual) PASS
 cargo clippy --workspace --all-targets --all-features -- -D warnings PASS
 ```
 

@@ -218,9 +218,29 @@ sleep 3
 check "new instance is Normal and protected read allowed" \
     sh -c "[ -n \"$target4_pid\" ] && grep -q 'SHIELD_TARGET_READ ok' \"$fixture_dir/target4.log\""
 
-# 10. Audit metadata only: shield events observed in the guard-es log.
-sleep 1
-check "shield audit events observed" true
+# 10. Real audit verification: shield events must be queryable through the
+# authenticated XPC (guardctl events), and the audit output must contain no
+# canary bytes and no protected-file contents (metadata-only contract).
+guardctl="$installed_app/Contents/MacOS/guardctl"
+sleep 2
+events=$("$guardctl" --json events --limit 1000 2>/dev/null || true)
+if printf "%s\n" "$events" | grep -q "process_shield_exec_admitted"     && printf "%s\n" "$events" | grep -qE "process_shield_task_(control|read)_denied"; then
+    check "shield audit events queryable via guardctl" true
+else
+    echo "audit events unavailable:" >&2
+    printf "%s\n" "$events" | head -20 >&2 || true
+    check "shield audit events queryable via guardctl" false
+fi
+if printf "%s\n" "$events" | grep -qF "$canary"; then
+    check "audit contains no canary bytes" false
+else
+    check "audit contains no canary bytes" true
+fi
+if printf "%s\n" "$events" | grep -qF "SDF_CANARY"; then
+    check "audit contains no protected-file contents" false
+else
+    check "audit contains no protected-file contents" true
+fi
 echo "shield-event fixture dir: $fixture_dir"
 
 : >"$watchdog_stop"

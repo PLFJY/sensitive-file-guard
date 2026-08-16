@@ -451,6 +451,8 @@ pub struct MacHealthInfo {
     #[serde(default)]
     pub shield_admitted: u64,
     #[serde(default)]
+    pub shield_preexisting: u64,
+    #[serde(default)]
     pub shield_compromised: u64,
     #[serde(default)]
     pub shield_launch_injection_denied: u64,
@@ -495,6 +497,7 @@ pub struct ProcessShieldInfo {
     pub task_read_allowed: u64,
     pub task_read_denied: u64,
     pub shield_admitted: u64,
+    pub shield_preexisting: u64,
     pub shield_compromised: u64,
     pub launch_injection_denied: u64,
     pub trace_observed: u64,

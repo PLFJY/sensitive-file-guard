@@ -125,6 +125,9 @@ pub struct BackendHealth {
     pub task_read_supported: bool,
     pub task_notify_supported: bool,
     pub shield_admitted: u64,
+    /// Shield-eligible instances admitted as PreexistingUnverified (warm
+    /// start / ES restart); File Shield reports Reduced until restart.
+    pub shield_preexisting: u64,
     pub shield_compromised: u64,
     pub shield_launch_injection_denied: u64,
     pub shield_malformed_denied: u64,

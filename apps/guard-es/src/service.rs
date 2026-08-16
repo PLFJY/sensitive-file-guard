@@ -291,6 +291,7 @@ impl ControlHandler {
                 task_read_supported: health.task_read_supported,
                 task_notify_supported: health.task_notify_supported,
                 shield_admitted: health.shield_admitted,
+                shield_preexisting: health.shield_preexisting,
                 shield_compromised: health.shield_compromised,
                 shield_launch_injection_denied: health.shield_launch_injection_denied,
                 shield_malformed_denied: health.shield_malformed_denied,
@@ -466,6 +467,7 @@ pub fn run() -> ExitCode {
                 task_read_supported: false,
                 task_notify_supported: false,
                 shield_admitted: 0,
+                shield_preexisting: 0,
                 shield_compromised: 0,
                 shield_launch_injection_denied: 0,
                 shield_malformed_denied: 0,
@@ -555,22 +557,30 @@ fn process_shield_info(
     let backend_live = health.active && !health.state.is_empty();
     let task_read_active = health.task_read_supported;
     let notify_active = health.task_notify_supported;
-    let reduced = !task_read_active || !notify_active || health.process_graph_degraded;
+    let preexisting = health.shield_preexisting > 0;
+    let reduced =
+        !task_read_active || !notify_active || health.process_graph_degraded || preexisting;
     let (state, reason) = if !backend_live {
         (
             "Unavailable".into(),
             Some("Endpoint Security client is not active; Process Shield is not enforcing".into()),
         )
     } else if reduced {
-        let mut reasons = Vec::new();
+        let mut reasons: Vec<String> = Vec::new();
         if !task_read_active {
-            reasons.push("AUTH_GET_TASK_READ is unavailable on this host");
+            reasons.push("AUTH_GET_TASK_READ is unavailable on this host".to_string());
         }
         if !notify_active {
-            reasons.push("Process Shield notify subscriptions are unavailable");
+            reasons.push("Process Shield notify subscriptions are unavailable".to_string());
         }
         if health.process_graph_degraded {
-            reasons.push("process graph is degraded");
+            reasons.push("process graph is degraded".to_string());
+        }
+        if preexisting {
+            reasons.push(format!(
+                "{} already-running shield-eligible process(es) predate Process Shield; restart them for Strong launch integrity",
+                health.shield_preexisting
+            ));
         }
         ("Reduced".into(), Some(reasons.join("; ")))
     } else {
@@ -631,6 +641,7 @@ fn process_shield_info(
         task_read_allowed: health.task_read_allowed,
         task_read_denied: health.task_read_denied,
         shield_admitted: health.shield_admitted,
+        shield_preexisting: health.shield_preexisting,
         shield_compromised: health.shield_compromised,
         launch_injection_denied: health.shield_launch_injection_denied,
         trace_observed: health.shield_trace_observed,

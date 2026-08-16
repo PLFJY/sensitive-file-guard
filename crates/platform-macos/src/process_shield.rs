@@ -45,6 +45,33 @@ impl ShieldReasonKind {
     }
 }
 
+/// How an exact live process instance entered the shield (MPS Hardening).
+///
+/// AUTH_EXEC-admitted instances had their launch verified race-free before the
+/// exec was allowed. A Preexisting instance was already running when this ES
+/// client started (e.g. after a guard-es / extension restart): its launch was
+/// never seen by the shield, so its launch integrity is UNVERIFIED. It stays
+/// shielded (task access denied, compromise signals still apply), but the File
+/// Shield side reports Reduced posture and requires a browser restart to reach
+/// Strong launch integrity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShieldAdmission {
+    /// Admitted via AUTH_EXEC with verified launch state.
+    AuthExec,
+    /// Already-running shield-eligible process first observed after this ES
+    /// client started; launch integrity unverified (warm start / restart).
+    PreexistingUnverified,
+}
+
+impl ShieldAdmission {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::AuthExec => "auth_exec",
+            Self::PreexistingUnverified => "preexisting_unverified",
+        }
+    }
+}
+
 /// The code-loading / search-path DYLD variables that a shielded-eligible exec
 /// must not carry. Harmless diagnostic DYLD variables (DYLD_PRINT_*, etc.) are
 /// deliberately not in this set: they do not change which code loads.
@@ -175,19 +202,26 @@ impl TaskNotifyKind {
     }
 }
 
-/// Deterministic task-access allowlist for shielded targets (MPS2/MPS11).
+/// Deterministic task-access allowlist for shielded targets (MPS2/MPS11,
+/// MPS Hardening).
 ///
 /// MPS2 started at ZERO exceptions; every entry below is backed by observed
 /// compatibility evidence and a regression fixture description (MPS11). Same
 /// UID, Apple signature, same Team ID, familiar basename or any process-tree
 /// relationship is NEVER sufficient on its own.
 ///
-/// MPS11 documented exceptions — kernel-verified Apple PLATFORM binaries
-/// only. The `platform_binary` flag is set by the kernel from Apple's
-/// platform code-signing chain and cannot be forged by a same-user attacker,
-/// so these rules are narrow in effect even though they cover a class of
-/// daemons. They never apply to Apple-signer developer/App-Store certs, user
-/// processes, or Team-ID-based matches.
+/// MPS Hardening narrowing: exceptions are now EXACT signing-ID + kind
+/// specific, not a class rule over every Apple platform binary. A requester is
+/// allowed only when BOTH hold:
+///   - it is a kernel-verified Apple PLATFORM binary running as uid 0 (the
+///     `platform_binary` flag comes from Apple's platform code-signing chain
+///     and cannot be forged by a same-user attacker), and
+///   - its exact signing ID is on the allowlist FOR THAT TASK KIND.
+///
+/// Task READ (memory contents) is strictly narrower than task CONTROL:
+/// only requesters with observed read evidence may read shielded-target
+/// memory. This never applies to Apple-signer developer/App-Store certs,
+/// user processes, or Team-ID-based matches.
 ///
 /// Observed (metadata-only, MPS11): macOS system management routinely obtains
 /// task capabilities on GUI processes — coreservicesd registers a client's
@@ -197,22 +231,66 @@ impl TaskNotifyKind {
 /// configd, UserEventAgent, fseventsd, powerd, apsd, xprotectd, logd, dasd,
 /// notifyd, logind, autofsd, remoted, KernelEventAgent, opendirectoryd,
 /// kernelmanagerd, thermalmonitord, diskarbitrationd, corerepaird, ...)
-/// manage processes/sessions. All are uid 0, kernel-verified platform
-/// binaries signed with a `com.apple.*` identifier.
+/// manage processes/sessions.
 pub fn task_access_allowlist(
     requester: &MacProcessFacts,
-    _target: &MacProcessFacts,
-    _kind: TaskAccessKind,
+    target: &MacProcessFacts,
+    kind: TaskAccessKind,
 ) -> bool {
-    requester.uid == 0
-        && requester.code.valid
-        && requester.code.platform_binary
-        && requester
-            .code
-            .signing_id
-            .as_deref()
-            .is_none_or(|id| id.starts_with("com.apple."))
+    if requester.uid != 0 || !requester.code.valid || !requester.code.platform_binary {
+        return false;
+    }
+    // The exact target role narrows the exception: read access to a browser's
+    // helper processes is not granted just because the main browser is.
+    let target_role = match target.code.signing_id.as_deref() {
+        Some(id) if id.starts_with("com.apple.") => "apple",
+        Some(_) => "third_party",
+        None => "unsigned",
+    };
+    match kind {
+        TaskAccessKind::Control => TASK_CONTROL_ALLOWED_SIGNING_IDS
+            .contains(&requester.code.signing_id.as_deref().unwrap_or("")),
+        TaskAccessKind::Read => {
+            target_role != "unsigned"
+                && TASK_READ_ALLOWED_SIGNING_IDS
+                    .contains(&requester.code.signing_id.as_deref().unwrap_or(""))
+        }
+    }
 }
+
+/// Exact signing IDs allowed task CONTROL on shielded targets (MPS11
+/// observed + MPS Hardening narrowing). Every ID here was observed (metadata
+/// only) managing processes/sessions on GUI processes.
+const TASK_CONTROL_ALLOWED_SIGNING_IDS: &[&str] = &[
+    "com.apple.coreservicesd",
+    "com.apple.launchd",
+    "com.apple.amfid",
+    "com.apple.watchdogd",
+    "com.apple.configd",
+    "com.apple.UserEventAgent",
+    "com.apple.fseventsd",
+    "com.apple.powerd",
+    "com.apple.apsd",
+    "com.apple.xprotectd",
+    "com.apple.logd",
+    "com.apple.dasd",
+    "com.apple.notifyd",
+    "com.apple.logind",
+    "com.apple.autofsd",
+    "com.apple.remoted",
+    "com.apple.KernelEventAgent",
+    "com.apple.opendirectoryd",
+    "com.apple.kernelmanagerd",
+    "com.apple.thermalmonitord",
+    "com.apple.diskarbitrationd",
+    "com.apple.corerepaird",
+];
+
+/// Exact signing IDs allowed task READ (memory contents) on shielded targets.
+/// Strictly narrower than CONTROL: only requesters with observed read
+/// evidence. Currently only coreservicesd has such evidence (SCSession
+/// registration on GUI processes).
+const TASK_READ_ALLOWED_SIGNING_IDS: &[&str] = &["com.apple.coreservicesd"];
 
 /// Outcome of applying a strong notify-only compromise signal to an exact
 /// shielded target (MPS4).
@@ -262,6 +340,9 @@ struct ShieldEntry {
     /// several reasons at once (browser + lease root).
     reasons: HashMap<ShieldReasonKind, usize>,
     integrity: ProcessIntegrity,
+    /// How this instance entered the shield (MPS Hardening). Preexisting
+    /// instances have unverified launch integrity after an ES restart.
+    admission: ShieldAdmission,
 }
 
 /// Live Process Shield state, keyed by exact stable process instance.
@@ -270,6 +351,7 @@ pub struct MacProcessShield {
     entries: HashMap<AuditProcessKey, ShieldEntry>,
     current_by_pid: HashMap<u32, AuditProcessKey>,
     admitted: u64,
+    preexisting_admitted: u64,
     compromised: u64,
     launch_injection_denied: u64,
     malformed_denied: u64,
@@ -323,6 +405,7 @@ impl MacProcessShield {
                         facts: facts.clone(),
                         reasons,
                         integrity: ProcessIntegrity::Normal,
+                        admission: ShieldAdmission::AuthExec,
                     },
                 );
                 self.current_by_pid.insert(key.pid, key);
@@ -332,6 +415,71 @@ impl MacProcessShield {
             self.admitted = self.admitted.saturating_add(1);
         }
         admitted
+    }
+
+    /// Admit an already-running shield-eligible instance first observed after
+    /// this ES client started (guard-es/extension restart, warm start). Its
+    /// launch integrity is UNVERIFIED, so it is marked PreexistingUnverified
+    /// and File Shield reports Reduced posture until the process restarts and
+    /// is re-admitted via AUTH_EXEC.
+    pub fn admit_preexisting(
+        &mut self,
+        facts: MacProcessFacts,
+        reason: ShieldReasonKind,
+    ) -> Result<(), ShieldError> {
+        facts
+            .validate()
+            .map_err(|error| ShieldError::InvalidIdentity(error.to_string()))?;
+        let key = facts.key;
+        let admitted = self
+            .entries
+            .get_mut(&key)
+            .map(|entry| {
+                if entry.facts.stable_id() != facts.stable_id() || entry.facts.uid != facts.uid {
+                    return Err(ShieldError::InvalidIdentity(
+                        "same audit key changed stable identity".into(),
+                    ));
+                }
+                entry.facts = facts.clone();
+                *entry.reasons.entry(reason).or_insert(0) += 1;
+                Ok(())
+            })
+            .unwrap_or_else(|| {
+                let mut reasons = HashMap::new();
+                reasons.insert(reason, 1);
+                self.entries.insert(
+                    key,
+                    ShieldEntry {
+                        facts: facts.clone(),
+                        reasons,
+                        integrity: ProcessIntegrity::Normal,
+                        admission: ShieldAdmission::PreexistingUnverified,
+                    },
+                );
+                self.current_by_pid.insert(key.pid, key);
+                Ok(())
+            });
+        if admitted.is_ok() {
+            self.preexisting_admitted = self.preexisting_admitted.saturating_add(1);
+        }
+        admitted
+    }
+
+    /// The admission kind for the current exact instance of pid, if any.
+    pub fn admission_of_pid(&self, pid: u32) -> Option<ShieldAdmission> {
+        self.current_by_pid
+            .get(&pid)
+            .and_then(|key| self.entries.get(key))
+            .map(|entry| entry.admission)
+    }
+
+    /// True when the current instance of pid is shielded but its launch was
+    /// never verified (warm start / ES restart).
+    pub fn is_preexisting(&self, pid: u32) -> bool {
+        matches!(
+            self.admission_of_pid(pid),
+            Some(ShieldAdmission::PreexistingUnverified)
+        )
     }
 
     /// Add a reason to an already-admitted instance (e.g. dynamic lease-root
@@ -432,6 +580,11 @@ impl MacProcessShield {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// Preexisting (warm-start / ES-restart) admissions counted so far.
+    pub fn preexisting_admitted(&self) -> u64 {
+        self.preexisting_admitted
     }
 
     pub fn stats(&self) -> (u64, u64, u64, u64, u64) {
@@ -682,15 +835,34 @@ mod tests {
             TaskAccessKind::Control
         ));
 
-        // A different Apple platform daemon (lsd) is allowed: same
-        // kernel-verified platform class (MPS11 observation).
+        // MPS Hardening narrowing: a different Apple platform daemon (lsd)
+        // is NOT on the exact control allowlist -> denied, even though it is
+        // a kernel-verified platform binary. Only observed exact signing IDs
+        // are allowed.
         let mut lsd = coreservicesd.clone();
         lsd.executable.path = Path::new("/usr/libexec/lsd").to_path_buf();
         lsd.code.signing_id = Some("com.apple.lsd".into());
-        assert!(task_access_allowlist(
+        assert!(!task_access_allowlist(
             &lsd,
             &target,
             TaskAccessKind::Control
+        ));
+
+        // launchd is on the exact control allowlist (observed managing
+        // processes) -> control allowed; it is NOT on the read allowlist ->
+        // read denied (MPS Hardening narrowing).
+        let mut launchd = coreservicesd.clone();
+        launchd.executable.path = Path::new("/sbin/launchd").to_path_buf();
+        launchd.code.signing_id = Some("com.apple.launchd".into());
+        assert!(task_access_allowlist(
+            &launchd,
+            &target,
+            TaskAccessKind::Control
+        ));
+        assert!(!task_access_allowlist(
+            &launchd,
+            &target,
+            TaskAccessKind::Read
         ));
 
         // A same-uid Apple-signed (non-platform) requester is still denied.
@@ -730,9 +902,11 @@ mod tests {
 
     #[test]
     fn notify_signal_classification_matches_mps11_evidence() {
-        // TRACE and task-capability notifies are telemetry (MPS11 observed
-        // that real browsers trigger GET_TASK(_READ) notifies routinely);
-        // remote-thread and CS-invalidation are the strong signals.
+        // is_strong_signal() covers the always-strong signals only
+        // (remote-thread / CS-invalidation). GET_TASK(_READ) notifies are
+        // CONTEXTUAL in handle_task_notify: strong exactly when the requester
+        // was NOT allowlisted (MPS Hardening), so is_strong_signal() stays
+        // false here and the handler decides per-requester.
         assert!(!TaskNotifyKind::Trace.is_strong_signal());
         assert!(!TaskNotifyKind::GetTask.is_strong_signal());
         assert!(!TaskNotifyKind::GetTaskRead.is_strong_signal());
@@ -750,6 +924,54 @@ mod tests {
                 strong.label()
             );
         }
+    }
+
+    #[test]
+    fn preexisting_admission_is_exact_and_reports_unverified() {
+        let mut shield = MacProcessShield::new();
+        let running = facts(10, 1, 100);
+        // A running browser observed only after ES restart: admitted as
+        // preexisting (unverified), still shielded, integrity Normal.
+        shield
+            .admit_preexisting(running.clone(), ShieldReasonKind::Browser)
+            .unwrap();
+        assert!(shield.is_shielded_exact(&running));
+        assert!(shield.is_preexisting(10));
+        assert_eq!(shield.integrity_of_pid(10), ProcessIntegrity::Normal);
+        assert_eq!(
+            shield.admission_of_pid(10),
+            Some(ShieldAdmission::PreexistingUnverified)
+        );
+        assert_eq!(shield.preexisting_admitted(), 1);
+        assert_eq!(shield.stats().0, 0, "preexisting is not a regular admit");
+
+        // An AUTH_EXEC admit on top keeps the existing preexisting entry and
+        // does not flip admission; a fresh AuthExec instance is AuthExec.
+        shield
+            .add_reason(running.key, ShieldReasonKind::DynamicLeaseRoot)
+            .unwrap();
+        assert!(shield.is_preexisting(10));
+
+        let fresh = facts(11, 1, 110);
+        shield
+            .admit(fresh.clone(), ShieldReasonKind::Browser)
+            .unwrap();
+        assert!(!shield.is_preexisting(11));
+        assert_eq!(shield.admission_of_pid(11), Some(ShieldAdmission::AuthExec));
+        assert_eq!(shield.preexisting_admitted(), 1);
+    }
+
+    #[test]
+    fn preexisting_identity_validation_fails_closed() {
+        let mut shield = MacProcessShield::new();
+        let mut broken = facts(10, 1, 100);
+        broken.start_time_us = 0;
+        assert!(matches!(
+            shield.admit_preexisting(broken, ShieldReasonKind::Browser),
+            Err(ShieldError::InvalidIdentity(_))
+        ));
+        assert!(shield.is_empty());
+        assert_eq!(shield.preexisting_admitted(), 0);
     }
 
     #[test]

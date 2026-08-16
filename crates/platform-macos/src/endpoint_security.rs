@@ -777,6 +777,7 @@ impl EndpointSecurityBackend {
         let (task_control_allowed, task_control_denied, task_read_allowed, task_read_denied) =
             shield.task_stats();
         let (shield_admitted, shield_compromised, launch_injection, malformed, _) = shield.stats();
+        let shield_preexisting = shield.preexisting_admitted();
         let (task_notify_obtained, trace_observed, remote_thread_observed, cs_invalidated) =
             shield.notify_stats();
         BackendHealth {
@@ -813,6 +814,7 @@ impl EndpointSecurityBackend {
             task_read_supported: self.task_read_supported,
             task_notify_supported: self.task_notify_supported,
             shield_admitted,
+            shield_preexisting,
             shield_compromised,
             shield_launch_injection_denied: launch_injection,
             shield_malformed_denied: malformed,
@@ -1298,15 +1300,47 @@ impl CallbackContext {
                 return;
             }
         };
-        let shielded = self
-            .shield
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .is_shielded_exact(&target);
-        if !shielded {
-            // Fast path: unrelated processes keep their existing task behavior.
-            self.respond_task(client, message, true);
-            return;
+        {
+            let mut shield = self
+                .shield
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !shield.is_shielded_exact(&target) {
+                // Warm-start coverage (MPS Hardening): a shield-eligible
+                // process that predates this ES client (browser or Guard
+                // component already running when the extension restarted) was
+                // never admitted via AUTH_EXEC, so its launch integrity is
+                // UNVERIFIED. Admit it fail-closed so a same-user attacker
+                // cannot take over a browser that was already running across a
+                // guard-es/extension restart; the decision path below then
+                // denies it unless the requester is allowlisted.
+                if let Some(reason) = self.config.shield_eligible(&target, target.uid) {
+                    if let Err(error) = shield.admit_preexisting(target.clone(), reason) {
+                        self.health.degrade(format!(
+                            "shield-eligible preexisting task target failed closed during admission: {error}"
+                        ));
+                        drop(shield);
+                        self.respond_task(client, message, false);
+                        return;
+                    }
+                    self.health.note(format!(
+                        "shield-eligible preexisting target admitted unverified (warm start): {:?}",
+                        target.executable.path
+                    ));
+                    self.send_shield_event(ShieldAuditEvent::ExecAdmitted {
+                        target: target.clone(),
+                        reason,
+                    });
+                    // Fall through: the preexisting instance is now shielded
+                    // and subject to the same allowlist below.
+                } else {
+                    // Fast path: unrelated processes keep their existing
+                    // task behavior.
+                    drop(shield);
+                    self.respond_task(client, message, true);
+                    return;
+                }
+            }
         }
         if let Err(error) =
             crate::deadline::response_budget(&crate::deadline::DarwinClock, raw.deadline)
@@ -1382,35 +1416,48 @@ impl CallbackContext {
             return;
         };
         // Only notify signals involving an exact shielded target are in
-        // Process Shield scope; unrelated processes are untouched.
+        // Process Shield scope. Unrelated processes are untouched: no
+        // telemetry, no audit, no state mutation. This also prevents the
+        // system-wide notify subscriptions (GET_TASK/GET_TASK_READ/TRACE/
+        // REMOTE_THREAD/CS_INVALIDATED on unrelated processes) from spilling
+        // into the Guard audit queue.
         let mut shield = self
             .shield
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // MPS11: a successful task-capability acquisition is a strong signal
-        // only when the acquisition was NOT legitimate under our own task
-        // allowlist. Routinely allowed relationships (e.g. Apple platform
-        // daemons managing processes/sessions) must not compromise every
-        // browser on every launch. Per MPS11 observed evidence, GET_TASK(_READ)
-        // notifies are telemetry, never an auto-compromise; TRACE stays
-        // telemetry; remote-thread and CS-invalidation are strong signals.
+        if !shield.is_shielded_exact(&target) {
+            drop(shield);
+            return;
+        }
+        // MPS Hardening: NOTIFY_GET_TASK / NOTIFY_GET_TASK_READ fire AFTER the
+        // requester actually obtained the task capability (Apple semantics:
+        // the notify means a send right was already granted). So an acquisition
+        // that was NOT legitimate under our own task allowlist means this
+        // process obtained task capability despite our prevention -> strong
+        // compromise signal. Routinely allowed relationships (e.g. Apple
+        // platform daemons managing processes/sessions) stay telemetry. TRACE
+        // stays telemetry; remote-thread and CS-invalidation are always strong.
         let legitimate = crate::process_shield::task_access_allowlist(
             &requester,
             &target,
-            TaskAccessKind::Control,
+            match kind {
+                TaskNotifyKind::GetTaskRead => TaskAccessKind::Read,
+                _ => TaskAccessKind::Control,
+            },
         );
-        let outcome = if kind.is_strong_signal() && !legitimate {
+        let strong = match kind {
+            TaskNotifyKind::GetTask | TaskNotifyKind::GetTaskRead => !legitimate,
+            TaskNotifyKind::RemoteThreadCreate | TaskNotifyKind::CsInvalidated => true,
+            TaskNotifyKind::Trace => false,
+        };
+        let outcome = if strong {
             shield.apply_strong_signal(&target)
         } else {
             StrongSignalOutcome::NotShielded
         };
+        shield.note_task_notify(kind);
+        drop(shield);
         if outcome == StrongSignalOutcome::NotShielded {
-            // Still record telemetry for shielded targets; never transition.
-            let shielded = shield.is_shielded_exact(&target);
-            if shielded {
-                shield.note_task_notify(kind);
-            }
-            drop(shield);
             self.send_shield_event(ShieldAuditEvent::TaskNotify {
                 kind,
                 requester,
@@ -1418,8 +1465,6 @@ impl CallbackContext {
             });
             return;
         }
-        shield.note_task_notify(kind);
-        drop(shield);
         // MPS4 ordering: the shield state transition happens FIRST (done
         // above); capability revocation / audit / notify / containment are
         // driven by the Compromised event in guard-es.

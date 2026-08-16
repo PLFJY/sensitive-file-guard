@@ -142,15 +142,38 @@ mkdir -p "$chrome_session"
 printf "synthetic disposable state\n" >"$chrome_session/Preferences"
 check "disposable profile write is not blocked by File Shield" test -f "$chrome_session/Preferences"
 
-# --- Audit: task-deny storm check ---
-sleep 2
-if [ -f "$audit_db" ]; then
-    echo '--- task/process-shield audit summary ---'
-    sqlite3 "$audit_db" "SELECT event_code, COUNT(*) FROM events GROUP BY event_code ORDER BY 2 DESC LIMIT 15;" 2>/dev/null || echo "audit query unavailable"
-    task_denies=$(sqlite3 "$audit_db" "SELECT COUNT(*) FROM events WHERE event_code LIKE 'process_shield_task%denied%' OR event_code LIKE 'process_shield_task%denied%' OR event_code='process_shield_task_control_denied' OR event_code='process_shield_task_read_denied';" 2>/dev/null || echo 0)
-    echo "task_denies=$task_denies"
+# --- Security recheck: untrusted same-user task probe against the REAL
+# shielded browser must still be denied (MPS11 harness requirement).
+MACOSX_DEPLOYMENT_TARGET=13.0 cargo build --manifest-path "$repo_dir/Cargo.toml"     -p guard-test-probe >/dev/null 2>&1 || true
+probe="$repo_dir/target/debug/guard-test-probe"
+if [ -x "$probe" ] && [ -n "$chrome_main_pid" ]; then
+    set +e
+    "$probe" probe-task "$chrome_main_pid" control
+    probe_exit=$?
+    set -e
+    if [ "$probe_exit" -eq 4 ]; then
+        check "untrusted same-user task probe denied against real Chrome" true
+    else
+        echo "probe_task exit=$probe_exit (expected 4 = denied)" >&2
+        check "untrusted same-user task probe denied against real Chrome" false
+    fi
 else
-    echo "audit db not found at $audit_db"
+    echo "BLOCKED: guard-test-probe unavailable; real-browser task recheck skipped" >&2
+fi
+
+# --- Audit: task-deny storm check via authenticated guardctl events (the
+# audit db is root-owned; guardctl queries it through the XPC service).
+sleep 2
+guardctl="$installed_app/Contents/MacOS/guardctl"
+events=$("$guardctl" --json events --limit 500 2>/dev/null || true)
+task_denies=$(printf "%s\n" "$events" | grep -cE '"(event_code|reason_code)": "(process_shield_task_(control|read)_denied|browser_protected_resource)"' || true)
+echo "task_denies=$task_denies"
+if printf "%s\n" "$events" | grep -q '"kind"[[:space:]]*:[[:space:]]*"events"' ; then
+    check "task/process-shield audit rows queryable via guardctl" true
+else
+    echo "guardctl events did not return a valid response:" >&2
+    printf "%s\n" "$events" | head -10 >&2 || true
+    check "task/process-shield audit rows queryable via guardctl" false
 fi
 
 echo "=== MPS11 SUMMARY pass=$pass fail=$fail ==="
