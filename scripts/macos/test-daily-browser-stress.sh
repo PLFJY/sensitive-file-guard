@@ -33,7 +33,8 @@ fixtures="$work/www"
 mkdir -p "$fixtures"
 chrome="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 firefox="/Applications/Firefox.app/Contents/MacOS/firefox"
-port=8765
+# Unique per-run port so stale http servers from earlier runs cannot block us.
+port=$((8800 + ($$ % 200)))
 base="http://127.0.0.1:$port"
 chrome_pid=
 ff_pid=
@@ -47,6 +48,7 @@ cleanup() {
     [ -z "$http_pid" ] || kill "$http_pid" 2>/dev/null || true
     pkill -f 'user-data-dir=.*guard-mch9' 2>/dev/null || true
     pkill -f 'profile .*guard-mch9' 2>/dev/null || true
+    pkill -f "http.server $port" 2>/dev/null || true
     rm -rf -- "$work"
 }
 trap cleanup EXIT HUP INT TERM
@@ -63,9 +65,15 @@ check() {
     fi
 }
 
-# 1. The live extension must be active.
-case "$(guardctl status 2>/dev/null || true)" in
-    *'"backend_kind":"macos-endpoint-security"'*) echo "extension backend active" ;;
+# 1. The live extension must be active. guardctl is not on PATH by default;
+#    it ships inside the app bundle (GUARDCTL override supported).
+GUARDCTL=${GUARDCTL:-"/Applications/Sensitive File Guard.app/Contents/MacOS/guardctl"}
+if ! "$GUARDCTL" status >/dev/null 2>&1; then
+    echo "BLOCKED: $GUARDCTL is unavailable or the extension is not active" >&2
+    exit 3
+fi
+case "$("$GUARDCTL" status 2>/dev/null || true)" in
+    *'backend         : macos-endpoint-security'*) echo "extension backend active" ;;
     *)
         echo "BLOCKED: guardctl status does not show an active macOS Endpoint Security backend" >&2
         exit 3
@@ -139,13 +147,27 @@ http_ok=${http_ok:-1}
 
 chrome_flags="--user-data-dir=$work/chrome-profile --no-first-run --no-default-browser-check --disable-component-update --disable-sync"
 
-# 4. Capture Process Shield counters before the stress (for deny classification).
-capture_counters() {
-    guardctl status 2>/dev/null | tr ',' '\n' | grep -E '"task_control_denied"|"task_read_denied"|"shield_compromised"|"shield_admitted"' | tr -d '"{}' || true
+# 4. Capture Process Shield event counts before the stress (for deny
+#    classification). guardctl's CLI table does not expose the raw counters,
+#    so DENY/Compromised rows are counted from the live audit via explain()
+#    metadata (never file contents).
+capture_shield_events() {
+    "$GUARDCTL" events --limit 3000 2>/dev/null |
+        awk '$2 == "DENY" {print $1}' |
+        while read -r id; do
+            [ -n "$id" ] || continue
+            diag=$("$GUARDCTL" explain "$id" 2>/dev/null | sed -n 's/.*backend_diag  : //p')
+            case "$diag" in
+                *'kind=task_control'*) echo "task_control_denied" ;;
+                *'kind=task_read'*) echo "task_read_denied" ;;
+                *'browser_protected_resource'*) echo "file_shield_deny" ;;
+                *'integrity=Compromised'*) echo "compromised_transition" ;;
+            esac
+        done | sort | uniq -c
 }
 
-echo '--- Process Shield counters BEFORE stress ---'
-counters_before=$(capture_counters)
+echo '--- Process Shield event counts BEFORE stress ---'
+counters_before=$(capture_shield_events)
 printf '%s\n' "$counters_before"
 
 # 5. Chrome daily-use stress (normal sandbox).
@@ -229,9 +251,9 @@ check 'firefox restart works' kill -0 "$ff_pid" 2>/dev/null
 pkill -f 'profile .*guard-mch9' 2>/dev/null || true
 sleep 3
 
-# 7. Capture counters AFTER the stress and report for deny classification.
-echo '--- Process Shield counters AFTER stress (for human classification) ---'
-printf '%s\n' "$(capture_counters)"
+# 7. Capture event counts AFTER the stress and report for deny classification.
+echo '--- Process Shield event counts AFTER stress (for human classification) ---'
+printf '%s\n' "$(capture_shield_events)"
 
 echo
 echo "MCH9 SUMMARY pass=$pass fail=$fail"

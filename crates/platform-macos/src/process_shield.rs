@@ -350,9 +350,17 @@ const TASK_CONTROL_ALLOWED_SIGNING_IDS: &[&str] = &[
 
 /// Exact signing IDs allowed task READ (memory contents) on shielded targets.
 /// Strictly narrower than CONTROL: only requesters with observed read
-/// evidence. Currently only coreservicesd has such evidence (SCSession
-/// registration on GUI processes).
-const TASK_READ_ALLOWED_SIGNING_IDS: &[&str] = &["com.apple.coreservicesd"];
+/// evidence. Evidence-backed exceptions (both kernel-verified Apple platform
+/// binaries running as uid 0, unforgeable by a same-user attacker):
+/// - com.apple.coreservicesd: SCSession universe registration on GUI
+///   processes (MPS11; denying it aborts Chrome/Firefox launch).
+/// - com.apple.sysmond: Apple system monitoring routinely performs task_read
+///   on browser processes during NORMAL use (MCH9 live stress on this host:
+///   6 requests against a disposable Firefox in ~2 minutes; Firefox stays
+///   functional when denied, but the deny is a routine legitimate-relationship
+///   false positive). Never Apple-signer developer/App-Store certs, user
+///   processes, or Team-ID matches.
+const TASK_READ_ALLOWED_SIGNING_IDS: &[&str] = &["com.apple.coreservicesd", "com.apple.sysmond"];
 
 /// Outcome of applying a strong notify-only compromise signal to an exact
 /// shielded target (MPS4).
@@ -1129,6 +1137,32 @@ mod tests {
         ));
         assert!(!task_access_allowlist(
             &launchd,
+            &target,
+            TaskAccessKind::Read
+        ));
+
+        // MCH9 live evidence: sysmond (kernel-verified Apple platform binary,
+        // uid 0) routinely performs task_read on browser processes during
+        // normal use. It is allowed READ only; CONTROL stays denied (READ
+        // remains narrower than CONTROL).
+        let mut sysmond = coreservicesd.clone();
+        sysmond.executable.path = Path::new("/usr/libexec/sysmond").to_path_buf();
+        sysmond.code.signing_id = Some("com.apple.sysmond".into());
+        assert!(task_access_allowlist(
+            &sysmond,
+            &target,
+            TaskAccessKind::Read
+        ));
+        assert!(!task_access_allowlist(
+            &sysmond,
+            &target,
+            TaskAccessKind::Control
+        ));
+        // A non-platform impostor at the same path is denied.
+        let mut fake_sysmond = sysmond.clone();
+        fake_sysmond.code.platform_binary = false;
+        assert!(!task_access_allowlist(
+            &fake_sysmond,
             &target,
             TaskAccessKind::Read
         ));
