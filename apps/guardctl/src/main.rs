@@ -181,8 +181,14 @@ enum LeasesAction {
 
 #[derive(Subcommand, Debug)]
 enum ConfigAction {
-    /// Check configuration validity.
+    /// Check configuration validity (queries the daemon's in-memory policy).
     Check,
+    /// macOS-only local diagnostic: read the authoritative config and run the
+    /// same load/validate/prepare steps as guard-es at startup, printing the
+    /// EXACT failure (if any). Requires root to read the config file. No
+    /// daemon connection, no behavior change, no writes.
+    #[command(name = "validate-local", hide = true)]
+    ValidateLocal,
 }
 
 #[derive(Subcommand, Debug)]
@@ -285,6 +291,13 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
     if let Command::Setup { home, config, yes } = &cli.command {
         return run_setup(home.as_deref(), config, *yes);
     }
+    // macOS-only local config diagnostic (no daemon connection).
+    if let Command::Config {
+        action: ConfigAction::ValidateLocal,
+    } = &cli.command
+    {
+        return run_config_validate_local();
+    }
     // `ssh load` runs a multi-step brokered flow (authorize -> continue child
     // -> revoke) that does not fit the single-request dispatch below.
     if let Command::Ssh {
@@ -350,6 +363,9 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
         Command::Config {
             action: ConfigAction::Check,
         } => RequestOp::ConfigCheck,
+        Command::Config {
+            action: ConfigAction::ValidateLocal,
+        } => unreachable!("config validate-local handled before IPC dispatch"),
         Command::Privileged { .. } => unreachable!("privileged helper handled before IPC dispatch"),
         Command::ServiceStatus | Command::NotificationService { .. } => {
             unreachable!("service commands handled before IPC dispatch")
@@ -398,6 +414,74 @@ fn ipc_connection_context(socket: &std::path::Path) -> String {
     {
         format!("connecting to guardd IPC socket {}", socket.display())
     }
+}
+
+/// macOS-only local config diagnostic: reproduce guard-es's startup
+/// load/validate/prepare steps against the authoritative config file and print
+/// the exact failure point. Requires root (config file is root-only). Never
+/// writes or connects to the daemon.
+#[cfg(target_os = "macos")]
+fn run_config_validate_local() -> anyhow::Result<()> {
+    let config = match platform_macos::config::MacBackendConfig::load_authoritative() {
+        Ok(config) => {
+            println!("load_authoritative: OK (version={})", config.version);
+            config
+        }
+        Err(error) => {
+            println!("load_authoritative: FAIL: {error:#}");
+            return Ok(());
+        }
+    };
+    // Mirror guard-es's prepare_config: validate + resource index +
+    // trust revalidation, printing the exact failure point.
+    let config = config.with_builtin_mac_allowlist();
+    if let Err(error) = config.validate() {
+        println!("config.validate: FAIL: {error:#}");
+        println!("RESULT: guard-es startup falls back to an empty policy");
+        return Ok(());
+    }
+    println!(
+        "config.validate: OK (browsers={}, ssh_keys={})",
+        config.browser_trust.len(),
+        config.common_policy.ssh_keys.len()
+    );
+    let index = match platform_macos::resource_index::MacResourceIndex::from_enrollments(
+        &config.browser_trust,
+        &config.common_policy.ssh_keys,
+    ) {
+        Ok(index) => {
+            println!(
+                "resource index: OK (files={}, trees={})",
+                index.concrete_count(),
+                index.tree_root_count()
+            );
+            index
+        }
+        Err(error) => {
+            println!("resource index: FAIL: {error:#}");
+            return Ok(());
+        }
+    };
+    match platform_macos::browser_trust::MacBrowserTrustStore::load_and_revalidate(
+        config.browser_trust.clone(),
+    ) {
+        Ok(trust) => {
+            let exes = trust.enrolled_executable_paths().len();
+            let _ = index;
+            println!("trust revalidate: OK (enrolled_exes={exes})");
+            println!("RESULT: config loads cleanly at startup");
+        }
+        Err(error) => {
+            println!("trust revalidate: FAIL: {error:#}");
+            println!("RESULT: guard-es startup falls back to an empty policy");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn run_config_validate_local() -> anyhow::Result<()> {
+    anyhow::bail!("config validate-local is available only on macOS")
 }
 
 #[cfg(target_os = "linux")]
