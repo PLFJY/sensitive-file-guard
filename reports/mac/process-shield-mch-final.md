@@ -130,3 +130,22 @@ executing inside a trusted browser, malicious browser extensions, malicious
 code already inside a trusted browser process, Guard/ES backend compromise.
 Compatibility exceptions granted no new task/memory authority (all are
 uid-0 kernel-verified Apple platform binaries, READ narrower than CONTROL).
+
+## 16. IMPORTANT live-test consequence (this host)
+
+During live MCH10/warm-start verification, the untrusted same-user probe
+(guard-test-probe) was correctly DENIED task control/read on the REAL
+preexisting Firefox Main (pid 5198, running since before the MCH deploy —
+warm-start authority admission verified: task control/read DENIED, memory
+recovered_pages=0). Per the MCH7 contextual-signal design, the probe's task
+notify acquisition is a strong signal, so the exact Firefox instance was
+transitioned to Compromised (DETECTED + CONTAINED).
+
+Consequence: until that Firefox instance exits (normal browser restart), its
+protected-profile reads are File-Shield-DENIED (monotonic per-instance
+integrity; process exit clears the state). Firefox is currently idle and
+unaffected; the user should simply restart Firefox when convenient to restore
+its SecretAuthority. This is the designed trade-off of the containment model
+(an unallowlisted same-user process that obtained a task send right on a
+protected browser is contained), and it is exactly the behavior the acceptance
+criteria require (confirmed compromise -> File Shield authority revoke).
