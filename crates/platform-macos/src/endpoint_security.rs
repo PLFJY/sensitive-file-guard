@@ -777,7 +777,10 @@ impl EndpointSecurityBackend {
         let (task_control_allowed, task_control_denied, task_read_allowed, task_read_denied) =
             shield.task_stats();
         let (shield_admitted, shield_compromised, launch_injection, malformed, _) = shield.stats();
-        let shield_preexisting = shield.preexisting_admitted();
+        // LIVE preexisting count (not the cumulative telemetry): this drives
+        // the Active/Reduced decision and must return to zero when the last
+        // PreexistingUnverified instance exits or is replaced by AUTH_EXEC.
+        let shield_preexisting = shield.live_preexisting_count() as u64;
         let (task_notify_obtained, trace_observed, remote_thread_observed, cs_invalidated) =
             shield.notify_stats();
         BackendHealth {

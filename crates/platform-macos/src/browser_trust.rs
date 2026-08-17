@@ -165,6 +165,27 @@ impl guard_platform::ProcessIdentityResolver for MacProcessIdentityResolver {
             .read()
             .map_err(|_| anyhow::anyhow!("macOS browser trust lock is poisoned"))?
             .classify(&facts, resource_owner_uid);
+        // Warm-start reconciliation (MPS Hardening 2, Option B): a
+        // File-Shield-trusted browser whose exact live instance is NOT yet
+        // shielded was already running when this ES client started (its
+        // AUTH_EXEC was never observed). Before any protected read is
+        // claimed as Strong, admit it as PreexistingUnverified so:
+        //   - health reports Reduced (live preexisting count > 0);
+        //   - task access to it is protected by the same shielded path;
+        //   - launch integrity is NOT claimed verified until restart.
+        if trust.browser.is_some() && trust.tier.is_trusted() {
+            if let Some(shield) = &self.shield {
+                let mut shield = shield
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if !shield.is_shielded_exact(&facts) {
+                    let _ = shield.admit_preexisting(
+                        facts.clone(),
+                        crate::process_shield::ShieldReasonKind::Browser,
+                    );
+                }
+            }
+        }
         let integrity = self
             .shield
             .as_ref()
@@ -442,6 +463,7 @@ fn hash_file(path: &Path) -> anyhow::Result<[u8; 32]> {
 mod tests {
     use super::*;
     use crate::identity::{AuditProcessKey, MacCodeIdentity};
+    use guard_platform::ProcessIdentityResolver;
     use std::os::unix::fs::MetadataExt;
 
     fn signed_browser(
@@ -604,6 +626,92 @@ mod tests {
             )
             .tier
             .is_trusted());
+    }
+
+    #[test]
+    fn resolver_marks_trusted_browser_warm_start_as_preexisting() {
+        use crate::identity::MacProcessGraph;
+        use crate::process_shield::{MacProcessShield, ShieldAdmission};
+        use std::sync::Arc;
+        use std::sync::Mutex;
+
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("Chrome.app/Contents/MacOS/Chrome");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, b"signed fixture").unwrap();
+        let store = MacBrowserTrustStore::load_and_revalidate(vec![signed_browser(
+            temp.path(),
+            &executable,
+            BrowserExecutableRole::Main,
+        )])
+        .unwrap();
+        let graph = Arc::new(Mutex::new(MacProcessGraph::default()));
+        let shield = Arc::new(Mutex::new(MacProcessShield::new()));
+        let facts = process(&executable, 501, "TEAM", "com.example.chrome");
+        graph
+            .lock()
+            .unwrap()
+            .observe(facts.clone(), std::time::Instant::now())
+            .unwrap();
+        let resolver = MacProcessIdentityResolver::new_shared_with_shield(
+            Arc::clone(&graph),
+            Arc::new(std::sync::RwLock::new(store)),
+            Arc::clone(&shield),
+        );
+        // Before any protected read, the browser is NOT shielded.
+        assert!(!shield.lock().unwrap().is_shielded_exact(&facts));
+        // First resolve() (protected AUTH_OPEN path) reconciles warm start.
+        let identity = resolver.resolve(facts.key.pid, 501).unwrap();
+        assert!(identity.browser.is_some());
+        assert!(identity.trust_tier.is_trusted());
+        assert_eq!(identity.integrity, guard_core::ProcessIntegrity::Normal);
+        assert!(shield.lock().unwrap().is_shielded_exact(&facts));
+        assert!(shield.lock().unwrap().is_preexisting(facts.key.pid));
+        assert_eq!(
+            shield.lock().unwrap().admission_of_pid(facts.key.pid),
+            Some(ShieldAdmission::PreexistingUnverified)
+        );
+        assert_eq!(shield.lock().unwrap().live_preexisting_count(), 1);
+        // A second resolve() is idempotent: still exactly one admission.
+        resolver.resolve(facts.key.pid, 501).unwrap();
+        assert_eq!(shield.lock().unwrap().preexisting_admitted_total(), 1);
+    }
+
+    #[test]
+    fn resolver_does_not_shield_unrelated_processes() {
+        use crate::identity::MacProcessGraph;
+        use crate::process_shield::MacProcessShield;
+        use std::sync::Arc;
+        use std::sync::Mutex;
+
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("Chrome.app/Contents/MacOS/Chrome");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, b"signed fixture").unwrap();
+        let store = MacBrowserTrustStore::load_and_revalidate(vec![signed_browser(
+            temp.path(),
+            &executable,
+            BrowserExecutableRole::Main,
+        )])
+        .unwrap();
+        let graph = Arc::new(Mutex::new(MacProcessGraph::default()));
+        let shield = Arc::new(Mutex::new(MacProcessShield::new()));
+        let unrelated = temp.path().join("unrelated");
+        std::fs::write(&unrelated, b"unrelated process").unwrap();
+        let facts = process(&unrelated, 501, "TEAM", "com.example.other");
+        graph
+            .lock()
+            .unwrap()
+            .observe(facts.clone(), std::time::Instant::now())
+            .unwrap();
+        let resolver = MacProcessIdentityResolver::new_shared_with_shield(
+            Arc::clone(&graph),
+            Arc::new(std::sync::RwLock::new(store)),
+            Arc::clone(&shield),
+        );
+        resolver.resolve(facts.key.pid, 501).unwrap();
+        assert!(!shield.lock().unwrap().is_shielded_exact(&facts));
+        assert_eq!(shield.lock().unwrap().live_preexisting_count(), 0);
     }
 
     #[test]

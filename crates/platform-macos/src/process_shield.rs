@@ -240,18 +240,16 @@ pub fn task_access_allowlist(
     if requester.uid != 0 || !requester.code.valid || !requester.code.platform_binary {
         return false;
     }
-    // The exact target role narrows the exception: read access to a browser's
-    // helper processes is not granted just because the main browser is.
-    let target_role = match target.code.signing_id.as_deref() {
-        Some(id) if id.starts_with("com.apple.") => "apple",
-        Some(_) => "third_party",
-        None => "unsigned",
-    };
+    // Task READ (memory contents) is only granted against SIGNED targets.
+    // This is a signed-vs-unsigned guard on the TARGET, not a browser
+    // Main/Helper role restriction: we do not guess process role from a
+    // signing ID. Unsigned targets never qualify for the read exception.
+    let target_is_signed = target.code.signing_id.is_some();
     match kind {
         TaskAccessKind::Control => TASK_CONTROL_ALLOWED_SIGNING_IDS
             .contains(&requester.code.signing_id.as_deref().unwrap_or("")),
         TaskAccessKind::Read => {
-            target_role != "unsigned"
+            target_is_signed
                 && TASK_READ_ALLOWED_SIGNING_IDS
                     .contains(&requester.code.signing_id.as_deref().unwrap_or(""))
         }
@@ -351,7 +349,10 @@ pub struct MacProcessShield {
     entries: HashMap<AuditProcessKey, ShieldEntry>,
     current_by_pid: HashMap<u32, AuditProcessKey>,
     admitted: u64,
-    preexisting_admitted: u64,
+    /// Cumulative telemetry: how many preexisting (warm-start) admissions have
+    /// happened since this shield was created. This is NOT a live count and
+    /// must never drive the Active/Reduced health decision.
+    preexisting_admitted_total: u64,
     compromised: u64,
     launch_injection_denied: u64,
     malformed_denied: u64,
@@ -460,7 +461,7 @@ impl MacProcessShield {
                 Ok(())
             });
         if admitted.is_ok() {
-            self.preexisting_admitted = self.preexisting_admitted.saturating_add(1);
+            self.preexisting_admitted_total = self.preexisting_admitted_total.saturating_add(1);
         }
         admitted
     }
@@ -582,9 +583,32 @@ impl MacProcessShield {
         self.entries.is_empty()
     }
 
-    /// Preexisting (warm-start / ES-restart) admissions counted so far.
-    pub fn preexisting_admitted(&self) -> u64 {
-        self.preexisting_admitted
+    /// Cumulative telemetry: preexisting (warm-start / ES-restart)
+    /// admissions counted since this shield was created. Never used for the
+    /// Active/Reduced health decision (see `live_preexisting_count`).
+    pub fn preexisting_admitted_total(&self) -> u64 {
+        self.preexisting_admitted_total
+    }
+
+    /// LIVE count of currently-shielded instances whose admission is
+    /// `PreexistingUnverified` (their launch was never observed by this ES
+    /// client). This is the only number that may drive the Process Shield
+    /// Active/Reduced decision: once a preexisting instance exits (or is
+    /// replaced by a fresh AUTH_EXEC instance), this returns to zero even
+    /// though the cumulative telemetry keeps climbing.
+    ///
+    /// Only entries that are still the CURRENT instance for their PID are
+    /// counted: a stale preexisting entry whose PID was reused by a new
+    /// AUTH_EXEC instance (e.g. after a missed NOTIFY_EXIT sequence gap)
+    /// must not keep health Reduced.
+    pub fn live_preexisting_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|(key, entry)| {
+                entry.admission == ShieldAdmission::PreexistingUnverified
+                    && self.current_by_pid.get(&key.pid) == Some(*key)
+            })
+            .count()
     }
 
     pub fn stats(&self) -> (u64, u64, u64, u64, u64) {
@@ -942,7 +966,7 @@ mod tests {
             shield.admission_of_pid(10),
             Some(ShieldAdmission::PreexistingUnverified)
         );
-        assert_eq!(shield.preexisting_admitted(), 1);
+        assert_eq!(shield.preexisting_admitted_total(), 1);
         assert_eq!(shield.stats().0, 0, "preexisting is not a regular admit");
 
         // An AUTH_EXEC admit on top keeps the existing preexisting entry and
@@ -958,7 +982,82 @@ mod tests {
             .unwrap();
         assert!(!shield.is_preexisting(11));
         assert_eq!(shield.admission_of_pid(11), Some(ShieldAdmission::AuthExec));
-        assert_eq!(shield.preexisting_admitted(), 1);
+        assert_eq!(shield.preexisting_admitted_total(), 1);
+    }
+
+    #[test]
+    fn live_preexisting_count_tracks_current_instances_only() {
+        let mut shield = MacProcessShield::new();
+        let running = facts(10, 1, 100);
+        shield
+            .admit_preexisting(running.clone(), ShieldReasonKind::Browser)
+            .unwrap();
+        // Live count == 1 while the preexisting instance is shielded.
+        assert_eq!(shield.live_preexisting_count(), 1);
+        assert_eq!(shield.preexisting_admitted_total(), 1);
+        // Process exit destroys live state; the cumulative total stays.
+        shield.remove_terminal(running.key);
+        assert_eq!(shield.live_preexisting_count(), 0);
+        assert_eq!(shield.preexisting_admitted_total(), 1);
+
+        // PID reuse: the new instance admitted via AUTH_EXEC is NOT
+        // preexisting; live count stays 0 and health may return Active.
+        let fresh = facts(10, 2, 200);
+        shield
+            .admit(fresh.clone(), ShieldReasonKind::Browser)
+            .unwrap();
+        assert_eq!(shield.live_preexisting_count(), 0);
+        assert!(!shield.is_preexisting(10));
+        assert_eq!(shield.preexisting_admitted_total(), 1);
+    }
+
+    #[test]
+    fn preexisting_live_state_is_per_instance_across_multiple_pids() {
+        let mut shield = MacProcessShield::new();
+        let a = facts(10, 1, 100);
+        let b = facts(11, 1, 110);
+        shield
+            .admit_preexisting(a.clone(), ShieldReasonKind::Browser)
+            .unwrap();
+        shield
+            .admit_preexisting(b.clone(), ShieldReasonKind::Browser)
+            .unwrap();
+        assert_eq!(shield.live_preexisting_count(), 2);
+        shield.remove_terminal(a.key);
+        assert_eq!(shield.live_preexisting_count(), 1);
+        assert!(!shield.is_preexisting(10));
+        assert!(shield.is_preexisting(11));
+        shield.remove_terminal(b.key);
+        assert_eq!(shield.live_preexisting_count(), 0);
+    }
+
+    #[test]
+    fn stale_preexisting_entry_after_pid_reuse_does_not_count_live() {
+        // Simulate a missed NOTIFY_EXIT (sequence gap): a preexisting
+        // instance at pid 10 is still in `entries`, but a NEW instance at
+        // the same PID has been admitted via AUTH_EXEC and is now the
+        // current mapping. The stale preexisting entry must NOT keep the
+        // live count (and thus health) Reduced.
+        let mut shield = MacProcessShield::new();
+        let old = facts(10, 1, 100);
+        shield
+            .admit_preexisting(old.clone(), ShieldReasonKind::Browser)
+            .unwrap();
+        assert_eq!(shield.live_preexisting_count(), 1);
+        // New instance at the same PID (new pidversion/start), admitted
+        // via AUTH_EXEC; the old entry is deliberately NOT removed to
+        // model the missed-exit sequence gap.
+        let fresh = facts(10, 2, 200);
+        shield
+            .admit(fresh.clone(), ShieldReasonKind::Browser)
+            .unwrap();
+        assert!(shield.is_shielded_exact(&fresh));
+        assert_eq!(shield.admission_of_pid(10), Some(ShieldAdmission::AuthExec));
+        assert_eq!(
+            shield.live_preexisting_count(),
+            0,
+            "stale preexisting entry must not count once the PID is reused"
+        );
     }
 
     #[test]
@@ -971,7 +1070,7 @@ mod tests {
             Err(ShieldError::InvalidIdentity(_))
         ));
         assert!(shield.is_empty());
-        assert_eq!(shield.preexisting_admitted(), 0);
+        assert_eq!(shield.preexisting_admitted_total(), 0);
     }
 
     #[test]

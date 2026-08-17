@@ -89,25 +89,42 @@ sleep 3
 chrome="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 firefox="/Applications/Firefox.app/Contents/MacOS/firefox"
 
-# --- Chrome disposable ---
+# --- Chrome disposable (normal sandbox FIRST; --no-sandbox only as a
+# labeled diagnostic fallback if the automation sandbox is blocked) ---
 chrome_profile="$work/chrome-profile"
 mkdir -p "$chrome_profile"
-"$chrome" --user-data-dir="$chrome_profile" --no-first-run --no-default-browser-check --disable-background-networking --disable-component-update --disable-sync --no-sandbox "data:text/html,<title>guard-mps11-chrome</title><script>document.title=document.title</script><h1>ok</h1>" >"$work/chrome1.log" 2>&1 &
+chrome_flags="--user-data-dir=$chrome_profile --no-first-run --no-default-browser-check --disable-background-networking --disable-component-update --disable-sync"
+sandbox_ok=1
+"$chrome" $chrome_flags "data:text/html,<title>guard-mps11-chrome</title><script>document.title=document.title</script><h1>ok</h1>" >"$work/chrome1.log" 2>&1 &
 chrome_pid=$!
 sleep 12
-check 'chrome launches (first)' kill -0 "$chrome_pid" 2>/dev/null
+if kill -0 "$chrome_pid" 2>/dev/null; then
+    check 'chrome launches (first, normal sandbox)' true
+else
+    echo "CHROME_SANDBOX_BLOCKER: normal-sandbox launch failed; see $work/chrome1.log" >&2
+    sandbox_ok=0
+    "$chrome" $chrome_flags --no-sandbox "data:text/html,<title>guard-mps11-chrome-diagnostic</title><h1>ok</h1>" >"$work/chrome1-nosandbox.log" 2>&1 &
+    chrome_pid=$!
+    sleep 12
+    check 'chrome launches (diagnostic --no-sandbox fallback only)' kill -0 "$chrome_pid" 2>/dev/null
+fi
 chrome_main_pid=$(pgrep -f 'user-data-dir=.*guard-mps11' | head -1 || true)
 check 'chrome main process running' test -n "$chrome_main_pid"
 # JS/JIT smoke: use the DevTools-less heuristic — the process must stay alive.
 sleep 5
 check 'chrome stays alive after JS/JIT load' kill -0 "$chrome_pid" 2>/dev/null
-# Restart the disposable profile.
+# Restart the disposable profile (same sandbox mode as the first launch).
 pkill -f "user-data-dir=$chrome_profile" 2>/dev/null || true
 sleep 4
-"$chrome" --user-data-dir="$chrome_profile" --no-first-run --no-default-browser-check --disable-background-networking --disable-component-update --disable-sync --no-sandbox "data:text/html,<h1>restart</h1>" >"$work/chrome2.log" 2>&1 &
+if [ "$sandbox_ok" -eq 1 ]; then
+    "$chrome" $chrome_flags "data:text/html,<h1>restart</h1>" >"$work/chrome2.log" 2>&1 &
+else
+    "$chrome" $chrome_flags --no-sandbox "data:text/html,<h1>restart</h1>" >"$work/chrome2.log" 2>&1 &
+fi
 chrome_pid=$!
 sleep 12
 check 'chrome relaunch works' kill -0 "$chrome_pid" 2>/dev/null
+chrome_main_pid=$(pgrep -f 'user-data-dir=.*guard-mps11' | head -1 || true)
 pkill -f 'user-data-dir=.*guard-mps11' 2>/dev/null || true
 sleep 3
 
@@ -131,60 +148,130 @@ sleep 14
 check 'firefox relaunch works' kill -0 "$ff_pid" 2>/dev/null
 pkill -f 'profile .*guard-mps11' 2>/dev/null || true
 sleep 3
-
-# --- File Shield own-profile access ---
-# The disposable Chrome profile is not enrolled, so own-profile File Shield
-# rules do not apply; the browser itself must be able to read/write its own
-# disposable profile (not a protected resource). Guard only intercepts
-# PROTECTED resources, so ordinary profile IO must be unaffected.
+# --- MPS Hardening 2: protected disposable-profile integration ---
+# Enroll the DISPOSABLE Chrome profile as a protected browser profile and
+# verify the full allow/deny chain without touching any real browser data.
+# The disposable profile root is the ONLY enrollment in scope for this test.
 chrome_session="$chrome_profile/Default"
-mkdir -p "$chrome_session"
-printf "synthetic disposable state\n" >"$chrome_session/Preferences"
-check "disposable profile write is not blocked by File Shield" test -f "$chrome_session/Preferences"
+mkdir -p "$chrome_session/Network"
+# Synthetic protected fixtures (never real browser data).
+printf "%s\n" "MPS11_DISPOSABLE_COOKIE_FIXTURE_$$" >"$chrome_session/Network/Cookies"
+printf "%s\n" "MPS11_DISPOSABLE_PREFERENCES_$$" >"$chrome_session/Preferences"
 
-# --- Security recheck: untrusted same-user task probe against the REAL
-# shielded browser must still be denied (MPS11 harness requirement).
+cat <<INSTRUCTIONS
+A new disposable browser profile is ready at:
+
+  $chrome_profile
+
+In the Sensitive File Guard GUI, enroll EXACTLY this disposable profile as a
+protected Chrome browser profile (custom profile enrollment). Do NOT select
+or modify any real browser profile. Confirm status shows the disposable
+profile protected and Process Shield Active/Reduced.
+INSTRUCTIONS
+printf "Press Return after the disposable profile is enrolled: "
+read -r _answer
+
+# Verify enrollment took effect: at least one enrolled browser exe.
+status=$("$installed_app/Contents/MacOS/guardctl" --json status 2>/dev/null || true)
+if printf "%s\n" "$status" | grep -Eq '"browser_exes"[[:space:]]*:[[:space:]]*[1-9]'; then
+    check "disposable browser profile enrolled (browser_exes >= 1)" true
+else
+    echo "browser_exes not visible in status; enrollment may be incomplete" >&2
+    check "disposable browser profile enrolled (browser_exes >= 1)" false
+fi
+
+# 1. The REAL signed browser reading its OWN protected disposable profile
+#    must be ALLOWED (browser stays alive and can page-load with File Shield
+#    protecting its profile).
+"$chrome" $chrome_flags "data:text/html,<title>guard-mps11-protected</title><h1>protected</h1>" >"$work/chrome-protected.log" 2>&1 &
+chrome_protected_pid=$!
+sleep 12
+check "chrome own protected disposable profile: page load with File Shield active" kill -0 "$chrome_protected_pid" 2>/dev/null
+sleep 3
+check "chrome stays alive after own-profile protected page load" kill -0 "$chrome_protected_pid" 2>/dev/null
+chrome_main_pid=$(pgrep -f 'user-data-dir=.*guard-mps11' | head -1 || true)
+
+# 2. Untrusted same-user probe -> protected disposable Cookies -> DENY.
 MACOSX_DEPLOYMENT_TARGET=13.0 cargo build --manifest-path "$repo_dir/Cargo.toml"     -p guard-test-probe >/dev/null 2>&1 || true
 probe="$repo_dir/target/debug/guard-test-probe"
+if [ -x "$probe" ]; then
+    set +e
+    "$probe" read "$chrome_session/Network/Cookies" >"$work/probe-cookies.out" 2>"$work/probe-cookies.err"
+    probe_cookie_exit=$?
+    set -e
+    if [ "$probe_cookie_exit" -ne 0 ]; then
+        check "untrusted probe DENIED protected disposable Cookies" true
+    else
+        echo "probe read cookies exit=$probe_cookie_exit (expected non-zero = denied)" >&2
+        check "untrusted probe DENIED protected disposable Cookies" false
+    fi
+    set +e
+    "$probe" read "$chrome_session/Preferences" >"$work/probe-prefs.out" 2>"$work/probe-prefs.err"
+    probe_prefs_exit=$?
+    set -e
+    if [ "$probe_prefs_exit" -ne 0 ]; then
+        check "untrusted probe DENIED protected disposable Preferences" true
+    else
+        echo "probe read preferences exit=$probe_prefs_exit (expected non-zero = denied)" >&2
+        check "untrusted probe DENIED protected disposable Preferences" false
+    fi
+else
+    echo "BLOCKED: guard-test-probe unavailable; protected-file deny checks skipped" >&2
+fi
+
+# 3. Untrusted same-user probe -> real browser task control -> DENY.
 if [ -x "$probe" ] && [ -n "$chrome_main_pid" ]; then
     set +e
     "$probe" probe-task "$chrome_main_pid" control
-    probe_exit=$?
+    probe_task_exit=$?
     set -e
-    if [ "$probe_exit" -eq 4 ]; then
-        check "untrusted same-user task probe denied against real Chrome" true
+    if [ "$probe_task_exit" -eq 4 ]; then
+        check "untrusted probe DENIED real browser task control" true
     else
-        echo "probe_task exit=$probe_exit (expected 4 = denied)" >&2
-        check "untrusted same-user task probe denied against real Chrome" false
+        echo "probe_task exit=$probe_task_exit (expected 4 = denied)" >&2
+        check "untrusted probe DENIED real browser task control" false
     fi
 else
-    echo "BLOCKED: guard-test-probe unavailable; real-browser task recheck skipped" >&2
+    echo "BLOCKED: probe or chrome main unavailable; task-deny recheck skipped" >&2
 fi
 
-# --- Audit: task-deny storm check via authenticated guardctl events (the
-# audit db is root-owned; guardctl queries it through the XPC service).
+pkill -f "user-data-dir=.*guard-mps11" 2>/dev/null || true
+sleep 3
+
+# --- Audit (real assertion): the untrusted probe denials above must have
+# produced protected-resource deny rows, and a task-deny row must be present
+# from the real-browser task probe. These are real conditions, not stubs.
 sleep 2
 guardctl="$installed_app/Contents/MacOS/guardctl"
-events=$("$guardctl" --json events --limit 500 2>/dev/null || true)
-task_denies=$(printf "%s\n" "$events" | grep -cE '"(event_code|reason_code)": "(process_shield_task_(control|read)_denied|browser_protected_resource)"' || true)
-echo "task_denies=$task_denies"
-if printf "%s\n" "$events" | grep -q '"kind"[[:space:]]*:[[:space:]]*"events"' ; then
-    check "task/process-shield audit rows queryable via guardctl" true
+events=$("$guardctl" --json events --limit 1000 2>/dev/null || true)
+if printf "%s\n" "$events" | grep -qE '"event_code"[[:space:]]*:[[:space:]]*"(browser_access_denied|browser_protected_resource|system_process_access_suppressed)"'; then
+    check "audit row for protected-resource probe deny present" true
 else
-    echo "guardctl events did not return a valid response:" >&2
-    printf "%s\n" "$events" | head -10 >&2 || true
-    check "task/process-shield audit rows queryable via guardctl" false
+    echo "no protected-resource deny row found in events:" >&2
+    printf "%s\n" "$events" | grep -E '"event_code"' | head -8 >&2 || true
+    check "audit row for protected-resource probe deny present" false
+fi
+if printf "%s\n" "$events" | grep -qE '"event_code"[[:space:]]*:[[:space:]]*"process_shield_task_(control|read)_denied"'; then
+    check "audit row for real-browser task-port deny present" true
+else
+    echo "no process_shield task-deny row found in events:" >&2
+    printf "%s\n" "$events" | grep -E '"event_code"' | head -8 >&2 || true
+    check "audit row for real-browser task-port deny present" false
+fi
+if printf "%s\n" "$events" | grep -qE 'MPS11_DISPOSABLE_(COOKIE|PREFERENCES)_FIXTURE'; then
+    check "audit contains NO protected disposable fixture contents" false
+else
+    check "audit contains NO protected disposable fixture contents" true
 fi
 
 echo "=== MPS11 SUMMARY pass=$pass fail=$fail ==="
 echo "browser logs: $work"
-if [ "$fail" -eq 0 ] && [ "$pass" -ge 7 ]; then
-    echo "DISPOSABLE BROWSER COMPATIBILITY PASS"
+if [ "$fail" -eq 0 ] && [ "$pass" -ge 12 ]; then
+    echo "DISPOSABLE BROWSER + PROTECTED-PROFILE INTEGRATION PASS"
 else
-    echo "DISPOSABLE BROWSER COMPATIBILITY FAIL — inspect logs and task-deny audit rows"
+    echo "MPS11 FAIL — inspect logs, task-deny rows and protected-profile deny rows"
     exit 1
 fi
-
 # Restore protection: stop the test watchdog, then activate the extension in
 # plain mode so it stays enabled and active with Process Shield.
 if [ -n "$watchdog_pid" ] && kill -0 "$watchdog_pid" 2>/dev/null; then

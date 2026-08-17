@@ -2611,15 +2611,22 @@ mod tests {
         assert_eq!(*own_state.lock().unwrap(), Terminal::Flags(ES_FFLAG_READ));
 
         // Capability expiry while the root is still alive removes ONLY the
-        // dynamic reason.
+        // dynamic reason. The enrolled browser remains shielded because the
+        // warm-start reconciliation (MPS Hardening 2) admitted it as
+        // PreexistingUnverified during the protected open above; the dynamic
         fixture
             .policy
             .maintenance_at(now + MIGRATION_LEASE_SECS + 1);
         let shield = fixture.shield.lock().unwrap();
         assert!(
-            !shield.is_shielded_exact(&importer),
-            "dynamic shield reason must disappear after lease expiry"
+            shield.is_shielded_exact(&importer),
+            "enrolled browser stays shielded (as PreexistingUnverified) after lease expiry"
         );
+        assert!(
+            shield.is_preexisting(importer.key.pid),
+            "post-expiry shielding is the warm-start preexisting reason, not the dynamic one"
+        );
+        assert_eq!(shield.live_preexisting_count(), 1);
     }
 
     #[test]

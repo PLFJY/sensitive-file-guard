@@ -127,4 +127,17 @@ with the extension active.
 
 ## Next phase readiness
 
-- MPS12 final regression + Safari observation.
+- MPS12 final regression + Safari observation.## MPS Hardening 2 (protected-profile integration)
+
+- Script updated: Chrome now launches with normal sandbox FIRST;
+  `--no-sandbox` is only a labeled diagnostic fallback (blocker echoed).
+- Full protected disposable-profile chain added: enroll disposable profile ->
+  browser own-profile ALLOW -> untrusted probe DENY on Cookies/Preferences ->
+  probe task-port DENY on real Chrome -> audit rows present with no fixture
+  contents.
+- Assertion review: MPS9 "post-compromise protected read denied" is now a real
+  conditional; no `check ... true` stub remains.
+- LIVE RUN STATUS FOR HARDENING-2: BLOCKED on this host (active extension is the
+  hardening-1 build; re-activation blocked by stale extension versions needing
+  reboot). Prior hardening-1 live evidence (8/8, probe result=5 port=0) remains
+  valid and is clearly labeled as previous evidence.
