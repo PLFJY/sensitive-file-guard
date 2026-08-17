@@ -179,10 +179,22 @@ impl guard_platform::ProcessIdentityResolver for MacProcessIdentityResolver {
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 if !shield.is_shielded_exact(&facts) {
-                    let _ = shield.admit_preexisting(
+                    // Fail closed: if the trusted browser cannot be
+                    // reconciled into Process Shield, do NOT return a
+                    // trusted Normal identity. This is an internal
+                    // enforcement-state failure (never a confirmed
+                    // compromise): the protected AUTH_OPEN must fail
+                    // rather than proceed as if launch integrity were
+                    // verified.
+                    shield.admit_preexisting(
                         facts.clone(),
                         crate::process_shield::ShieldReasonKind::Browser,
-                    );
+                    )
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "failed to reconcile trusted preexisting browser into Process Shield: {error}"
+                        )
+                    })?;
                 }
             }
         }
@@ -675,6 +687,64 @@ mod tests {
         // A second resolve() is idempotent: still exactly one admission.
         resolver.resolve(facts.key.pid, 501).unwrap();
         assert_eq!(shield.lock().unwrap().preexisting_admitted_total(), 1);
+    }
+
+    #[test]
+    fn resolver_fails_closed_when_preexisting_reconciliation_rejected() {
+        use crate::identity::MacProcessGraph;
+        use crate::process_shield::{MacProcessShield, ShieldReasonKind};
+        use std::sync::Arc;
+        use std::sync::Mutex;
+
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("Chrome.app/Contents/MacOS/Chrome");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, b"signed fixture").unwrap();
+        let store = MacBrowserTrustStore::load_and_revalidate(vec![signed_browser(
+            temp.path(),
+            &executable,
+            BrowserExecutableRole::Main,
+        )])
+        .unwrap();
+
+        // Graph facts: the current exact instance (start=100).
+        let graph_facts = process(&executable, 501, "TEAM", "com.example.chrome");
+
+        // Shield already contains an entry for the SAME audit key
+        // (pid=50, pidversion=3) but a DIFFERENT stable identity
+        // (start=200). admit_preexisting must reject this as
+        // "same audit key changed stable identity", so the resolver
+        // must fail closed instead of returning a trusted Normal identity.
+        let mut shield = MacProcessShield::new();
+        let mut conflicting = graph_facts.clone();
+        conflicting.start_time_us = 200;
+        shield
+            .admit_preexisting(conflicting, ShieldReasonKind::Browser)
+            .unwrap();
+
+        let graph = Arc::new(Mutex::new(MacProcessGraph::default()));
+        graph
+            .lock()
+            .unwrap()
+            .observe(graph_facts.clone(), std::time::Instant::now())
+            .unwrap();
+        let resolver = MacProcessIdentityResolver::new_shared_with_shield(
+            Arc::clone(&graph),
+            Arc::new(std::sync::RwLock::new(store)),
+            Arc::new(Mutex::new(shield)),
+        );
+
+        // The trusted browser cannot be reconciled -> resolve() must Err,
+        // so no trusted Normal identity escapes to the portable policy.
+        let result = resolver.resolve(graph_facts.key.pid, 501);
+        let error = match result {
+            Ok(_) => panic!("resolve() must fail closed when reconciliation is rejected"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("failed to reconcile trusted preexisting browser"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

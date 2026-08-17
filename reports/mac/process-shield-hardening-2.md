@@ -48,6 +48,29 @@ Only exact-instance identity is used (pid + pidversion + stable identity);
 basename / path-only / same-UID rules are never authority. Unrelated processes
 are never admitted (tested).
 
+## 2b. Final Closure: fail-closed reconciliation (swallowed error fixed)
+
+The warm-start reconciliation in resolve() previously ignored the result of
+admit_preexisting() (`let _ = ...`). If a trusted browser could not be
+reconciled into Process Shield (e.g. the shield already held the same audit
+key with a different stable identity), the resolver returned a trusted Normal
+identity anyway — the protected AUTH_OPEN would proceed as if launch
+integrity were verified.
+
+Now the reconciliation error propagates:
+
+- admit_preexisting fails -> resolve() returns Err("failed to reconcile
+  trusted preexisting browser into Process Shield: ...") -> the guard-es
+  policy fail-closes the protected AUTH_OPEN with Deny(UnknownProcess) +
+  permission.deny(). No trusted Normal identity escapes to the portable
+  policy.
+- The failure is treated as an internal enforcement-state failure, never as a
+  confirmed process compromise (no Compromised transition).
+
+New test: resolver_fails_closed_when_preexisting_reconciliation_rejected —
+constructs a shield that already holds the same audit key with a different
+stable identity, then asserts resolve() returns Err and no identity escapes.
+
 ## 3. Pre-held task-port boundary (documented, no code)
 
 Process Shield prevents NEW protected task-port acquisition while active. After
@@ -144,10 +167,20 @@ Previous real-host evidence (hardening-1, guard-es 1787000100 active): 8/8
 browser checks PASS incl. untrusted probe denied vs real Chrome
 (PROBE_TASK result=5 port=0).
 
-MPS11 protected-profile live run: BLOCKED on this host (needs one interactive
-GUI enrollment of the disposable profile + an extension reactivation cycle;
-stale "terminated waiting to uninstall on reboot" versions require a reboot to
-clear). The script is updated and ready to run after reboot.
+MPS11 protected-profile live run (final closure, build 1787000400 active):
+- normal-sandbox Chrome launches / stays alive / relaunches            PASS
+- Firefox launches / alive                                             PASS
+- untrusted probe -> real Chrome task control -> DENY (result=5 port=0) PASS
+- untrusted probe -> real Chrome task read    -> DENY (result=-1 port=0) PASS
+- untrusted probe -> real Firefox cookies.sqlite -> DENY (EPERM)       PASS
+- audit browser_access_denied rows present, NO secret contents         PASS
+- Process Shield counters live (admitted=130, preexisting=14, compromised=16) PASS
+- protected DISPOSABLE-profile own-access ALLOW                        BLOCKED:
+  requires one interactive GUI enrollment approval of the disposable profile
+  (LocalAuthentication by design); not automated and not faked.
+The earlier "stale versions need reboot" blocker was worked around by
+deploying to a proper .app path (Sensitive File Guard Hardened.app) and
+activating via watchdog; the fail-closed build ran live.
 - MPS11 protected-profile integration needs one interactive GUI enrollment.
 
 ## Security invariants (unchanged)
