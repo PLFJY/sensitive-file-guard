@@ -153,3 +153,44 @@ activation carries a distinct extension version.
   standalone Chrome Helper exits before a stable process exists (no audit
   row) — documented as a live-harness limitation, not a policy gap.
 
+## 9. Round-8 addendum: stability root cause + MCH8 extension blocker
+
+### 9.1 Recurring deactivation root cause (VERIFIED FACT)
+
+The `--activate-system-extension-watchdog` mode DEACTIVATES the extension when
+the watchdog exits (platform_service.rs deactivate_after_watchdog). My restore
+procedure stopped the watchdog but skipped the plain-mode re-activation
+(`--activate-system-extension`) that the MPS11 script performs, so each stopped
+watchdog took the extension down. Fixed: stop watchdog -> plain activation;
+verified stable (same guard-es instance, 0 deactivations in 8+ minutes, user
+config intact: 3 browsers / 9 exes). The MCH build is now permanently active
+and stable on this host.
+
+### 9.2 MCH8 live extension-compatibility run: BLOCKED (browser restriction)
+
+The MV3 fixture (manifest + JS validated; gecko id added; XPI builds) cannot be
+loaded programmatically on this host:
+- Google Chrome (branded build): `--load-extension is not allowed in Google
+  Chrome, ignoring.` — CLI unpacked-extension loading is forbidden; the
+  External-Extensions profile mechanism also did not load it.
+- Firefox (release build): unsigned extensions are rejected (no signing
+  chain); `xpinstall.signatures.required=false` is ineffective in release.
+A manual UI install (drag the fixture dir into chrome://extensions or
+about:debugging) is the required human step.
+
+Process Shield behavior during extension-load attempts + multi-origin browsing
+(Firefox): 0 DENY, 0 false Compromised, browser functional — consistent with
+no extension-related deny storm, but NOT full MCH8 extension coverage.
+
+### 9.3 Acceptance-gate status (final for this round)
+
+```text
+Chrome/Firefox browsing, churn, multi-origin, wasm/webgl/sw   PASS (live)
+unexplained task DENY                                        0 (live)
+false Compromised                                            0 (live)
+unknown-process task control/read, memory canary              BLOCKED (live probe)
+protected disposable-profile File Shield ALLOW                BLOCKED (GUI enrollment)
+harmless extension fixture live run                           BLOCKED (browser
+  signing/CLI restriction; fixture ready for manual install)
+```
+
