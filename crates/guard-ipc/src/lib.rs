@@ -474,10 +474,13 @@ pub struct MacHealthInfo {
 /// a fake global "Protected" flag.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessShieldInfo {
-    /// Active | Reduced | Unavailable with the exact reason.
+    /// Active | Reduced | Disabled | Unavailable with the exact reason.
     pub state: String,
     pub reason: Option<String>,
-    /// task control protection: active / unavailable
+    /// True when Process Shield is enabled by policy (MCH0). The state is
+    /// Disabled exactly when this is false; File Shield may still be active.
+    pub enabled: bool,
+    /// task control protection: active / disabled / unavailable
     pub task_control_protection: String,
     /// task read protection: active / unavailable (host feature-detected)
     pub task_read_protection: String,
@@ -536,6 +539,10 @@ pub struct ConfigurationInfo {
     pub enforcement_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy_enabled: Option<bool>,
+    /// Independent Process Shield toggle (MCH0): File Shield may stay active
+    /// while Process Shield is disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_shield_enabled: Option<bool>,
     pub browsers: Vec<ConfiguredBrowserInfo>,
     pub enrolled_exes: Vec<String>,
     pub ssh_keys: Vec<String>,

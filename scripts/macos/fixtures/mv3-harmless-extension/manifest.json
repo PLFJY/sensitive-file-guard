@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "Sensitive File Guard MCH8 Harmless Fixture",
+  "version": "1.0.0",
+  "description": "Harmless Manifest V3 fixture: background service worker, content script, popup, options page, storage.local, tabs API, and a benign DOM modification. Used ONLY against disposable browser profiles for Process Shield extension-compatibility testing (MCH8). Never touches real profiles or secrets.",
+  "permissions": ["storage", "tabs"],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "MCH8 fixture",
+    "default_popup": "popup.html"
+  },
+  "options_page": "options.html",
+  "options_ui": { "page": "options.html", "open_in_tab": false }
+}

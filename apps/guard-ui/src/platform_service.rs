@@ -98,8 +98,18 @@ pub struct EditableConfiguration {
     pub enrolled_exes: Vec<std::path::PathBuf>,
     pub ssh_keys: Vec<std::path::PathBuf>,
     #[cfg(target_os = "macos")]
+    #[serde(default = "default_true")]
+    pub process_shield_enabled: bool,
+    #[cfg(target_os = "macos")]
     #[serde(default)]
     pub mac_allowlist: platform_macos::config::MacAllowlistConfig,
+}
+
+/// Serde default for the macOS-only Process Shield toggle: absent means
+/// enabled (backward compatible with configs that predate MCH0).
+#[cfg(target_os = "macos")]
+fn default_true() -> bool {
+    true
 }
 
 pub const fn shows_linux_mode() -> bool {
@@ -113,6 +123,9 @@ pub struct PlatformOverview {
     pub extension_state: String,
     pub full_disk_access: String,
     pub policy_enabled: bool,
+    /// MCH0: independent Process Shield toggle state (macOS; true on other
+    /// platforms where Process Shield does not exist).
+    pub process_shield_enabled: bool,
     pub helper_state: String,
     pub sip_state: String,
     pub developer_mode_state: String,
@@ -221,15 +234,22 @@ pub fn overview_detail(
                     .as_ref()
                     .and_then(|health| health.process_shield.as_ref())
                     .map(|shield| {
-                        format!(
-                            " · Process Shield: {} (task control: {}, task read: {}, launch integrity: {}, injection telemetry: {}, posture: {})",
-                            shield.state,
-                            shield.task_control_protection,
-                            shield.task_read_protection,
-                            shield.launch_integrity,
-                            shield.injection_telemetry,
-                            shield.runtime_posture,
-                        )
+                        if shield.state == "Disabled" {
+                            // MCH0: explicit user/policy toggle. File Shield
+                            // stays active; never present a scary or degraded
+                            // label for an intentional state.
+                            " · Process Shield: Disabled (browser process-injection protection is unavailable; File Shield remains active)".to_string()
+                        } else {
+                            format!(
+                                " · Process Shield: {} (task control: {}, task read: {}, launch integrity: {}, injection telemetry: {}, posture: {})",
+                                shield.state,
+                                shield.task_control_protection,
+                                shield.task_read_protection,
+                                shield.launch_integrity,
+                                shield.injection_telemetry,
+                                shield.runtime_posture,
+                            )
+                        }
                     })
                     .unwrap_or_default();
                 format!(
@@ -435,6 +455,8 @@ pub fn initial_configuration_if_missing(backend_reachable: bool) -> Option<Edita
         Some(EditableConfiguration {
             enforcement_mode: None,
             policy_enabled: false,
+            #[cfg(target_os = "macos")]
+            process_shield_enabled: true,
             browsers: Vec::new(),
             enrolled_exes: Vec::new(),
             ssh_keys: Vec::new(),
@@ -465,6 +487,7 @@ pub fn platform_overview(
         extension_state: if service_active { "Active" } else { "Stopped" }.into(),
         full_disk_access: "Not applicable".into(),
         policy_enabled: daemon.is_some_and(|status| status.enforcement_active),
+        process_shield_enabled: true,
         helper_state: if helper_running {
             "Running"
         } else {
@@ -488,6 +511,11 @@ pub fn platform_overview(
     let policy_enabled = configuration
         .and_then(|configuration| configuration.policy_enabled)
         .unwrap_or(false);
+    // MCH0: independent Process Shield toggle; defaults to enabled for
+    // configurations that predate the field.
+    let process_shield_enabled = configuration
+        .and_then(|configuration| configuration.process_shield_enabled)
+        .unwrap_or(true);
     let helper_running = policy_enabled
         && guard_client::macos::MacGuardClient::for_current_process()
             .and_then(|client| client.pending_helper_status())
@@ -507,6 +535,7 @@ pub fn platform_overview(
         extension_state: mac_extension_state(daemon.is_some()),
         full_disk_access: mac_full_disk_access(daemon),
         policy_enabled,
+        process_shield_enabled,
         helper_state: helper_state.into(),
         sip_state: if self_use_bundle_marker().is_some() {
             match sip_is_disabled() {
@@ -547,6 +576,7 @@ pub fn platform_overview(
         extension_state: "Unsupported".into(),
         full_disk_access: "Unknown".into(),
         policy_enabled: false,
+        process_shield_enabled: true,
         helper_state: "Unsupported".into(),
         sip_state: "Unsupported".into(),
         developer_mode_state: "Unsupported".into(),
@@ -664,6 +694,30 @@ pub fn set_protection_enabled(
     }
 }
 
+/// MCH0: toggle Process Shield independently from File Shield (macOS only).
+/// The candidate configuration is updated in place and applied through the
+/// same authoritative XPC apply path as File Shield; the notification helper
+/// lifecycle is intentionally NOT touched (File Shield keeps running).
+#[cfg(target_os = "macos")]
+pub fn set_process_shield_enabled(
+    enabled: bool,
+    candidate: Option<EditableConfiguration>,
+) -> anyhow::Result<EditableConfiguration> {
+    let mut candidate = candidate.ok_or_else(|| anyhow::anyhow!("active policy is unavailable"))?;
+    candidate.process_shield_enabled = enabled;
+    let bytes = serde_json::to_vec(&candidate)?;
+    apply_config(&bytes)?;
+    Ok(candidate)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn set_process_shield_enabled(
+    _enabled: bool,
+    _candidate: Option<EditableConfiguration>,
+) -> anyhow::Result<EditableConfiguration> {
+    anyhow::bail!("the Process Shield toggle is available only on macOS")
+}
+
 #[cfg(target_os = "macos")]
 pub fn set_user_agent_enabled(enabled: bool) -> anyhow::Result<()> {
     if enabled {
@@ -754,6 +808,8 @@ pub fn editable_from_metadata(info: guard_ipc::ConfigurationInfo) -> Option<Edit
     Some(EditableConfiguration {
         enforcement_mode,
         policy_enabled: info.policy_enabled.unwrap_or(cfg!(target_os = "linux")),
+        #[cfg(target_os = "macos")]
+        process_shield_enabled: info.process_shield_enabled.unwrap_or(true),
         browsers,
         enrolled_exes: info.enrolled_exes.into_iter().map(Into::into).collect(),
         ssh_keys: info.ssh_keys.into_iter().map(Into::into).collect(),
@@ -1369,6 +1425,8 @@ fn mac_config_from_editable(
     let config = platform_macos::config::MacBackendConfig {
         version: platform_macos::config::MAC_CONFIG_VERSION,
         policy_enabled: editable.policy_enabled,
+        #[cfg(target_os = "macos")]
+        process_shield_enabled: editable.process_shield_enabled,
         common_policy: guard_platform::config::PolicyConfig {
             browsers: common_browsers,
             enrolled_exes: editable.enrolled_exes,

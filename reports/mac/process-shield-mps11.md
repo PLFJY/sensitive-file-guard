@@ -1,10 +1,24 @@
 # MPS11 — Disposable Chrome/Firefox Compatibility + Exception Review
 
+> ## AMENDMENT (MCH0-1 round) — daily-use compatibility NOT ACCEPTED
+>
+> This report's PASS covers disposable launch / JS / relaunch compatibility
+> only. It does NOT establish daily-use compatibility (tab churn, multi-origin
+> navigation, renderer churn, extensions, service workers). The same live run
+> recorded compromised=16 during ordinary browser use, i.e. always-strong
+> REMOTE_THREAD_CREATE / CS_INVALIDATED notify signals fire routinely on real
+> browsers (false ProcessIntegrity::Compromised class). Per the MCH0-1 round
+> those signals are now contextual / telemetry, Process Shield reports Reduced
+> until validated, and an independent Process Shield toggle exists. See
+> process-shield-mch0-1.md. Any claim of daily-browser acceptance must come
+> from MCH9+ evidence, not from this report.
+
 ## Status
 
-PASS — disposable Chrome and Firefox compatibility proven on this real host
-under the production Process Shield build, with narrow documented task-access
-exceptions and the untrusted synthetic probe recheck still denied.
+PASS — disposable Chrome and Firefox launch/JS/relaunch compatibility proven
+on this real host under the production Process Shield build, with narrow
+documented task-access exceptions and the untrusted synthetic probe recheck
+still denied. DAILY-USE COMPATIBILITY: NOT ACCEPTED (see amendment above).
 
 ## Repository
 

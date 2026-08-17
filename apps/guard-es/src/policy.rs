@@ -117,6 +117,9 @@ pub struct MacPolicy {
     resolver: Arc<MacProcessIdentityResolver>,
     config: RwLock<Option<MacBackendConfig>>,
     audit: Arc<AuditStore>,
+    /// MCH0: runtime Process Shield toggle shared with the ES backend and the
+    /// identity resolver; apply_config flips it from the authoritative config.
+    process_shield_enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl MacPolicy {
@@ -124,6 +127,7 @@ impl MacPolicy {
         resources: Arc<MacProtectedResources>,
         resolver: Arc<MacProcessIdentityResolver>,
         audit: Arc<AuditStore>,
+        process_shield_enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
         Self {
             inner: Mutex::new(PolicyInner::default()),
@@ -131,6 +135,7 @@ impl MacPolicy {
             resolver,
             config: RwLock::new(None),
             audit,
+            process_shield_enabled,
         }
     }
 
@@ -144,6 +149,13 @@ impl MacPolicy {
         let trust = MacBrowserTrustStore::load_and_revalidate(config.browser_trust.clone())?;
         self.resolver.replace_trust(trust)?;
         self.resources.replace(config.policy_enabled, index)?;
+        // MCH0: the Process Shield toggle is applied atomically with the rest
+        // of the policy; the ES backend and identity resolver read the same
+        // flag.
+        self.process_shield_enabled.store(
+            config.process_shield_enabled,
+            std::sync::atomic::Ordering::Release,
+        );
         *self
             .config
             .write()
@@ -162,6 +174,12 @@ impl MacPolicy {
             .read()
             .map_err(|_| anyhow::anyhow!("macOS policy config lock is poisoned"))?
             .clone())
+    }
+
+    /// MCH0: current Process Shield toggle state (shared runtime flag).
+    pub fn process_shield_enabled(&self) -> bool {
+        self.process_shield_enabled
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub fn enabled(&self) -> bool {
@@ -636,6 +654,11 @@ impl MacPolicy {
     /// The root becomes a Process Shield target so a same-user attacker cannot
     /// take over the approved reader via a task port.
     fn shield_dynamic_lease_root(&self, root: &ProcessStableId) {
+        // MCH0: with Process Shield disabled, no dynamic lease-root shielding
+        // happens (the shield would not enforce task access anyway).
+        if !self.resolver.shield_enabled() {
+            return;
+        }
         let Some(shield) = self.resolver.shield() else {
             return;
         };
@@ -659,6 +682,9 @@ impl MacPolicy {
     /// keeps its entry (quarantine) until process exit, so the File Shield
     /// deny cannot be lost by dropping the last reason.
     fn unshield_dynamic_lease_root(&self, root: &ProcessStableId) {
+        if !self.resolver.shield_enabled() {
+            return;
+        }
         let Some(shield) = self.resolver.shield() else {
             return;
         };
@@ -727,12 +753,24 @@ impl MacPolicy {
 
     fn handle_shield_at(&self, event: ShieldAuditEvent, now: u64) {
         let (event_code, target, uid_override, decision, diagnostic) = match event {
-            ShieldAuditEvent::ExecAdmitted { target, reason } => (
+            ShieldAuditEvent::ExecAdmitted {
+                target,
+                reason,
+                membership,
+            } => (
                 "process_shield_exec_admitted",
                 Some(target),
                 None,
                 Decision::Allow,
-                format!("shield_reason={}", reason.label()),
+                format!(
+                    "shield_reason={}{}",
+                    reason.label(),
+                    if reason == platform_macos::process_shield::ShieldReasonKind::Browser {
+                        format!(" session_membership={}", membership.label())
+                    } else {
+                        String::new()
+                    }
+                ),
             ),
             ShieldAuditEvent::ExecDeniedLaunchInjection {
                 target,
@@ -1787,6 +1825,7 @@ mod tests {
             let config = MacBackendConfig {
                 version: platform_macos::config::MAC_CONFIG_VERSION,
                 policy_enabled: true,
+                process_shield_enabled: true,
                 common_policy: PolicyConfig {
                     browsers: common,
                     enrolled_exes: Vec::new(),
@@ -1810,6 +1849,7 @@ mod tests {
                 protected,
                 resolver,
                 Arc::new(AuditStore::open(&audit_path).unwrap()),
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             );
             policy.apply_config(config).unwrap();
             Self {
@@ -1904,6 +1944,107 @@ mod tests {
                 .observe(facts, Instant::now())
                 .unwrap();
         }
+    }
+
+    #[test]
+    fn session_helper_is_admitted_before_its_protected_read_is_allowed() {
+        // MCH5 ordering proven at the POLICY level: a BrowserSession helper
+        // that was NOT task-protected at exec time performs a protected read.
+        // resolve() (inside handle_at) MUST admit it as SecretAuthority BEFORE
+        // the Allow decision is returned; the read is allowed and the shield
+        // already holds the promoted entry.
+        use platform_macos::browser_trust::{BrowserExecutableRole, MacExecutableEnrollment};
+        use platform_macos::process_shield::ShieldAdmission;
+
+        let fixture = Fixture::new();
+        // Enroll a genuine Helper executable for browser-a inside its bundle.
+        let helper_path = fixture
+            ._root
+            .path()
+            .join("browser-a.app/Contents/Frameworks/browser-a Helper.app/Contents/MacOS/browser-a Helper");
+        std::fs::create_dir_all(helper_path.parent().unwrap()).unwrap();
+        std::fs::write(&helper_path, b"synthetic helper executable").unwrap();
+        let mut config = fixture.policy.config().unwrap();
+        let common = config
+            .common_policy
+            .browsers
+            .iter_mut()
+            .find(|browser| browser.id == "browser-a")
+            .unwrap();
+        common.exe_paths.push(helper_path.clone());
+        let trust = config
+            .browser_trust
+            .iter_mut()
+            .find(|browser| browser.browser_id.0 == "browser-a")
+            .unwrap();
+        trust.executables.push(MacExecutableEnrollment::Signed {
+            role: BrowserExecutableRole::Helper,
+            path: helper_path.clone(),
+            bundle_suffix: None,
+            team_id: "TEAM-A".into(),
+            signing_id: "com.example.browser-a.helper".into(),
+        });
+        fixture.policy.apply_config(config).unwrap();
+
+        // Session topology: Main roots, Helper joins WITHOUT a shield entry.
+        let main = fixture.facts("browser-a", 10, None);
+        let mut helper = fixture.facts("browser-a", 11, None);
+        helper.key.pidversion = 11;
+        helper.executable.path = helper_path.clone();
+        let helper_metadata = std::fs::metadata(&helper_path).unwrap();
+        helper.executable.dev = helper_metadata.dev();
+        helper.executable.ino = helper_metadata.ino();
+        helper.executable.size = helper_metadata.size();
+        helper.executable.mtime_ns =
+            helper_metadata.mtime() * 1_000_000_000 + helper_metadata.mtime_nsec();
+        helper.executable.ctime_ns =
+            helper_metadata.ctime() * 1_000_000_000 + helper_metadata.ctime_nsec();
+        helper.code.team_id = Some("TEAM-A".into());
+        helper.code.signing_id = Some("com.example.browser-a.helper".into());
+        {
+            let mut shield = fixture.shield.lock().unwrap();
+            shield
+                .admit_browser(main.clone(), Some(BrowserExecutableRole::Main), None, false)
+                .unwrap();
+            shield
+                .admit_browser(
+                    helper.clone(),
+                    Some(BrowserExecutableRole::Helper),
+                    Some(main.key),
+                    true,
+                )
+                .unwrap();
+            assert!(
+                !shield.is_task_protected(&helper),
+                "helper must not be task-protected at exec time"
+            );
+        }
+        fixture.observe(helper.clone());
+
+        // The helper's first protected read (its own profile Cookies).
+        let (event, state) = fixture.event(
+            helper.clone(),
+            "browser-a",
+            ES_FFLAG_READ,
+            Some(Duration::from_secs(10)),
+        );
+        fixture.policy.handle_at(event, 100);
+        assert_eq!(
+            *state.lock().unwrap(),
+            Terminal::Flags(ES_FFLAG_READ),
+            "trusted browser own-profile read must be allowed"
+        );
+        let shield = fixture.shield.lock().unwrap();
+        assert!(
+            shield.is_task_protected(&helper),
+            "the helper must already be SecretAuthority when the read is allowed"
+        );
+        assert_eq!(
+            shield.admission_of_pid(11),
+            Some(ShieldAdmission::AuthExec),
+            "launch-observed helper must not be flagged preexisting"
+        );
+        assert_eq!(shield.live_preexisting_count(), 0);
     }
 
     #[test]
@@ -2338,6 +2479,9 @@ mod tests {
             .handle_shield(ShieldAuditEvent::ExecAdmitted {
                 target: target.clone(),
                 reason: platform_macos::process_shield::ShieldReasonKind::Browser,
+                membership: platform_macos::browser_session::SessionMembership::Rejected(
+                    platform_macos::browser_session::RejectionKind::Unverifiable,
+                ),
             });
         fixture
             .policy

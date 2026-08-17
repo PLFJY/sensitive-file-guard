@@ -240,8 +240,13 @@ impl ControlHandler {
                 || stats.classifier_failures > 0
                 || self.policy.audit_dropped() > 0);
         // Built before any field move so the backend health can be borrowed.
-        let process_shield =
-            process_shield_info(&health, self.policy.config_optional().ok().flatten());
+        // MCH0: the runtime toggle comes from the applied policy (the same flag
+        // the ES backend and resolver read), never from a stale file.
+        let process_shield = process_shield_info(
+            &health,
+            self.policy.config_optional().ok().flatten(),
+            self.policy.process_shield_enabled(),
+        );
         Response::ok(ResponseBody::Status(Box::new(StatusInfo {
             version: env!("CARGO_PKG_VERSION").into(),
             backend_kind: "macos-endpoint-security".into(),
@@ -392,11 +397,23 @@ pub fn run() -> ExitCode {
         .as_ref()
         .map(EndpointSecurityBackend::process_shield)
         .unwrap_or_else(|| Arc::new(Mutex::new(MacProcessShield::new())));
+    // MCH0: one shared runtime toggle for Process Shield, read by the ES
+    // backend (exec/task/notify gates), the identity resolver (warm-start
+    // reconciliation + integrity) and MacPolicy (config applies flip it).
+    let process_shield_enabled = Arc::new(std::sync::atomic::AtomicBool::new(
+        loaded_config
+            .as_ref()
+            .map_or(true, |config| config.process_shield_enabled),
+    ));
+    if let Some(backend_ref) = backend.as_mut() {
+        backend_ref.set_process_shield_enabled(Arc::clone(&process_shield_enabled));
+    }
     let resolver = Arc::new(MacProcessIdentityResolver::new_shared_with_shield(
         graph,
         shared_trust,
         shield,
     ));
+    resolver.set_process_shield_enabled(Some(Arc::clone(&process_shield_enabled)));
     let audit = match open_audit_store() {
         Ok(audit) => Arc::new(audit),
         Err(error) if backend.is_none() => {
@@ -414,7 +431,12 @@ pub fn run() -> ExitCode {
             return ExitCode::from(78);
         }
     };
-    let policy = Arc::new(MacPolicy::new(Arc::clone(&resources), resolver, audit));
+    let policy = Arc::new(MacPolicy::new(
+        Arc::clone(&resources),
+        resolver,
+        audit,
+        Arc::clone(&process_shield_enabled),
+    ));
     if let Some(config) = loaded_config {
         if let Err(error) = policy.apply_config(config) {
             eprintln!("guard-es: policy configuration could not be loaded: {error}");
@@ -545,11 +567,14 @@ pub fn run() -> ExitCode {
     }
 }
 
-/// Build the truthful Process Shield status section (MPS8). Distinguishes
-/// Active / Reduced / Unavailable with exact reasons; never a fake global flag.
+/// Build the truthful Process Shield status section (MPS8 + MCH0). Distinguishes
+/// Active / Reduced / Disabled / Unavailable with exact reasons; never a fake
+/// global flag. A user-disabled Process Shield reports Disabled while File
+/// Shield may stay Active.
 fn process_shield_info(
     health: &BackendHealth,
     config: Option<MacBackendConfig>,
+    process_shield_enabled: bool,
 ) -> guard_ipc::ProcessShieldInfo {
     use guard_ipc::ProcessShieldInfo;
     use platform_macos::code_signature::RuntimePosture;
@@ -558,9 +583,23 @@ fn process_shield_info(
     let task_read_active = health.task_read_supported;
     let notify_active = health.task_notify_supported;
     let preexisting = health.shield_preexisting > 0;
-    let reduced =
-        !task_read_active || !notify_active || health.process_graph_degraded || preexisting;
-    let (state, reason) = if !backend_live {
+    let reduced = !task_read_active
+        || !notify_active
+        || health.process_graph_degraded
+        || preexisting
+        || platform_macos::process_shield::CS_INVALIDATED_STRONG_SIGNAL_UNVALIDATED;
+    let (state, reason) = if !process_shield_enabled {
+        // MCH0: explicit user/policy toggle. File Shield remains active; only
+        // browser process-injection protection is unavailable. Never presented
+        // as Reduced or Active.
+        (
+            "Disabled".into(),
+            Some(
+                "Process Shield is disabled by policy; browser process-injection protection is unavailable. File Shield remains active."
+                    .into(),
+            ),
+        )
+    } else if !backend_live {
         (
             "Unavailable".into(),
             Some("Endpoint Security client is not active; Process Shield is not enforcing".into()),
@@ -581,6 +620,12 @@ fn process_shield_info(
                 "{} already-running shield-eligible process(es) predate Process Shield; restart them for Strong launch integrity",
                 health.shield_preexisting
             ));
+        }
+        if platform_macos::process_shield::CS_INVALIDATED_STRONG_SIGNAL_UNVALIDATED {
+            reasons.push(
+                "code-signing invalidation signal is downgraded to telemetry until validated (MCH7)"
+                    .to_string(),
+            );
         }
         ("Reduced".into(), Some(reasons.join("; ")))
     } else {
@@ -607,31 +652,39 @@ fn process_shield_info(
         "strong".to_owned()
     };
 
+    let protection_state = if !process_shield_enabled {
+        "disabled"
+    } else if backend_live {
+        "active"
+    } else {
+        "unavailable"
+    };
     ProcessShieldInfo {
         state,
         reason,
-        task_control_protection: if backend_live {
-            "active".into()
-        } else {
-            "unavailable".into()
-        },
-        task_read_protection: if backend_live && task_read_active {
+        enabled: process_shield_enabled,
+        task_control_protection: protection_state.into(),
+        task_read_protection: if !process_shield_enabled {
+            "disabled".into()
+        } else if backend_live && task_read_active {
             "active".into()
         } else {
             "unavailable".into()
         },
         task_read_supported: health.task_read_supported,
         task_notify_supported: health.task_notify_supported,
-        launch_integrity: if backend_live {
-            "active".into()
+        launch_integrity: protection_state.into(),
+        runtime_posture: if !process_shield_enabled {
+            "not-applicable".into()
         } else {
-            "unavailable".into()
+            runtime_posture
         },
-        runtime_posture,
         runtime_posture_strong: strong,
         runtime_posture_reduced: reduced,
         runtime_posture_unverifiable: unverifiable,
-        injection_telemetry: if notify_active {
+        injection_telemetry: if !process_shield_enabled {
+            "disabled".into()
+        } else if notify_active {
             "active".into()
         } else {
             "unavailable".into()
@@ -667,4 +720,88 @@ fn diagnostic_exit() -> ExitCode {
         Err(error) => eprintln!("guard-es: {error}; enforcement is not active"),
     }
     ExitCode::from(78)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn health(active: bool) -> BackendHealth {
+        BackendHealth {
+            backend: "endpoint-security".into(),
+            state: if active {
+                "ACTIVE".into()
+            } else {
+                "NOT_ENFORCING".into()
+            },
+            active,
+            degraded: false,
+            diagnostic: None,
+            sequence_gaps: 0,
+            global_sequence_gaps: 0,
+            pending_created: 0,
+            pending_resolved_allow: 0,
+            pending_resolved_deny: 0,
+            pending_timed_out: 0,
+            insufficient_deadline: 0,
+            late_responses: 0,
+            namespace_allowed: 0,
+            namespace_denied: 0,
+            namespace_alias_entries: 0,
+            namespace_alias_capacity: 0,
+            namespace_index_saturated: false,
+            process_graph_degraded: false,
+            task_control_allowed: 0,
+            task_control_denied: 0,
+            task_read_allowed: 0,
+            task_read_denied: 0,
+            task_read_supported: true,
+            task_notify_supported: true,
+            shield_admitted: 0,
+            shield_preexisting: 0,
+            shield_compromised: 0,
+            shield_launch_injection_denied: 0,
+            shield_malformed_denied: 0,
+            shield_task_notify_obtained: 0,
+            shield_trace_observed: 0,
+            shield_remote_thread_observed: 0,
+            shield_cs_invalidated_observed: 0,
+        }
+    }
+
+    #[test]
+    fn process_shield_info_disabled_is_truthful_and_file_shield_independent() {
+        // MCH0: a user-disabled Process Shield must report Disabled with the
+        // exact reason and never claim Active/Reduced; protections are
+        // disabled while the backend stays live for File Shield.
+        let info = process_shield_info(&health(true), None, false);
+        assert_eq!(info.state, "Disabled");
+        assert!(!info.enabled);
+        let reason = info.reason.as_deref().expect("disabled reason required");
+        assert!(reason.contains("Process Shield is disabled by policy"));
+        assert!(reason.contains("File Shield remains active"));
+        assert_eq!(info.task_control_protection, "disabled");
+        assert_eq!(info.task_read_protection, "disabled");
+        assert_eq!(info.launch_integrity, "disabled");
+        assert_eq!(info.injection_telemetry, "disabled");
+        assert_eq!(info.runtime_posture, "not-applicable");
+    }
+
+    #[test]
+    fn process_shield_info_enabled_reports_reduced_with_mch7_reason() {
+        // MCH7 truthfulness: while CS_INVALIDATED strong semantics are
+        // unvalidated, full-strength Active must never be claimed; the reason
+        // names the downgrade.
+        let info = process_shield_info(&health(true), None, true);
+        assert_eq!(info.state, "Reduced");
+        assert!(info.enabled);
+        let reason = info.reason.as_deref().expect("reduced reason required");
+        assert!(
+            reason.contains(
+                "code-signing invalidation signal is downgraded to telemetry until validated"
+            ),
+            "unexpected reason: {reason}"
+        );
+        assert_eq!(info.task_control_protection, "active");
+    }
 }

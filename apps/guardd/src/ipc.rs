@@ -302,6 +302,8 @@ fn handle_configuration_get(state: &IpcState, _creds: PeerCreds) -> Response {
     Response::ok(ResponseBody::Configuration(ConfigurationInfo {
         enforcement_mode: Some(cfg.enforcement_mode.as_str().to_owned()),
         policy_enabled: None,
+        // Linux has no Process Shield; the toggle is macOS-only (MCH0).
+        process_shield_enabled: None,
         browsers: cfg
             .browsers
             .iter()

@@ -9,7 +9,8 @@ use guard_core::resource::{
 };
 use guard_platform::BackendHealth;
 
-use crate::browser_trust::MacBrowserTrustStore;
+use crate::browser_session::{RejectionKind, SessionMembership};
+use crate::browser_trust::{BrowserExecutableRole, MacBrowserTrustStore};
 use crate::identity::{
     AuditProcessKey, ExecutableSnapshot, MacCodeIdentity, MacProcessFacts, MacProcessGraph,
 };
@@ -227,10 +228,13 @@ impl MacProtectedResources {
 #[derive(Debug, Clone)]
 pub enum ShieldAuditEvent {
     /// A shield-eligible exec was admitted and the exact target was registered
-    /// as shielded before the ALLOW response.
+    /// as shielded before the ALLOW response. `membership` records the MCH3
+    /// BrowserSession classification (new root / joined / rejected), metadata
+    /// only.
     ExecAdmitted {
         target: MacProcessFacts,
         reason: ShieldReasonKind,
+        membership: SessionMembership,
     },
     /// A shield-eligible exec was denied because it carried prohibited
     /// code-loading / search-path DYLD launch state.
@@ -451,6 +455,33 @@ impl EndpointSecurityConfig {
                 None
             }
         }
+    }
+
+    /// MCH3: the enrolled role (Main / Helper) of an exact process, from the
+    /// trust store. BrowserIdentity context only: never task authority.
+    pub fn browser_role_of(
+        &self,
+        target: &MacProcessFacts,
+        owner_uid: u32,
+    ) -> Option<crate::browser_trust::BrowserExecutableRole> {
+        match &self.scope {
+            ProtectionScope::Synthetic { .. } => None,
+            ProtectionScope::Browser { trust, .. } => {
+                trust
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .classify(target, owner_uid)
+                    .role
+            }
+        }
+    }
+
+    /// MCH3: is this exact process an enrolled browser executable (BrowserIdentity)?
+    pub fn is_enrolled_browser_executable(&self, facts: &MacProcessFacts, owner_uid: u32) -> bool {
+        matches!(
+            self.shield_eligible(facts, owner_uid),
+            Some(ShieldReasonKind::Browser)
+        )
     }
 
     fn classify(
@@ -682,6 +713,9 @@ impl EndpointSecurityBackend {
         let shield = Arc::new(Mutex::new(MacProcessShield::new()));
         let mut context = Box::new(CallbackContext {
             config,
+            // MCH0: Process Shield starts enabled; guard-es applies the loaded
+            // policy (set_process_shield_enabled) right after start.
+            process_shield_enabled: Arc::new(AtomicBool::new(true)),
             sender,
             scheduler: scheduler_handle,
             registry,
@@ -743,6 +777,14 @@ impl EndpointSecurityBackend {
 
     pub fn process_shield(&self) -> Arc<Mutex<MacProcessShield>> {
         Arc::clone(&self.context.shield)
+    }
+
+    /// MCH0: replace the runtime Process Shield toggle with the shared policy
+    /// flag. When disabled, Process Shield admits nothing, denies no task
+    /// access, applies no strong-signal transitions and never influences File
+    /// Shield; File Shield stays fully active.
+    pub fn set_process_shield_enabled(&mut self, flag: Arc<AtomicBool>) {
+        self.context.process_shield_enabled = flag;
     }
 
     /// Whether AUTH_GET_TASK_READ is actually enforced on this host (SDK/OS
@@ -829,9 +871,12 @@ impl EndpointSecurityBackend {
     }
 
     /// Whether Process Shield is reduced because task-read or notify
-    /// subscriptions are unavailable on this host.
+    /// subscriptions are unavailable on this host. A disabled Process Shield
+    /// is not "reduced" (it is off by explicit policy); status reporting uses
+    /// process_shield_info for the Disabled state.
     pub fn process_shield_reduced(&self) -> bool {
-        !self.task_read_supported || !self.task_notify_supported
+        self.context.process_shield_active()
+            && (!self.task_read_supported || !self.task_notify_supported)
     }
 
     pub fn process_graph(&self) -> Arc<Mutex<MacProcessGraph>> {
@@ -885,6 +930,11 @@ pub fn diagnose_client_creation() -> Result<(), ClientCreateError> {
 #[cfg(target_os = "macos")]
 struct CallbackContext {
     config: EndpointSecurityConfig,
+    /// Independent Process Shield toggle (MCH0). Shared with the guard-es
+    /// policy and the identity resolver; when false the shield admits nothing,
+    /// denies no task access, applies no strong-signal transitions and does
+    /// not influence File Shield. File Shield (AUTH_OPEN) is unaffected.
+    process_shield_enabled: Arc<AtomicBool>,
     sender: mpsc::SyncSender<MacAuthorizationEvent>,
     scheduler: DeadlineSchedulerHandle,
     registry: Arc<Mutex<Vec<Weak<PendingInner>>>>,
@@ -1000,6 +1050,40 @@ impl SequenceTracker {
 
 #[cfg(target_os = "macos")]
 impl CallbackContext {
+    /// MCH0: whether Process Shield enforcement is currently active. The flag
+    /// is shared with guard-es policy and the identity resolver so a runtime
+    /// config apply flips every shield decision atomically. File Shield never
+    /// consults this flag.
+    fn process_shield_active(&self) -> bool {
+        self.process_shield_enabled.load(Ordering::Acquire)
+    }
+
+    /// MCH3: stable key of the verified parent of an exec'ing process, plus
+    /// whether that parent is an enrolled browser executable. Returns (None,
+    /// false) when the parent identity is unavailable or the graph has no
+    /// current entry (unverifiable -> never session membership).
+    fn exec_parent_context(&self, raw: &RawExecEvent) -> (Option<AuditProcessKey>, bool) {
+        let Some(parent_pid) = (raw.process.parent_identity_available
+            && raw.process.parent_pid > 0)
+            .then_some(raw.process.parent_pid as u32)
+        else {
+            return (None, false);
+        };
+        let Some(parent_facts) = self
+            .process_graph
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .current(parent_pid)
+            .cloned()
+        else {
+            return (None, false);
+        };
+        let is_browser = self
+            .config
+            .is_enrolled_browser_executable(&parent_facts, parent_facts.uid);
+        (Some(parent_facts.key), is_browser)
+    }
+
     fn handle(
         &self,
         client: *const std::ffi::c_void,
@@ -1190,6 +1274,13 @@ impl CallbackContext {
         message: *const std::ffi::c_void,
         raw: &RawExecEvent,
     ) {
+        // MCH0: Process Shield disabled -> every exec is allowed untouched.
+        // No admission, no launch-integrity check, no shield audit. File
+        // Shield is unaffected.
+        if !self.process_shield_active() {
+            self.respond_exec(client, message, true);
+            return;
+        }
         // Requester facts are audit context only. The requester is the
         // exec'ing process; for admission we need the exact post-exec target.
         let _requester = raw.process.to_facts().ok();
@@ -1251,15 +1342,31 @@ impl CallbackContext {
         }
         // Register the exact post-exec target as shielded BEFORE responding
         // ALLOW so no NOTIFY_EXEC round-trip is required before the first
-        // task-access decision against the new instance.
-        match self
-            .shield
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .admit(target.clone(), reason)
-        {
-            Ok(()) => {
-                self.send_shield_event(ShieldAuditEvent::ExecAdmitted { target, reason });
+        // task-access decision against the new instance. MCH3: browser execs
+        // are additionally classified against verified launch topology
+        // (session root / joined member / rejected laundering); the outcome is
+        // metadata only and never changes the ALLOW decision for a clean exec.
+        let admission = if reason == ShieldReasonKind::Browser {
+            let role = self.config.browser_role_of(&target, target.uid);
+            let (parent_key, parent_is_browser) = self.exec_parent_context(raw);
+            self.shield
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .admit_browser(target.clone(), role, parent_key, parent_is_browser)
+        } else {
+            self.shield
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .admit(target.clone(), reason)
+                .map(|()| SessionMembership::Rejected(RejectionKind::Unverifiable))
+        };
+        match admission {
+            Ok(membership) => {
+                self.send_shield_event(ShieldAuditEvent::ExecAdmitted {
+                    target,
+                    reason,
+                    membership,
+                });
                 self.respond_exec(client, message, true);
             }
             Err(error) => {
@@ -1278,6 +1385,12 @@ impl CallbackContext {
         raw: &RawTaskEvent,
         kind: TaskAccessKind,
     ) {
+        // MCH0: Process Shield disabled -> every task-capability request is
+        // allowed untouched. No warm-start admission, no deny, no counters.
+        if !self.process_shield_active() {
+            self.respond_task(client, message, true);
+            return;
+        }
         // Normalize the TARGET first: for a known shielded target, malformed
         // or truncated identity must never become an allow.
         let target = match raw.target.to_facts() {
@@ -1308,17 +1421,34 @@ impl CallbackContext {
                 .shield
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if !shield.is_shielded_exact(&target) {
-                // Warm-start coverage (MPS Hardening): a shield-eligible
-                // process that predates this ES client (browser or Guard
-                // component already running when the extension restarted) was
-                // never admitted via AUTH_EXEC, so its launch integrity is
-                // UNVERIFIED. Admit it fail-closed so a same-user attacker
-                // cannot take over a browser that was already running across a
-                // guard-es/extension restart; the decision path below then
-                // denies it unless the requester is allowlisted.
+            if !shield.is_task_protected(&target) {
+                // MCH4: helpers and laundered execs are NOT task-protected.
+                // Warm-start coverage (MPS Hardening) is preserved ONLY for
+                // authority candidates: a Guard component or a browser Main
+                // that predates this ES client (never admitted via AUTH_EXEC)
+                // is admitted fail-closed so a same-user attacker cannot take
+                // it over across a guard-es/extension restart. Browser helpers
+                // without authority stay unprotected (they hold no secret
+                // authority) and are promoted on a protected read (MCH5).
                 if let Some(reason) = self.config.shield_eligible(&target, target.uid) {
-                    if let Err(error) = shield.admit_preexisting(target.clone(), reason) {
+                    let role = self.config.browser_role_of(&target, target.uid);
+                    let is_browser_main = reason == ShieldReasonKind::Browser
+                        && matches!(role, Some(BrowserExecutableRole::Main));
+                    if !is_browser_main && reason != ShieldReasonKind::GuardComponent {
+                        // Fast path: a non-authority browser helper or a
+                        // laundered exec keeps existing task behavior.
+                        drop(shield);
+                        self.respond_task(client, message, true);
+                        return;
+                    }
+                    let admission = if is_browser_main {
+                        // MCH5: warm-start Main admitted as SecretAuthority
+                        // before any task decision (launch unverified).
+                        shield.ensure_authority(&target)
+                    } else {
+                        shield.admit_preexisting(target.clone(), reason)
+                    };
+                    if let Err(error) = admission {
                         self.health.degrade(format!(
                             "shield-eligible preexisting task target failed closed during admission: {error}"
                         ));
@@ -1333,8 +1463,11 @@ impl CallbackContext {
                     self.send_shield_event(ShieldAuditEvent::ExecAdmitted {
                         target: target.clone(),
                         reason,
+                        // Warm-start: launch topology was never observed, so
+                        // session membership is unverifiable (MCH3).
+                        membership: SessionMembership::Rejected(RejectionKind::Unverifiable),
                     });
-                    // Fall through: the preexisting instance is now shielded
+                    // Fall through: the preexisting instance is now protected
                     // and subject to the same allowlist below.
                 } else {
                     // Fast path: unrelated processes keep their existing
@@ -1398,6 +1531,11 @@ impl CallbackContext {
     }
 
     fn handle_task_notify(&self, event_kind: u32, raw: &RawTaskEvent) {
+        // MCH0: Process Shield disabled -> notify signals are ignored
+        // entirely: no telemetry, no audit, no compromise transitions.
+        if !self.process_shield_active() {
+            return;
+        }
         // Telemetry only: notify events never authorize anything, so malformed
         // identities are skipped, never converted into an allow or a deny.
         let kind = match event_kind {
@@ -1428,7 +1566,9 @@ impl CallbackContext {
             .shield
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !shield.is_shielded_exact(&target) {
+        // MCH4: compromise signals apply only to task-protected
+        // (SecretAuthority) targets, never to unprotected helpers.
+        if !shield.is_task_protected(&target) {
             drop(shield);
             return;
         }
@@ -1438,8 +1578,9 @@ impl CallbackContext {
         // that was NOT legitimate under our own task allowlist means this
         // process obtained task capability despite our prevention -> strong
         // compromise signal. Routinely allowed relationships (e.g. Apple
-        // platform daemons managing processes/sessions) stay telemetry. TRACE
-        // stays telemetry; remote-thread and CS-invalidation are always strong.
+        // platform daemons managing processes/sessions) stay telemetry.
+        // MCH7 + MCH3: no kind is unconditionally strong; strong_signal_decision
+        // resolves every signal with the verified BrowserSession relationship.
         let legitimate = crate::process_shield::task_access_allowlist(
             &requester,
             &target,
@@ -1448,11 +1589,25 @@ impl CallbackContext {
                 _ => TaskAccessKind::Control,
             },
         );
-        let strong = match kind {
-            TaskNotifyKind::GetTask | TaskNotifyKind::GetTaskRead => !legitimate,
-            TaskNotifyKind::RemoteThreadCreate | TaskNotifyKind::CsInvalidated => true,
-            TaskNotifyKind::Trace => false,
-        };
+        // MCH3: verified runtime relationship first. A same-session requester
+        // is browser-internal; a provably externally launched requester (a
+        // laundered helper whose parent was an attacker) is NOT related even
+        // though it carries a genuine browser signature.
+        let relation = shield.signal_relation(&requester.key, &target.key);
+        // Fallback for UNVERIFIABLE membership (warm start / sequence gap):
+        // browser identity alone (MCH7 heuristic) keeps warm-start browsers
+        // from false-compromise transitions. BrowserIdentity is context for
+        // signal interpretation only; it never grants task authority.
+        let fallback_related = matches!(
+            self.config.shield_eligible(&requester, requester.uid),
+            Some(ShieldReasonKind::Browser)
+        );
+        let strong = crate::process_shield::strong_signal_decision(
+            kind,
+            legitimate,
+            relation,
+            fallback_related,
+        );
         let outcome = if strong {
             shield.apply_strong_signal(&target)
         } else {
@@ -2531,6 +2686,7 @@ mod tests {
         BrowserExecutableRole, MacBrowserEnrollment, MacExecutableEnrollment,
     };
     use guard_core::resource::{BrowserFamily, BrowserId};
+    use guard_core::ProcessIntegrity;
     use std::os::unix::fs::MetadataExt;
 
     fn fixture_process(signing_id: &str) -> MacProcessFacts {
@@ -2644,6 +2800,341 @@ mod tests {
         assert_eq!(target.executable.path, target_exe);
         let clean = RawExecEvent::default().launch_facts();
         assert!(!clean.has_prohibited_code_loading());
+    }
+
+    fn raw_process_facts(
+        pid: i32,
+        pidversion: i32,
+        start_time_us: u64,
+        path: &'static [u8],
+        team: &'static [u8],
+        signing: &'static [u8],
+    ) -> RawProcessFacts {
+        RawProcessFacts {
+            pid,
+            uid: 501,
+            gid: 20,
+            pidversion,
+            parent_pid: 0,
+            parent_pidversion: 0,
+            parent_identity_available: false,
+            responsible_pid: 0,
+            responsible_pidversion: 0,
+            responsible_identity_available: false,
+            start_time_us,
+            executable_dev: 9,
+            executable_ino: 10,
+            executable_mode: 0o100755,
+            executable_owner_uid: 0,
+            executable_size: 100,
+            executable_mtime_ns: 1,
+            executable_ctime_ns: 1,
+            executable_path: path.as_ptr(),
+            executable_path_len: path.len(),
+            executable_path_truncated: false,
+            code_signing_flags: 1,
+            code_signing_valid: true,
+            platform_binary: false,
+            team_id: team.as_ptr(),
+            team_id_len: team.len(),
+            signing_id: signing.as_ptr(),
+            signing_id_len: signing.len(),
+            cdhash: [1; 20],
+        }
+    }
+
+    fn notify_context(
+        config: EndpointSecurityConfig,
+        enabled: bool,
+    ) -> (
+        CallbackContext,
+        mpsc::Receiver<ShieldAuditEvent>,
+        std::sync::mpsc::Receiver<MacAuthorizationEvent>,
+    ) {
+        let (_, scheduler) = crate::pending::DeadlineScheduler::start().unwrap();
+        let (sender, open_receiver) = mpsc::sync_channel(8);
+        let (shield_sender, shield_receiver) = mpsc::sync_channel(8);
+        let context = CallbackContext {
+            config,
+            process_shield_enabled: Arc::new(AtomicBool::new(enabled)),
+            sender,
+            scheduler,
+            registry: Arc::new(Mutex::new(Vec::new())),
+            process_graph: Arc::new(Mutex::new(MacProcessGraph::default())),
+            shield: Arc::new(Mutex::new(MacProcessShield::new())),
+            shield_sender,
+            health: Arc::new(HealthTracker::active("test")),
+            sequences: Mutex::new(SequenceTracker::default()),
+        };
+        (context, shield_receiver, open_receiver)
+    }
+
+    #[test]
+    fn task_notify_disabled_flag_skips_signals_and_compromise() {
+        // MCH0: with Process Shield disabled, notify signals are ignored
+        // entirely: no compromise transition, no audit handoff, even for a
+        // pre-admitted shielded target and an unknown external requester.
+        let (_temp, config, _cookies) = browser_namespace_fixture();
+        let (context, shield_receiver, _open_receiver) = notify_context(config, false);
+        let target = fixture_process("fixture.browser");
+        context
+            .shield
+            .lock()
+            .unwrap()
+            .ensure_authority(&target)
+            .unwrap();
+        let raw = RawTaskEvent {
+            deadline: 1_000,
+            process: raw_process_facts(99, 7, 99_000, b"/usr/bin/python3", b"", b""),
+            target: raw_process_facts(
+                target.key.pid as i32,
+                target.key.pidversion as i32,
+                target.start_time_us,
+                b"/Applications/Fixture.app/Contents/MacOS/Fixture",
+                b"TEAM123456",
+                b"fixture.browser",
+            ),
+        };
+        context.handle_task_notify(13, &raw); // REMOTE_THREAD_CREATE
+        assert_eq!(
+            context
+                .shield
+                .lock()
+                .unwrap()
+                .integrity_of_pid(target.key.pid),
+            ProcessIntegrity::Normal,
+            "a disabled shield must never transition Compromised"
+        );
+        assert!(
+            shield_receiver.try_recv().is_err(),
+            "no shield audit handoff while Process Shield is disabled"
+        );
+    }
+
+    #[test]
+    fn task_notify_cs_invalidated_is_telemetry_when_enabled() {
+        // MCH7: CS_INVALIDATED automatic-compromise semantics are UNVALIDATED;
+        // even with Process Shield enabled, the signal is DETECTED telemetry
+        // and the exact target stays Normal.
+        let (_temp, config, _cookies) = browser_namespace_fixture();
+        let (context, shield_receiver, _open_receiver) = notify_context(config, true);
+        let target = fixture_process("fixture.browser");
+        context
+            .shield
+            .lock()
+            .unwrap()
+            .ensure_authority(&target)
+            .unwrap();
+        let raw = RawTaskEvent {
+            deadline: 1_000,
+            process: raw_process_facts(99, 7, 99_000, b"/usr/bin/python3", b"", b""),
+            target: raw_process_facts(
+                target.key.pid as i32,
+                target.key.pidversion as i32,
+                target.start_time_us,
+                b"/Applications/Fixture.app/Contents/MacOS/Fixture",
+                b"TEAM123456",
+                b"fixture.browser",
+            ),
+        };
+        context.handle_task_notify(14, &raw); // NOTIFY_CS_INVALIDATED
+        assert_eq!(
+            context
+                .shield
+                .lock()
+                .unwrap()
+                .integrity_of_pid(target.key.pid),
+            ProcessIntegrity::Normal,
+            "CS_INVALIDATED must not auto-compromise until validated"
+        );
+        // Telemetry handoff still recorded (DETECTED), not a Compromised event.
+        let event = shield_receiver
+            .recv_timeout(Duration::from_millis(100))
+            .ok();
+        assert!(
+            matches!(event, Some(ShieldAuditEvent::TaskNotify { kind, .. }) if kind == TaskNotifyKind::CsInvalidated),
+            "CS_INVALIDATED must be recorded as TaskNotify telemetry"
+        );
+    }
+
+    #[test]
+    fn task_notify_remote_thread_is_contextual_per_requester() {
+        // MCH7: REMOTE_THREAD_CREATE is strong only for an unknown external
+        // requester. A browser-internal requester (exact enrolled browser
+        // executable) stays telemetry.
+        let (_temp, config, _cookies) = browser_namespace_fixture();
+        let (context, shield_receiver, _open_receiver) = notify_context(config, true);
+        let target = fixture_process("fixture.browser");
+        context
+            .shield
+            .lock()
+            .unwrap()
+            .ensure_authority(&target)
+            .unwrap();
+        let external = RawTaskEvent {
+            deadline: 1_000,
+            process: raw_process_facts(99, 7, 99_000, b"/usr/bin/python3", b"", b""),
+            target: raw_process_facts(
+                target.key.pid as i32,
+                target.key.pidversion as i32,
+                target.start_time_us,
+                b"/Applications/Fixture.app/Contents/MacOS/Fixture",
+                b"TEAM123456",
+                b"fixture.browser",
+            ),
+        };
+        context.handle_task_notify(13, &external);
+        assert_eq!(
+            context
+                .shield
+                .lock()
+                .unwrap()
+                .integrity_of_pid(target.key.pid),
+            ProcessIntegrity::Compromised,
+            "unknown external remote-thread creation must be strong"
+        );
+        let event = shield_receiver
+            .recv_timeout(Duration::from_millis(100))
+            .ok();
+        assert!(
+            matches!(event, Some(ShieldAuditEvent::Compromised { signal, .. }) if signal == TaskNotifyKind::RemoteThreadCreate),
+            "strong signal must emit the Compromised handoff"
+        );
+
+        // MCH3: a fresh session root and a SAME-SESSION helper requester stay
+        // telemetry (verified browser-internal relationship).
+        let main = {
+            let mut facts = fixture_process("fixture.browser");
+            facts.key.pid = 43;
+            facts.key.pidversion = 8;
+            facts.start_time_us = 124_000;
+            facts
+        };
+        let root = context
+            .shield
+            .lock()
+            .unwrap()
+            .admit_browser(
+                main.clone(),
+                Some(crate::browser_trust::BrowserExecutableRole::Main),
+                None,
+                false,
+            )
+            .unwrap();
+        let _ = root.session_id().unwrap();
+        let helper = {
+            let mut facts = fixture_process("fixture.browser");
+            facts.key.pid = 44;
+            facts.key.pidversion = 9;
+            facts.start_time_us = 125_000;
+            facts
+        };
+        context
+            .shield
+            .lock()
+            .unwrap()
+            .admit_browser(
+                helper.clone(),
+                Some(crate::browser_trust::BrowserExecutableRole::Helper),
+                Some(main.key),
+                true,
+            )
+            .unwrap();
+        let internal = RawTaskEvent {
+            deadline: 1_000,
+            process: raw_process_facts(
+                helper.key.pid as i32,
+                helper.key.pidversion as i32,
+                helper.start_time_us,
+                b"/Applications/Fixture.app/Contents/MacOS/Fixture",
+                b"TEAM123456",
+                b"fixture.browser",
+            ),
+            target: raw_process_facts(
+                main.key.pid as i32,
+                main.key.pidversion as i32,
+                main.start_time_us,
+                b"/Applications/Fixture.app/Contents/MacOS/Fixture",
+                b"TEAM123456",
+                b"fixture.browser",
+            ),
+        };
+        context.handle_task_notify(13, &internal);
+        assert_eq!(
+            context
+                .shield
+                .lock()
+                .unwrap()
+                .integrity_of_pid(main.key.pid),
+            ProcessIntegrity::Normal,
+            "same-session remote-thread creation must stay telemetry"
+        );
+        let event = shield_receiver
+            .recv_timeout(Duration::from_millis(100))
+            .ok();
+        assert!(
+            matches!(event, Some(ShieldAuditEvent::TaskNotify { kind, .. }) if kind == TaskNotifyKind::RemoteThreadCreate),
+            "same-session remote-thread creation must be TaskNotify telemetry"
+        );
+
+        // MCH3/11 laundering: a genuine signed Helper launched by an attacker
+        // (parent NOT a session member, NOT a browser executable) is REJECTED
+        // from the session; its remote-thread creation in the real browser is
+        // a strong signal despite the genuine signature.
+        let laundered = {
+            let mut facts = fixture_process("fixture.browser");
+            facts.key.pid = 45;
+            facts.key.pidversion = 10;
+            facts.start_time_us = 126_000;
+            facts
+        };
+        let laundering = context
+            .shield
+            .lock()
+            .unwrap()
+            .admit_browser(
+                laundered.clone(),
+                Some(crate::browser_trust::BrowserExecutableRole::Helper),
+                Some(AuditProcessKey {
+                    pid: 99,
+                    pidversion: 1,
+                }),
+                false,
+            )
+            .unwrap();
+        assert!(
+            laundering.is_external(),
+            "attacker-launched signed helper must be rejected externally"
+        );
+        let laundered_event = RawTaskEvent {
+            deadline: 1_000,
+            process: raw_process_facts(
+                laundered.key.pid as i32,
+                laundered.key.pidversion as i32,
+                laundered.start_time_us,
+                b"/Applications/Fixture.app/Contents/MacOS/Fixture",
+                b"TEAM123456",
+                b"fixture.browser",
+            ),
+            target: raw_process_facts(
+                main.key.pid as i32,
+                main.key.pidversion as i32,
+                main.start_time_us,
+                b"/Applications/Fixture.app/Contents/MacOS/Fixture",
+                b"TEAM123456",
+                b"fixture.browser",
+            ),
+        };
+        context.handle_task_notify(13, &laundered_event);
+        assert_eq!(
+            context
+                .shield
+                .lock()
+                .unwrap()
+                .integrity_of_pid(main.key.pid),
+            ProcessIntegrity::Compromised,
+            "laundered signed helper must be treated as an external requester"
+        );
     }
 
     #[test]

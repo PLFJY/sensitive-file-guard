@@ -4,6 +4,8 @@
 //! lifecycle and entitlement diagnostics without containing product policy.
 
 #[cfg(target_os = "macos")]
+pub mod browser_session;
+#[cfg(target_os = "macos")]
 pub mod browser_trust;
 #[cfg(target_os = "macos")]
 pub mod bundle;

@@ -123,6 +123,9 @@ struct UiState {
     poll_in_flight: Rc<Cell<bool>>,
     protection: Rc<RefCell<Option<adw::SwitchRow>>>,
     protection_syncing: Rc<Cell<bool>>,
+    /// MCH0: independent Process Shield toggle (macOS).
+    process_shield: Rc<RefCell<Option<adw::SwitchRow>>>,
+    process_shield_syncing: Rc<Cell<bool>>,
     helper: Rc<RefCell<Option<adw::SwitchRow>>>,
     helper_syncing: Rc<Cell<bool>>,
     helper_error: Rc<RefCell<Option<String>>>,
@@ -285,6 +288,8 @@ fn build_ui(app: &adw::Application, pending_only: bool, layout_smoke_page: Optio
         poll_in_flight: Rc::new(Cell::new(false)),
         protection: Rc::new(RefCell::new(None)),
         protection_syncing: Rc::new(Cell::new(false)),
+        process_shield: Rc::new(RefCell::new(None)),
+        process_shield_syncing: Rc::new(Cell::new(false)),
         helper: Rc::new(RefCell::new(None)),
         helper_syncing: Rc::new(Cell::new(false)),
         helper_error: Rc::new(RefCell::new(None)),
@@ -495,6 +500,36 @@ fn overview_page(state: &UiState) -> gtk::Box {
         );
     });
     page.append(&row);
+    if !platform_service::shows_linux_mode() {
+        // MCH0: independent Process Shield toggle (macOS). File Shield keeps
+        // running while Process Shield is off; this switch never touches the
+        // notification helper or any system-wide security setting.
+        let shield_row = adw::SwitchRow::new();
+        shield_row.set_title("Process Shield");
+        shield_row.set_subtitle(
+            "Protect trusted browser processes from injection and memory takeover (File Shield stays active when disabled).",
+        );
+        shield_row.set_subtitle_lines(STATUS_SUBTITLE_LINES);
+        shield_row.set_active(false);
+        *state.process_shield.borrow_mut() = Some(shield_row.clone());
+        let shield_start = shield_row.clone();
+        let shield_syncing = state.process_shield_syncing.clone();
+        let candidate = state.candidate.clone();
+        shield_row.connect_active_notify(move |switch_row| {
+            if shield_syncing.get() {
+                return;
+            }
+            let enabled = switch_row.is_active();
+            shield_start.set_sensitive(false);
+            spawn_process_shield_change(
+                enabled,
+                candidate.clone(),
+                shield_start.clone(),
+                shield_syncing.clone(),
+            );
+        });
+        page.append(&shield_row);
+    }
     page
 }
 
@@ -1519,6 +1554,8 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
     let poll_in_flight = state.poll_in_flight.clone();
     let protection = state.protection.clone();
     let protection_syncing = state.protection_syncing.clone();
+    let process_shield = state.process_shield.clone();
+    let process_shield_syncing = state.process_shield_syncing.clone();
     let helper = state.helper.clone();
     let helper_syncing = state.helper_syncing.clone();
     let helper_error = state.helper_error.clone();
@@ -1627,6 +1664,26 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
                                 || !candidate.ssh_keys.is_empty()
                                 || !candidate.enrolled_exes.is_empty()
                         }),
+                );
+            }
+            // MCH0: independent Process Shield toggle. Synchronized with the
+            // applied policy while suppressing its callback; it stays available
+            // even when File Shield is disabled so the user can choose the
+            // combination explicitly.
+            if let Some(row) = process_shield.borrow().as_ref() {
+                let requested = if platform_service::shows_linux_mode() {
+                    true
+                } else {
+                    overview.process_shield_enabled
+                };
+                if row.is_active() != requested {
+                    process_shield_syncing.set(true);
+                    row.set_active(requested);
+                    process_shield_syncing.set(false);
+                }
+                row.set_sensitive(
+                    platform_service::shows_linux_mode()
+                        || config_state.candidate.borrow().as_ref().is_some(),
                 );
             }
             if let Some(row) = helper.borrow().as_ref() {
@@ -2443,6 +2500,43 @@ fn spawn_protection_change(
     });
 }
 
+/// MCH0: toggle Process Shield independently from File Shield through the
+/// same authoritative XPC config apply used by the protection switch.
+fn spawn_process_shield_change(
+    enabled: bool,
+    candidate: Rc<RefCell<Option<platform_service::EditableConfiguration>>>,
+    switch: adw::SwitchRow,
+    syncing: Rc<Cell<bool>>,
+) {
+    let current = candidate.borrow().clone();
+    glib::MainContext::default().spawn_local(async move {
+        let result = gio::spawn_blocking(move || {
+            platform_service::set_process_shield_enabled(enabled, current)
+        })
+        .await;
+        switch.set_sensitive(true);
+        syncing.set(true);
+        match result {
+            Ok(Ok(updated)) => {
+                *candidate.borrow_mut() = Some(updated);
+                switch.set_active(enabled);
+                switch.set_tooltip_text(None);
+            }
+            Ok(Err(error)) => {
+                switch.set_active(!enabled);
+                switch.set_tooltip_text(Some(&format!("Process Shield change failed: {error}")));
+            }
+            Err(error) => {
+                switch.set_active(!enabled);
+                switch.set_tooltip_text(Some(&format!(
+                    "Process Shield task stopped unexpectedly: {error:?}"
+                )));
+            }
+        }
+        syncing.set(false);
+    });
+}
+
 fn spawn_user_agent_change(
     enabled: bool,
     row: adw::SwitchRow,
@@ -2539,6 +2633,7 @@ mod tests {
         let config = configuration_from_daemon(guard_ipc::ConfigurationInfo {
             enforcement_mode: Some("strict-filesystem".into()),
             policy_enabled: None,
+            process_shield_enabled: None,
             browsers: vec![guard_ipc::ConfiguredBrowserInfo {
                 id: "firefox".into(),
                 family: "Firefox".into(),
@@ -2569,6 +2664,7 @@ mod tests {
         let config = configuration_from_daemon(guard_ipc::ConfigurationInfo {
             enforcement_mode: None,
             policy_enabled: Some(true),
+            process_shield_enabled: Some(true),
             browsers: vec![guard_ipc::ConfiguredBrowserInfo {
                 id: "firefox".into(),
                 family: "firefox".into(),

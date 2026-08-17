@@ -1,5 +1,15 @@
 # MPS12 — Safari Integration + Final macOS Process Shield Acceptance
 
+> ## AMENDMENT (MCH0-1 round)
+>
+> MPS11/MPS12 claimed compatibility on disposable launch/JS/relaunch evidence.
+> Daily-use compatibility (tabs, navigation, renderer churn, extensions) is
+> NOT ACCEPTED; the same runs recorded compromised=16 during normal use (false
+> Compromised class from always-strong REMOTE_THREAD/CS_INVALIDATED). MCH0-1
+> (process-shield-mch0-1.md) reclassified those signals (contextual/telemetry),
+> reports Process Shield Reduced until validated, and added an independent
+> Process Shield toggle. This report's acceptance sentence remains unwritten.
+
 ## Status
 
 IMPLEMENTATION FROZEN.

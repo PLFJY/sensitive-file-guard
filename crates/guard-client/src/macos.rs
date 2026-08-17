@@ -577,6 +577,7 @@ mod tests {
         let config = platform_macos::config::MacBackendConfig {
             version: platform_macos::config::MAC_CONFIG_VERSION,
             policy_enabled: true,
+            process_shield_enabled: true,
             common_policy: guard_platform::config::PolicyConfig {
                 browsers: Vec::new(),
                 enrolled_exes: Vec::new(),

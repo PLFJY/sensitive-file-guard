@@ -21,6 +21,8 @@ use std::collections::HashMap;
 
 use guard_core::ProcessIntegrity;
 
+use crate::browser_session::{BrowserSessionTracker, SessionId, SessionMembership, SignalRelation};
+use crate::browser_trust::BrowserExecutableRole;
 use crate::identity::{AuditProcessKey, MacProcessFacts};
 
 /// Why an exact live process instance is shielded.
@@ -189,16 +191,78 @@ impl TaskNotifyKind {
         }
     }
 
-    /// True when this notify signal is a strong compromise input (MPS4 uses
-    /// these to transition the exact target to Compromised).
+    /// True when this notify signal is, by KIND alone, a strong compromise
+    /// input. MPS4 uses the resolved decision (see strong_signal_decision) to
+    /// transition the exact target to Compromised.
     ///
-    /// MPS11 observed evidence: NOTIFY_GET_TASK/GET_TASK_READ fire routinely
-    /// on real browsers for legitimate macOS session management and
-    /// browser-internal operations, so they are telemetry (like TRACE), never
-    /// an auto-compromise. Remote-thread creation and code-signing
-    /// invalidation remain strong signals.
+    /// MCH7 revalidation (real daily-use regression):
+    /// - NOTIFY_GET_TASK / NOTIFY_GET_TASK_READ fire routinely on real browsers
+    ///   for legitimate macOS session management and browser-internal
+    ///   operations; they are contextual (strong only when the requester was
+    ///   NOT allowlisted).
+    /// - NOTIFY_CS_INVALIDATED automatic Normal -> Compromised semantics are
+    ///   UNVALIDATED: real-browser evidence does not yet prove what
+    ///   invalidation means for a live browser, so it is DETECTED telemetry
+    ///   only and Process Shield health reports Reduced until validated.
+    /// - NOTIFY_REMOTE_THREAD_CREATE is contextual: strong only for an unknown
+    ///   external requester; browser-internal or allowlisted Apple platform
+    ///   services are telemetry.
+    ///
+    /// No kind is unconditionally strong anymore; resolve every signal through
+    /// strong_signal_decision.
     pub fn is_strong_signal(&self) -> bool {
-        matches!(self, Self::RemoteThreadCreate | Self::CsInvalidated)
+        false
+    }
+}
+
+/// MCH7: NOTIFY_CS_INVALIDATED automatic-compromise semantics are UNVALIDATED.
+/// Until real-browser compatibility + adversarial evidence establishes what
+/// code-signing invalidation means for a live browser, the strong transition is
+/// suspended (DETECTED telemetry only) and Process Shield health must report
+/// Reduced. Flip this constant to true only after that evidence exists.
+pub const CS_INVALIDATED_STRONG_SIGNAL_UNVALIDATED: bool = true;
+
+/// Resolve whether a notify-only signal is a strong compromise input for an
+/// exact shielded target, using requester context (MPS4/MCH7/MCH3).
+///
+/// Every notify signal is DETECTED + CONTAINED (never PREVENTED). A strong
+/// resolution means the exact target transitions Normal -> Compromised and its
+/// File Shield / lease authority is revoked.
+///
+/// Rules (MCH7 revalidation + MCH3 session context):
+/// - GET_TASK / GET_TASK_READ: strong when the requester actually obtained the
+///   capability without any accepted relationship (not allowlisted) AND is not
+///   a verified browser-internal (same-session) process.
+/// - REMOTE_THREAD_CREATE: strong for an UNKNOWN EXTERNAL requester: not
+///   allowlisted, not same-session, provably different-session or provably
+///   externally launched (signed-helper laundering). When session membership
+///   is unverifiable, the caller's browser-identity fallback applies.
+/// - CS_INVALIDATED: UNVALIDATED automatic-compromise semantics; DETECTED
+///   telemetry only until compatibility + adversarial tests establish reliable
+///   semantics (health reports Reduced).
+/// - TRACE: telemetry.
+pub fn strong_signal_decision(
+    kind: TaskNotifyKind,
+    legitimate_relationship: bool,
+    relation: SignalRelation,
+    fallback_related: bool,
+) -> bool {
+    // A "related" requester is one with a verified runtime relationship to the
+    // target (same session) or, when membership is unverifiable, one that at
+    // least carries browser identity (MCH7 heuristic, warm-start cases).
+    let related = match relation {
+        SignalRelation::SameSession => true,
+        SignalRelation::DifferentSession => false,
+        SignalRelation::RequesterExternal => false,
+        SignalRelation::Unverifiable => fallback_related,
+    };
+    match kind {
+        TaskNotifyKind::GetTask | TaskNotifyKind::GetTaskRead => {
+            !legitimate_relationship && !related
+        }
+        TaskNotifyKind::RemoteThreadCreate => !legitimate_relationship && !related,
+        TaskNotifyKind::CsInvalidated => false,
+        TaskNotifyKind::Trace => false,
     }
 }
 
@@ -311,7 +375,10 @@ impl MacProcessShield {
     /// exact target. The transition is monotonic and idempotent; process exit
     /// clears the state and PID reuse never inherits it.
     pub fn apply_strong_signal(&mut self, target: &MacProcessFacts) -> StrongSignalOutcome {
-        if !self.is_shielded_exact(target) {
+        // MCH4: only SecretAuthority (task-protected) targets can be
+        // transitioned; helpers without authority are outside strong-signal
+        // scope.
+        if !self.is_task_protected(target) {
             return StrongSignalOutcome::NotShielded;
         }
         if self.mark_compromised(&target.key) {
@@ -341,6 +408,15 @@ struct ShieldEntry {
     /// How this instance entered the shield (MPS Hardening). Preexisting
     /// instances have unverified launch integrity after an ES restart.
     admission: ShieldAdmission,
+    /// MCH3: BrowserSession membership for browser-reason entries (None for
+    /// warm-start / rejected / non-browser reasons).
+    session: Option<SessionId>,
+    /// MCH4: whether this instance is a SecretAuthority holder and therefore
+    /// task-protected. Browser helpers that are only session members have
+    /// `authority == false` (or no entry at all) until promoted on a protected
+    /// read (MCH5). Non-browser reasons (GuardComponent / DynamicLeaseRoot)
+    /// are always task-protected regardless of this flag.
+    authority: bool,
 }
 
 /// Live Process Shield state, keyed by exact stable process instance.
@@ -348,6 +424,8 @@ struct ShieldEntry {
 pub struct MacProcessShield {
     entries: HashMap<AuditProcessKey, ShieldEntry>,
     current_by_pid: HashMap<u32, AuditProcessKey>,
+    /// MCH3: verified launch-topology sessions for browser processes.
+    sessions: BrowserSessionTracker,
     admitted: u64,
     /// Cumulative telemetry: how many preexisting (warm-start) admissions have
     /// happened since this shield was created. This is NOT a live count and
@@ -407,6 +485,8 @@ impl MacProcessShield {
                         reasons,
                         integrity: ProcessIntegrity::Normal,
                         admission: ShieldAdmission::AuthExec,
+                        session: None,
+                        authority: false,
                     },
                 );
                 self.current_by_pid.insert(key.pid, key);
@@ -455,6 +535,8 @@ impl MacProcessShield {
                         reasons,
                         integrity: ProcessIntegrity::Normal,
                         admission: ShieldAdmission::PreexistingUnverified,
+                        session: None,
+                        authority: false,
                     },
                 );
                 self.current_by_pid.insert(key.pid, key);
@@ -573,6 +655,168 @@ impl MacProcessShield {
         if self.current_by_pid.get(&key.pid) == Some(&key) {
             self.current_by_pid.remove(&key.pid);
         }
+        // MCH3: keep the launch-topology model in sync so exit never leaves a
+        // phantom session member (and root exit dissolves the session).
+        self.sessions.observe_exit(&key);
+    }
+
+    /// MCH4: admit a browser executable observed via AUTH_EXEC and classify it
+    /// against verified launch topology (MCH3). ONLY the permanent authority
+    /// candidate is task-protected: a Main process (session root or a Main
+    /// joining an existing session). Helpers and laundered execs are tracked
+    /// in the session model but get NO shield entry and NO task restrictions
+    /// until they are promoted on a protected read (MCH5). This is the
+    /// "do not lock every browser helper" rule.
+    pub fn admit_browser(
+        &mut self,
+        facts: MacProcessFacts,
+        role: Option<BrowserExecutableRole>,
+        parent: Option<AuditProcessKey>,
+        parent_is_enrolled_browser: bool,
+    ) -> Result<SessionMembership, ShieldError> {
+        facts
+            .validate()
+            .map_err(|error| ShieldError::InvalidIdentity(error.to_string()))?;
+        let key = facts.key;
+        let membership =
+            self.sessions
+                .observe_exec(&facts, role, parent, parent_is_enrolled_browser);
+        let session = membership.session_id();
+        // Main executables are the permanent authority candidate. Helpers and
+        // role-less enrollments never are at exec time.
+        let is_authority = matches!(role, Some(BrowserExecutableRole::Main));
+        if !is_authority {
+            // Tracked in the session model only: no entry, no task protection.
+            return Ok(membership);
+        }
+        let admitted = self
+            .entries
+            .get_mut(&key)
+            .map(|entry| {
+                if entry.facts.stable_id() != facts.stable_id() || entry.facts.uid != facts.uid {
+                    return Err(ShieldError::InvalidIdentity(
+                        "same audit key changed stable identity".into(),
+                    ));
+                }
+                entry.facts = facts.clone();
+                entry.session = session;
+                entry.authority = true;
+                *entry.reasons.entry(ShieldReasonKind::Browser).or_insert(0) += 1;
+                Ok(())
+            })
+            .unwrap_or_else(|| {
+                let mut reasons = HashMap::new();
+                reasons.insert(ShieldReasonKind::Browser, 1);
+                self.entries.insert(
+                    key,
+                    ShieldEntry {
+                        facts: facts.clone(),
+                        reasons,
+                        integrity: ProcessIntegrity::Normal,
+                        admission: ShieldAdmission::AuthExec,
+                        session,
+                        authority: true,
+                    },
+                );
+                self.current_by_pid.insert(key.pid, key);
+                Ok(())
+            });
+        if admitted.is_ok() {
+            self.admitted = self.admitted.saturating_add(1);
+        }
+        admitted.map(|()| membership)
+    }
+
+    /// MCH5: runtime authority admission. Called BEFORE a protected read is
+    /// allowed (from the identity resolver). Admits (or upgrades) the exact
+    /// instance to SecretAuthority so it is task-protected from the moment the
+    /// secret bytes become available — never after. Fail closed on invalid
+    /// identity.
+    ///
+    /// Admission kind: AuthExec when the launch was observed (session member),
+    /// PreexistingUnverified otherwise (warm start -> health Reduced until
+    /// restart).
+    pub fn ensure_authority(&mut self, facts: &MacProcessFacts) -> Result<(), ShieldError> {
+        facts
+            .validate()
+            .map_err(|error| ShieldError::InvalidIdentity(error.to_string()))?;
+        let key = facts.key;
+        let session = self.sessions.session_of(&key);
+        if let Some(entry) = self.entries.get_mut(&key) {
+            if entry.facts.stable_id() != facts.stable_id() || entry.facts.uid != facts.uid {
+                return Err(ShieldError::InvalidIdentity(
+                    "same audit key changed stable identity".into(),
+                ));
+            }
+            entry.facts = facts.clone();
+            entry.session = session;
+            entry.authority = true;
+            *entry.reasons.entry(ShieldReasonKind::Browser).or_insert(0) += 1;
+            return Ok(());
+        }
+        let admission = if session.is_some() {
+            ShieldAdmission::AuthExec
+        } else {
+            ShieldAdmission::PreexistingUnverified
+        };
+        let mut reasons = HashMap::new();
+        reasons.insert(ShieldReasonKind::Browser, 1);
+        self.entries.insert(
+            key,
+            ShieldEntry {
+                facts: facts.clone(),
+                reasons,
+                integrity: ProcessIntegrity::Normal,
+                admission,
+                session,
+                authority: true,
+            },
+        );
+        self.current_by_pid.insert(key.pid, key);
+        if admission == ShieldAdmission::PreexistingUnverified {
+            self.preexisting_admitted_total = self.preexisting_admitted_total.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    /// MCH4: is the exact instance task-protected? True for every shielded
+    /// GuardComponent / lease-root entry and for browser entries carrying
+    /// SecretAuthority. Browser helpers without authority are NOT task-
+    /// protected: no unnecessary restrictions merely because they are helpers.
+    pub fn is_task_protected(&self, facts: &MacProcessFacts) -> bool {
+        self.entries.get(&facts.key).is_some_and(|entry| {
+            entry.facts.stable_id() == facts.stable_id()
+                && entry.facts.uid == facts.uid
+                && (entry.authority || !entry.reasons.contains_key(&ShieldReasonKind::Browser))
+        })
+    }
+
+    /// MCH3: session membership of the exact instance (None when the instance
+    /// is not a verified session member).
+    pub fn session_of(&self, key: &AuditProcessKey) -> Option<SessionId> {
+        self.sessions.session_of(key)
+    }
+
+    /// MCH3: relationship between a requester and a target for notify-signal
+    /// interpretation (same session / different session / provably external /
+    /// unverifiable).
+    pub fn signal_relation(
+        &self,
+        requester: &AuditProcessKey,
+        target: &AuditProcessKey,
+    ) -> SignalRelation {
+        self.sessions.signal_relation(requester, target)
+    }
+
+    /// MCH3: cumulative session telemetry (roots observed, joins, rejected
+    /// external + unverifiable).
+    pub fn session_stats(&self) -> (u64, u64, u64) {
+        self.sessions.stats()
+    }
+
+    /// MCH3: live verified session count (roots). Health telemetry only.
+    pub fn live_session_count(&self) -> usize {
+        self.sessions.session_count()
     }
 
     pub fn len(&self) -> usize {
@@ -925,29 +1169,115 @@ mod tests {
     }
 
     #[test]
-    fn notify_signal_classification_matches_mps11_evidence() {
-        // is_strong_signal() covers the always-strong signals only
-        // (remote-thread / CS-invalidation). GET_TASK(_READ) notifies are
-        // CONTEXTUAL in handle_task_notify: strong exactly when the requester
-        // was NOT allowlisted (MPS Hardening), so is_strong_signal() stays
-        // false here and the handler decides per-requester.
+    fn notify_signal_classification_matches_mch7_revalidation() {
+        // MCH7: no kind is unconditionally strong anymore. GET_TASK(_READ)
+        // and REMOTE_THREAD_CREATE are CONTEXTUAL (resolved per requester by
+        // strong_signal_decision); CS_INVALIDATED is unvalidated DETECTED
+        // telemetry; TRACE stays telemetry.
         assert!(!TaskNotifyKind::Trace.is_strong_signal());
         assert!(!TaskNotifyKind::GetTask.is_strong_signal());
         assert!(!TaskNotifyKind::GetTaskRead.is_strong_signal());
+        assert!(!TaskNotifyKind::RemoteThreadCreate.is_strong_signal());
+        assert!(!TaskNotifyKind::CsInvalidated.is_strong_signal());
         assert_eq!(
             TaskNotifyKind::Trace.event_code(),
             "process_shield_trace_observed"
         );
-        for strong in [
+        assert_eq!(
+            TaskNotifyKind::CsInvalidated.event_code(),
+            "process_shield_cs_invalidated_observed"
+        );
+    }
+
+    #[test]
+    fn strong_signal_decision_resolves_context_per_requester() {
+        use crate::browser_session::SignalRelation;
+
+        // GET_TASK / GET_TASK_READ: strong when the requester was NOT
+        // allowlisted AND not a verified browser-internal (same-session)
+        // process (contextual; MPS Hardening + MCH3).
+        assert!(strong_signal_decision(
+            TaskNotifyKind::GetTask,
+            false,
+            SignalRelation::Unverifiable,
+            false
+        ));
+        assert!(!strong_signal_decision(
+            TaskNotifyKind::GetTask,
+            false,
+            SignalRelation::SameSession,
+            false
+        ));
+        assert!(!strong_signal_decision(
+            TaskNotifyKind::GetTask,
+            true,
+            SignalRelation::RequesterExternal,
+            false
+        ));
+
+        // REMOTE_THREAD_CREATE: strong for an unknown external requester
+        // (unverifiable + no browser-identity fallback), provably different
+        // sessions, or a provably externally launched (laundered) helper.
+        // Same-session and allowlisted requesters stay telemetry.
+        assert!(strong_signal_decision(
             TaskNotifyKind::RemoteThreadCreate,
+            false,
+            SignalRelation::Unverifiable,
+            false
+        ));
+        assert!(strong_signal_decision(
+            TaskNotifyKind::RemoteThreadCreate,
+            false,
+            SignalRelation::DifferentSession,
+            false
+        ));
+        assert!(strong_signal_decision(
+            TaskNotifyKind::RemoteThreadCreate,
+            false,
+            SignalRelation::RequesterExternal,
+            true
+        ));
+        assert!(!strong_signal_decision(
+            TaskNotifyKind::RemoteThreadCreate,
+            false,
+            SignalRelation::SameSession,
+            false
+        ));
+        assert!(!strong_signal_decision(
+            TaskNotifyKind::RemoteThreadCreate,
+            false,
+            SignalRelation::Unverifiable,
+            true
+        ));
+        assert!(!strong_signal_decision(
+            TaskNotifyKind::RemoteThreadCreate,
+            true,
+            SignalRelation::Unverifiable,
+            false
+        ));
+
+        // CS_INVALIDATED: unvalidated -> DETECTED telemetry, never an
+        // automatic compromise transition.
+        assert!(!strong_signal_decision(
             TaskNotifyKind::CsInvalidated,
-        ] {
-            assert!(
-                strong.is_strong_signal(),
-                "{} must be a strong signal",
-                strong.label()
-            );
-        }
+            false,
+            SignalRelation::Unverifiable,
+            false
+        ));
+        assert!(!strong_signal_decision(
+            TaskNotifyKind::CsInvalidated,
+            true,
+            SignalRelation::SameSession,
+            false
+        ));
+
+        // TRACE stays telemetry.
+        assert!(!strong_signal_decision(
+            TaskNotifyKind::Trace,
+            false,
+            SignalRelation::Unverifiable,
+            false
+        ));
     }
 
     #[test]
@@ -1095,9 +1425,17 @@ mod tests {
             shield.apply_strong_signal(&target),
             StrongSignalOutcome::NotShielded
         );
+        // MCH4: only SecretAuthority targets are in strong-signal scope; a
+        // plain browser-reason entry without authority is not.
         shield
             .admit(target.clone(), ShieldReasonKind::Browser)
             .unwrap();
+        assert_eq!(
+            shield.apply_strong_signal(&target),
+            StrongSignalOutcome::NotShielded,
+            "non-authority browser entries must not transition"
+        );
+        shield.ensure_authority(&target).unwrap();
         // First strong signal performs the transition.
         assert_eq!(
             shield.apply_strong_signal(&target),
@@ -1126,8 +1464,181 @@ mod tests {
         assert_eq!(shield.integrity_of_pid(10), ProcessIntegrity::Normal);
         assert_eq!(
             shield.apply_strong_signal(&reused),
+            StrongSignalOutcome::NotShielded,
+            "plain browser entry without authority is never in scope"
+        );
+        shield.ensure_authority(&reused).unwrap();
+        assert_eq!(
+            shield.apply_strong_signal(&reused),
             StrongSignalOutcome::CompromisedNow
         );
+    }
+
+    #[test]
+    fn admit_browser_records_session_membership_and_rejects_laundering() {
+        use crate::browser_session::SignalRelation;
+        use crate::browser_trust::BrowserExecutableRole;
+
+        let mut shield = MacProcessShield::new();
+        let main = facts(10, 1, 100);
+        let root = shield
+            .admit_browser(main.clone(), Some(BrowserExecutableRole::Main), None, false)
+            .unwrap();
+        let sid = root.session_id().unwrap();
+        assert_eq!(shield.session_of(&main.key), Some(sid));
+        // MCH4: the Main is the permanent authority candidate -> shielded and
+        // task-protected.
+        assert!(shield.is_shielded_exact(&main));
+        assert!(shield.is_task_protected(&main));
+        assert_eq!(shield.live_session_count(), 1);
+
+        // A helper whose verified parent is the session root joins it.
+        let helper = facts(11, 1, 110);
+        let joined = shield
+            .admit_browser(
+                helper.clone(),
+                Some(BrowserExecutableRole::Helper),
+                Some(main.key),
+                true,
+            )
+            .unwrap();
+        assert_eq!(joined, SessionMembership::Joined(sid));
+        assert_eq!(
+            shield.signal_relation(&helper.key, &main.key),
+            SignalRelation::SameSession
+        );
+        // MCH4: the helper is tracked in the session but NOT task-protected
+        // until promoted on a protected read (MCH5).
+        assert!(
+            !shield.is_shielded_exact(&helper),
+            "helpers must not be shielded at exec time"
+        );
+        assert!(!shield.is_task_protected(&helper));
+        // MCH5: the first protected read promotes it BEFORE the bytes are
+        // allowed.
+        shield.ensure_authority(&helper).unwrap();
+        assert!(shield.is_task_protected(&helper));
+
+        // Signed-helper laundering: attacker parent -> rejected external, no
+        // session membership, and the strong-signal relation says EXTERNAL.
+        let laundered = facts(20, 1, 200);
+        let membership = shield
+            .admit_browser(
+                laundered.clone(),
+                Some(BrowserExecutableRole::Helper),
+                Some(AuditProcessKey {
+                    pid: 99,
+                    pidversion: 1,
+                }),
+                false,
+            )
+            .unwrap();
+        assert!(membership.is_external());
+        assert_eq!(shield.session_of(&laundered.key), None);
+        assert!(
+            !shield.is_shielded_exact(&laundered),
+            "laundered helpers must never be task-protected"
+        );
+        assert_eq!(
+            shield.signal_relation(&laundered.key, &main.key),
+            SignalRelation::RequesterExternal
+        );
+        assert_eq!(shield.session_stats(), (1, 1, 1));
+
+        // Root exit dissolves the session.
+        shield.remove_terminal(main.key);
+        assert_eq!(shield.live_session_count(), 0);
+        assert_eq!(shield.session_of(&helper.key), None);
+    }
+
+    #[test]
+    fn task_protection_covers_authority_and_guard_components_only() {
+        // MCH4: task protection applies to browser SecretAuthority and to
+        // non-browser shield reasons (GuardComponent / DynamicLeaseRoot), and
+        // NEVER to unprotected browser helpers.
+        let mut shield = MacProcessShield::new();
+        let helper = facts(11, 1, 110);
+        shield
+            .admit(helper.clone(), ShieldReasonKind::Browser)
+            .unwrap();
+        assert!(
+            !shield.is_task_protected(&helper),
+            "plain browser entry without authority is not task-protected"
+        );
+        shield.ensure_authority(&helper).unwrap();
+        assert!(shield.is_task_protected(&helper));
+
+        let guard = facts(12, 1, 120);
+        shield
+            .admit(guard.clone(), ShieldReasonKind::GuardComponent)
+            .unwrap();
+        assert!(
+            shield.is_task_protected(&guard),
+            "guard components stay task-protected"
+        );
+
+        let lease = facts(13, 1, 130);
+        shield
+            .admit(lease.clone(), ShieldReasonKind::DynamicLeaseRoot)
+            .unwrap();
+        assert!(shield.is_task_protected(&lease));
+
+        // Unrelated processes are never task-protected.
+        assert!(!shield.is_task_protected(&facts(99, 1, 990)));
+    }
+
+    #[test]
+    fn ensure_authority_admission_kind_depends_on_observed_launch() {
+        use crate::browser_trust::BrowserExecutableRole;
+
+        let mut shield = MacProcessShield::new();
+        // Session member (launch observed via admit_browser): promotion keeps
+        // AuthExec admission and never flags health Reduced.
+        let main = facts(10, 1, 100);
+        shield
+            .admit_browser(main.clone(), Some(BrowserExecutableRole::Main), None, false)
+            .unwrap();
+        let helper = facts(11, 1, 110);
+        shield
+            .admit_browser(
+                helper.clone(),
+                Some(BrowserExecutableRole::Helper),
+                Some(main.key),
+                true,
+            )
+            .unwrap();
+        shield.ensure_authority(&helper).unwrap();
+        assert_eq!(
+            shield.admission_of_pid(11),
+            Some(ShieldAdmission::AuthExec),
+            "launch-observed member must not be preexisting"
+        );
+        assert_eq!(shield.live_preexisting_count(), 0);
+        assert_eq!(shield.preexisting_admitted_total(), 0);
+
+        // Warm-start browser (never launch-observed): promotion is
+        // PreexistingUnverified -> health Reduced until restart.
+        let warm = facts(20, 1, 200);
+        shield.ensure_authority(&warm).unwrap();
+        assert_eq!(
+            shield.admission_of_pid(20),
+            Some(ShieldAdmission::PreexistingUnverified)
+        );
+        assert_eq!(shield.live_preexisting_count(), 1);
+
+        // Idempotent: a second promotion does not change admission or double
+        // count.
+        shield.ensure_authority(&warm).unwrap();
+        assert_eq!(shield.live_preexisting_count(), 1);
+        assert_eq!(shield.preexisting_admitted_total(), 1);
+
+        // Fail closed on invalid identity.
+        let mut broken = facts(30, 1, 300);
+        broken.start_time_us = 0;
+        assert!(matches!(
+            shield.ensure_authority(&broken),
+            Err(ShieldError::InvalidIdentity(_))
+        ));
     }
 
     #[test]

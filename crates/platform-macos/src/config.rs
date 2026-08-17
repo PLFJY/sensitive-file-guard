@@ -190,10 +190,20 @@ pub struct MacBackendConfig {
     pub version: u32,
     #[serde(default)]
     pub policy_enabled: bool,
+    /// Independent Process Shield toggle (MCH0). Defaults to enabled so older
+    /// configurations that predate this field keep today's behavior; the user
+    /// may set it to false to run File Shield Active / Process Shield Disabled.
+    #[serde(default = "default_process_shield_enabled")]
+    pub process_shield_enabled: bool,
     pub common_policy: PolicyConfig,
     pub browser_trust: Vec<MacBrowserEnrollment>,
     #[serde(default)]
     pub mac_allowlist: MacAllowlistConfig,
+}
+
+/// Serde default for process_shield_enabled: an absent field means enabled.
+pub fn default_process_shield_enabled() -> bool {
+    true
 }
 
 impl MacBackendConfig {
@@ -418,6 +428,7 @@ impl MacBackendConfig {
         let mut config = current.cloned().unwrap_or_else(|| Self {
             version: MAC_CONFIG_VERSION,
             policy_enabled: true,
+            process_shield_enabled: true,
             common_policy: PolicyConfig {
                 browsers: Vec::new(),
                 enrolled_exes: Vec::new(),
@@ -464,6 +475,7 @@ impl MacBackendConfig {
         guard_ipc::ConfigurationInfo {
             enforcement_mode: None,
             policy_enabled: Some(self.policy_enabled),
+            process_shield_enabled: Some(self.process_shield_enabled),
             browsers: self
                 .common_policy
                 .browsers
@@ -655,6 +667,7 @@ mod tests {
         MacBackendConfig {
             version: MAC_CONFIG_VERSION,
             policy_enabled: true,
+            process_shield_enabled: true,
             common_policy: PolicyConfig {
                 browsers: vec![BrowserEnrollmentConfig {
                     id: "chrome".to_owned(),
@@ -682,6 +695,34 @@ mod tests {
             }],
             mac_allowlist: MacAllowlistConfig::default(),
         }
+    }
+
+    #[test]
+    fn process_shield_enabled_defaults_true_and_is_independent_of_file_shield() {
+        // MCH0: an old config without the field must keep Process Shield
+        // enabled (backward compatible), and the toggle is independent of
+        // policy_enabled (File Shield may stay on while Process Shield is off).
+        let mut enabled_cfg = config();
+        enabled_cfg.process_shield_enabled = true;
+        let json = serde_json::to_string(&enabled_cfg).unwrap();
+        let legacy: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let mut legacy = legacy.as_object().unwrap().clone();
+        legacy.remove("process_shield_enabled");
+        let parsed: MacBackendConfig =
+            serde_json::from_value(serde_json::Value::Object(legacy)).unwrap();
+        assert!(
+            parsed.process_shield_enabled,
+            "absent field must default to true"
+        );
+
+        let mut disabled_cfg = config();
+        disabled_cfg.policy_enabled = true;
+        disabled_cfg.process_shield_enabled = false;
+        let round: MacBackendConfig =
+            serde_json::from_str(&serde_json::to_string(&disabled_cfg).unwrap()).unwrap();
+        assert!(!round.process_shield_enabled);
+        assert!(round.policy_enabled);
+        round.validate().unwrap();
     }
 
     #[test]
@@ -778,6 +819,7 @@ mod tests {
         let config = MacBackendConfig {
             version: MAC_CONFIG_VERSION,
             policy_enabled: true,
+            process_shield_enabled: true,
             common_policy: PolicyConfig {
                 browsers: vec![BrowserEnrollmentConfig {
                     id: "custom".into(),
