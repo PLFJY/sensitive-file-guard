@@ -1,0 +1,132 @@
+# macOS Process Shield Compatibility Hardening — Final Deliverables
+
+## Status
+
+REDUCED / NOT ACCEPTED (formal). All code-able redesign phases are implemented,
+unit-tested, and the core daily-use + adversarial gates are LIVE-verified on the
+deployed build on this host. The final acceptance sentence cannot be written
+until the remaining HUMAN steps complete (one GUI enrollment approval; one
+manual extension install; reboot-pending stale extension versions).
+
+Commits: d5d0fe6 (redesign) · 984b2ff (MCH9-10 live evidence) · a864e72 (MCH8 +
+lifecycle).
+
+## 1. Verified root causes of the daily-use regression
+
+VERIFIED FACT (recorded MPS11 production run): compromised=16 during NORMAL
+disposable browser use — always-strong NOTIFY_REMOTE_THREAD_CREATE /
+NOTIFY_CS_INVALIDATED signals fire routinely on real browsers (class B false
+Compromised). Class C (File Shield deny from false Compromised) is the probable
+user-visible mechanism; class A (browser-internal + non-allowlisted Apple
+task DENY) was a secondary source, now removed by design (helpers no longer
+task-protected) plus one evidence-backed Apple READ exception (sysmond).
+
+## 2. Final security model
+
+BrowserIdentity (exact enrolled executable — no authority) ≠ BrowserSession
+(verified launch-topology membership; signed-helper laundering rejected) ≠
+SecretAuthority (exact live process admitted BEFORE secret delivery).
+
+## 3. Files changed (exact)
+
+crates/platform-macos/src/{browser_session.rs(new), process_shield.rs,
+endpoint_security.rs, browser_trust.rs, config.rs, lib.rs}
+crates/guard-ipc/src/lib.rs · apps/guard-es/src/{service.rs, policy.rs} ·
+apps/guard-ui/src/{main.rs, platform_service.rs} · apps/guardd/src/ipc.rs ·
+crates/guard-client/src/macos.rs · scripts/macos/{test-daily-browser-stress.sh,
+capture-process-authority-matrix.sh, fixtures/mv3-harmless-extension/*}
+reports/mac/process-shield-{mch0-1,mch2-3,mch4-6,mch9-10-live,mch11}.md
+
+## 4. Exact policy changes
+
+- Independent Process Shield toggle (config + runtime flag; File Shield unaffected).
+- Authority-only shield targeting: Main = permanent authority; helpers tracked
+  not protected; is_task_protected scopes task/notify/strong-signal paths.
+- Runtime authority admission (ensure_authority) with strict admit-before-allow
+  ordering; fail closed on admission errors.
+- No notify kind unconditionally strong: GET_TASK(_READ)/REMOTE_THREAD
+  relationship-aware; CS_INVALIDATED → telemetry (health Reduced).
+- Apple READ allowlist += com.apple.sysmond (evidence-backed, READ-only).
+- Browser-internal relationships: default DENY; none added (no evidence).
+
+## 5. Compatibility relationships added + evidence
+
+- Apple platform task-CONTROL allowlist (MPS11, unchanged): exact uid-0
+  platform-binary signing IDs, observed managing processes.
+- Apple platform task-READ += com.apple.sysmond: MCH9 live stress recorded 6
+  routine sysmond task_read requests on Firefox during normal use; after the
+  exception, a focused Firefox session produced 0 DENY (live-verified).
+
+## 6. Security relationships deliberately NOT allowed
+
+- same browser / same Team ID / same signing family → allow
+- browser helper → SecretAuthority task access (default DENY)
+- extension/browser-helper task-memory authority
+- non-platform impostors at allowlisted paths (unit-tested)
+
+## 7. Tests executed and exact results
+
+cargo test --workspace --all-features: 292 passed / 0 failed.
+cargo clippy --workspace --all-targets --all-features -D warnings: clean.
+cargo fmt --all -- --check: clean.
+Live (this host, deployed MCH build, disposable profiles only):
+- MCH9 daily stress: browser functionality 9/9 PASS; 0 task DENY; 0 false
+  Compromised (event-ID window analysis).
+- MCH10 probes: task control DENIED (result=5 port=0), task read DENIED
+  (result=-1 port=0), memory recovered_pages=0.
+- §21 DYLD: DYLD_INSERT_LIBRARIES launch DENIED (prohibited_dyld audit row);
+  DYLD_PRINT_LIBRARIES launch allowed (narrow, JIT-compatible).
+- MCH3/MCH4 live: audit session_membership=new_root (Main) / joined (helpers).
+
+## 8. Daily-browser compatibility result
+
+Strong live evidence (9/9 functionality, 0 unexplained task DENY, 0 false
+Compromised on the fixed build). NOT formally ACCEPTED — the protected-profile
+File Shield ALLOW gate needs one interactive GUI enrollment (human step).
+
+## 9. Extension compatibility result
+
+NOT ACCEPTED / BLOCKED on this host: branded Google Chrome forbids
+--load-extension; Firefox release rejects unsigned extensions. Fixture
+validated (manifest/JS/XPI) and ready for a manual UI install; Process Shield
+showed 0 DENY / 0 false Compromised during extension-load attempts.
+
+## 10-12. Same-user attacker / laundering / memory canary
+
+- Same-user attacker: BLOCKED live (task control/read DENIED on the real
+  browser Main; PREVENTED).
+- Signed-helper laundering: unit-verified BLOCKED (session rejection, no
+  authority, strong notify relation); live probe inconclusive (standalone
+  Chrome Helper exits before a stable process) — harness limitation, not a
+  policy gap.
+- Memory canary: recovered_pages=0 live; prior MPS9 live 0 bytes.
+
+## 13. Process Shield health classification
+
+Disabled (user toggle) or Reduced — CS_INVALIDATED strong semantics
+unvalidated + authority classification incomplete (live MCH2 matrix pending
+enrollment). Active is never claimed.
+
+## 14. Remaining blockers / unverified assumptions
+
+- GUI enrollment approval for a disposable protected profile (MCH2 matrix +
+  protected-profile ALLOW gate) — human step.
+- Manual extension install for the MCH8 live run — human step.
+- Reboot-pending stale extension versions — human step.
+- Live laundering probe (helper too short-lived) — harness limitation.
+- Warm-start session fallback heuristic on real browsers — assumption until a
+  long-lived observation.
+
+## 15. Final threat-model statement
+
+Protected (PREVENTED, live-verified): same-user unprivileged malware's
+task-control/task-read/memory takeover of SecretAuthority (browser Main and
+promoted processes); DYLD code-loading injection into shield-eligible launches.
+Detected + contained: unallowlisted capability acquisition (contextual
+strong signal → Compromised → File Shield/lease revocation).
+
+NOT guaranteed (unchanged): root/kernel compromise, browser RCE already
+executing inside a trusted browser, malicious browser extensions, malicious
+code already inside a trusted browser process, Guard/ES backend compromise.
+Compatibility exceptions granted no new task/memory authority (all are
+uid-0 kernel-verified Apple platform binaries, READ narrower than CONTROL).
