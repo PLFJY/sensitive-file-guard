@@ -930,6 +930,16 @@ fn configuration_from_daemon(
     platform_service::editable_from_metadata(info)
 }
 
+/// True when the daemon configuration snapshot differs from the current
+/// draft (JSON equality). Used to skip redundant protection-page re-renders
+/// while still auto-refreshing the page after external policy changes.
+fn configuration_snapshot_changed(
+    current: &platform_service::EditableConfiguration,
+    updated: &platform_service::EditableConfiguration,
+) -> bool {
+    serde_json::to_value(updated).ok() != serde_json::to_value(current).ok()
+}
+
 fn hydrate_configuration_from_daemon(state: &UiState, info: guard_ipc::ConfigurationInfo) -> bool {
     // A directly readable config is authoritative for this UI session. When it
     // is root-readable only, replace the first-run placeholder with guardd's
@@ -1628,6 +1638,8 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
         {
             let active_ssh_changed = update_active_ssh_keys(&config_state, active_ssh_keys);
             let configuration_available = configuration.is_some();
+            // Keep a copy for the resync path below; hydrate consumes it.
+            let configuration_for_resync = configuration.clone();
             let configuration_hydrated = configuration
                 .map(|configuration| {
                     hydrate_configuration_from_daemon(&config_state, configuration)
@@ -1649,7 +1661,48 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
             } else {
                 false
             };
-            if active_ssh_changed || configuration_hydrated || first_run {
+            // MCH hardening (protection-page auto-refresh): once a draft
+            // exists and the user has NO unapplied edits (Apply button not
+            // sensitive), resync the draft from the daemon's authoritative
+            // configuration on every poll. The protection page then follows
+            // external policy changes (guardctl, another window, a re-apply)
+            // instead of requiring a manual "Refresh status" click, and a
+            // transient first-load failure self-heals within one poll cycle.
+            // While the user is editing (Apply sensitive), the draft is
+            // preserved untouched. JSON equality skips redundant re-renders.
+            let candidate_resynced = if config_state.candidate.borrow().is_some()
+                && !config_state.apply.is_sensitive()
+            {
+                let updated = configuration_for_resync
+                    .as_ref()
+                    .and_then(|info| configuration_from_daemon(info.clone()));
+                if let Some(updated) = updated {
+                    // Drop the candidate borrow before touching UI widgets:
+                    // set_active_id can fire the mode callback which itself
+                    // borrows the candidate RefCell.
+                    let changed = {
+                        let mut candidate = config_state.candidate.borrow_mut();
+                        let changed = candidate.as_ref().is_none_or(|current| {
+                            configuration_snapshot_changed(current, &updated)
+                        });
+                        if changed {
+                            *candidate = Some(updated.clone());
+                        }
+                        changed
+                    };
+                    if changed {
+                        if let Some(mode) = updated.enforcement_mode {
+                            config_state.mode.set_active_id(Some(mode.as_str()));
+                        }
+                    }
+                    changed
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if active_ssh_changed || configuration_hydrated || first_run || candidate_resynced {
                 refresh_browser_sources(&config_state);
             }
             let health = health_from_evidence(
@@ -2695,6 +2748,36 @@ mod tests {
         assert_eq!(config.enforcement_mode, None);
         assert!(config.policy_enabled);
         assert!(!platform_service::shows_linux_mode());
+    }
+
+    #[test]
+    fn configuration_snapshot_changed_detects_policy_drift_only() {
+        // MCH hardening: the protection page auto-resync must re-render only
+        // when the daemon snapshot actually differs from the current draft,
+        // so a 2-second poll never rebuilds an identical page.
+        let config = configuration_from_daemon(guard_ipc::ConfigurationInfo {
+            enforcement_mode: None,
+            policy_enabled: Some(true),
+            process_shield_enabled: Some(true),
+            browsers: vec![guard_ipc::ConfiguredBrowserInfo {
+                id: "chrome".into(),
+                family: "chromium".into(),
+                profile_root: "/Users/test/Library/Application Support/Google/Chrome".into(),
+                owner_uid: Some(501),
+                exe_paths: vec![
+                    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome".into(),
+                ],
+            }],
+            enrolled_exes: Vec::new(),
+            ssh_keys: vec!["/Users/test/.ssh/id_ed25519".into()],
+            mac_system_processes: Vec::new(),
+            mac_trusted_tools: Vec::new(),
+        })
+        .unwrap();
+        assert!(!configuration_snapshot_changed(&config, &config));
+        let mut drift = config.clone();
+        drift.ssh_keys.push("/Users/test/.ssh/id_ecdsa".into());
+        assert!(configuration_snapshot_changed(&config, &drift));
     }
 
     #[test]
