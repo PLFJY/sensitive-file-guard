@@ -435,3 +435,32 @@ P1/P2 issues in the MCH5 dynamic-promotion design. All are addressed:
   different reason (e.g. dynamic lease) created.
 
 Tests: 297 passed / 0 failed (was 295; +2 net after rewrites), clippy clean.
+### Review round 2 rework (P1-4 closed loop + P2-7 regression, committed)
+
+- P1-4 [now CLOSED LOOP]: the first-pass epoch fix only ran at startup
+  (set_process_shield_enabled is called once) and stale entries could be
+  re-promoted without regaining task protection. Now:
+  * runtime disabled->enabled detection lives in the hot-path gate
+    (CallbackContext::process_shield_active, cross-call shield_was_disabled
+    state) so a GUI config apply that only stores the AtomicBool still bumps
+    the epoch;
+  * ensure_authority() fails closed with ShieldError::
+    ProtectionContinuityLost for stale-epoch entries: the protected read
+    DENIES, and only a restart (fresh AUTH_EXEC, current-epoch entry)
+    restores SecretAuthority - a read can no longer wash the continuity
+    gap;
+  * live_preexisting_count() counts stale-epoch entries so health Reduced
+    truthfully reports them.
+  New test epoch_advance_invalidates_authority_until_restart.
+- P2-7 [regression fixed]: role-less ExplicitHash + sticky ExternalLaunch
+  would have rejected legitimately launched Safari/custom browsers as
+  laundered helpers. MacExecutableEnrollment::ExplicitHash now carries
+  role: BrowserExecutableRole (serde default Main for old configs);
+  enroll_custom_executable() sets Main and classify() surfaces it, so
+  launch-topology roots Safari/custom mains instead of rejecting them.
+  New test explicit_hash_enrollment_carries_main_role.
+- Truthfulness: notify postures are now stated precisely in code comments -
+  telemetry-only kinds are DETECTED, strong transitions are DETECTED +
+  CONTAINED, AUTH denials are PREVENTED.
+
+Tests: 299 passed / 0 failed, clippy clean, fmt applied.

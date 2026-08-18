@@ -736,6 +736,7 @@ impl EndpointSecurityBackend {
             // MCH0: Process Shield starts enabled; guard-es applies the loaded
             // policy (set_process_shield_enabled) right after start.
             process_shield_enabled: Arc::new(AtomicBool::new(true)),
+            shield_was_disabled: AtomicBool::new(false),
             sender,
             scheduler: scheduler_handle,
             registry,
@@ -976,6 +977,11 @@ struct CallbackContext {
     /// denies no task access, applies no strong-signal transitions and does
     /// not influence File Shield. File Shield (AUTH_OPEN) is unaffected.
     process_shield_enabled: Arc<AtomicBool>,
+    /// P1-4 review: remembers whether the last shield decision saw Process
+    /// Shield disabled, so the disabled -> enabled transition can be detected
+    /// at runtime (config applies only store the AtomicBool; they never call
+    /// back into the backend). On the transition the shield epoch advances.
+    shield_was_disabled: AtomicBool,
     sender: mpsc::SyncSender<MacAuthorizationEvent>,
     scheduler: DeadlineSchedulerHandle,
     registry: Arc<Mutex<Vec<Weak<PendingInner>>>>,
@@ -1095,8 +1101,31 @@ impl CallbackContext {
     /// is shared with guard-es policy and the identity resolver so a runtime
     /// config apply flips every shield decision atomically. File Shield never
     /// consults this flag.
+    ///
+    /// P1-4 review (protection continuity): this is the hot-path gate for
+    /// every exec/task shield decision, so it is the right place to detect the
+    /// disabled -> enabled transition at runtime (a config apply only stores
+    /// the AtomicBool; it never calls back into the backend). On the
+    /// transition the shield epoch advances, invalidating every authority
+    /// assertion from before the disabled interval.
     fn process_shield_active(&self) -> bool {
-        self.process_shield_enabled.load(Ordering::Acquire)
+        let now = self.process_shield_enabled.load(Ordering::Acquire);
+        // P1-4 review (protection continuity): detect the disabled -> enabled
+        // transition across shield decisions (a config apply only stores the
+        // AtomicBool; the backend setter runs once at startup). When a
+        // decision observes enabled after the previous decision saw disabled,
+        // the shield epoch advances and every authority assertion from before
+        // the disabled interval is invalidated (stale entries lose task
+        // protection; their protected reads DENY until the exact process
+        // restarts).
+        let was_disabled = self.shield_was_disabled.swap(!now, Ordering::AcqRel);
+        if was_disabled && now {
+            self.shield
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .advance_epoch();
+        }
+        now
     }
 
     /// MCH3: stable key of the verified parent of an exec'ing process, plus
@@ -2908,6 +2937,7 @@ mod tests {
         let context = CallbackContext {
             config,
             process_shield_enabled: Arc::new(AtomicBool::new(enabled)),
+            shield_was_disabled: AtomicBool::new(!enabled),
             sender,
             scheduler,
             registry: Arc::new(Mutex::new(Vec::new())),

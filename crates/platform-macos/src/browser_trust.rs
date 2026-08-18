@@ -30,6 +30,15 @@ pub enum MacExecutableEnrollment {
         signing_id: String,
     },
     ExplicitHash {
+        /// P2-7 review: every ExplicitHash enrollment today is a user-enrolled
+        /// browser MAIN executable (Safari and custom browsers enrolled via
+        /// the GUI). Carrying the role in the enrollment prevents the
+        /// launch-topology model from misclassifying a legitimately launched
+        /// Safari/custom browser as a laundered helper (Rejected(
+        /// ExternalLaunch)) just because ExplicitHash previously had no role.
+        /// Old configurations without the field default to Main.
+        #[serde(default = "default_explicit_hash_role")]
+        role: BrowserExecutableRole,
         path: PathBuf,
         dev: u64,
         ino: u64,
@@ -38,6 +47,12 @@ pub enum MacExecutableEnrollment {
         ctime_ns: i64,
         sha256: [u8; 32],
     },
+}
+
+/// Serde default for ExplicitHash::role: user-enrolled executables are browser
+/// mains (P2-7 review).
+fn default_explicit_hash_role() -> BrowserExecutableRole {
+    BrowserExecutableRole::Main
 }
 
 impl MacExecutableEnrollment {
@@ -443,7 +458,7 @@ impl MacBrowserTrustStore {
                         },
                         role: match executable {
                             MacExecutableEnrollment::Signed { role, .. } => Some(*role),
-                            MacExecutableEnrollment::ExplicitHash { .. } => None,
+                            MacExecutableEnrollment::ExplicitHash { role, .. } => Some(*role),
                         },
                     };
                 }
@@ -462,6 +477,7 @@ pub fn enroll_custom_executable(path: &Path) -> anyhow::Result<MacExecutableEnro
     let metadata = std::fs::metadata(&canonical)?;
     let snapshot = snapshot(&canonical, &metadata);
     Ok(MacExecutableEnrollment::ExplicitHash {
+        role: BrowserExecutableRole::Main,
         path: canonical.clone(),
         dev: snapshot.dev,
         ino: snapshot.ino,
@@ -481,6 +497,7 @@ fn verify_explicit_hash(enrollment: &MacExecutableEnrollment) -> anyhow::Result<
         mtime_ns,
         ctime_ns,
         sha256,
+        ..
     } = enrollment
     else {
         return Ok(false);
@@ -1120,6 +1137,66 @@ mod tests {
         resolver.resolve(facts.key.pid, 501).unwrap();
         assert!(!shield.lock().unwrap().is_shielded_exact(&facts));
         assert_eq!(shield.lock().unwrap().live_preexisting_count(), 0);
+    }
+
+    #[test]
+    fn explicit_hash_enrollment_carries_main_role() {
+        // P2-7 review: user-enrolled ExplicitHash executables (Safari and
+        // custom browsers) are browser MAINS. The role is carried in the
+        // enrollment (old configs default to Main), so launch-topology
+        // classification treats a legitimately launched Safari/custom
+        // browser as a session root, never as a laundered helper.
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("custom-browser");
+        std::fs::write(&executable, b"version one").unwrap();
+        let enrolled = enroll_custom_executable(&executable).unwrap();
+        let MacExecutableEnrollment::ExplicitHash { role, path, .. } = &enrolled else {
+            panic!("enroll_custom_executable must produce ExplicitHash")
+        };
+        assert_eq!(*role, BrowserExecutableRole::Main);
+        assert_eq!(*path, std::fs::canonicalize(&executable).unwrap());
+
+        // classify() surfaces the role for the exact executable.
+        let browser = MacBrowserEnrollment {
+            browser_id: BrowserId("custom".to_owned()),
+            family: BrowserFamily::Chromium,
+            profile_root: temp.path().join("profile"),
+            owner_uid: std::fs::metadata(temp.path()).unwrap().uid(),
+            app_bundle: None,
+            executables: vec![enrolled],
+        };
+        let store = MacBrowserTrustStore::load_and_revalidate(vec![browser]).unwrap();
+        let canonical = std::fs::canonicalize(&executable).unwrap();
+        let facts = process(
+            &canonical,
+            std::fs::metadata(temp.path()).unwrap().uid(),
+            "TEAM",
+            "com.example.custom",
+        );
+        let decision = store.classify(&facts, facts.uid);
+        assert!(decision.browser.is_some());
+        assert!(decision.tier.is_trusted());
+        assert_eq!(decision.role, Some(BrowserExecutableRole::Main));
+
+        // And an older serialized enrollment without the role field still
+        // deserializes as Main (serde default).
+        let mut json = serde_json::to_value(&MacExecutableEnrollment::ExplicitHash {
+            role: BrowserExecutableRole::Main,
+            path: executable.clone(),
+            dev: 0,
+            ino: 0,
+            size: 0,
+            mtime_ns: 0,
+            ctime_ns: 0,
+            sha256: [0u8; 32],
+        })
+        .unwrap();
+        json.as_object_mut().unwrap().remove("role");
+        let legacy: MacExecutableEnrollment = serde_json::from_value(json).unwrap();
+        let MacExecutableEnrollment::ExplicitHash { role, .. } = &legacy else {
+            panic!("expected ExplicitHash")
+        };
+        assert_eq!(*role, BrowserExecutableRole::Main);
     }
 
     #[test]

@@ -239,9 +239,12 @@ pub const GET_TASK_READ_NOTIFY_STRONG_SIGNAL_UNVALIDATED: bool = true;
 /// Resolve whether a notify-only signal is a strong compromise input for an
 /// exact shielded target, using requester context (MPS4/MCH7/MCH3).
 ///
-/// Every notify signal is DETECTED + CONTAINED (never PREVENTED). A strong
-/// resolution means the exact target transitions Normal -> Compromised and its
-/// File Shield / lease authority is revoked.
+/// Notify signals never PREVENT anything (only the AUTH gates do). A STRONG
+/// resolution is DETECTED + CONTAINED: the exact target transitions Normal ->
+/// Compromised and its File Shield / lease authority is revoked. Telemetry-only
+/// kinds on this build (GET_TASK_READ, TRACE, CS_INVALIDATED) are DETECTED
+/// only: no Compromised transition, no containment. AUTH denials are PREVENTED.
+/// These three postures must not be conflated in reports or status.
 ///
 /// Rules (MCH7 revalidation + MCH3 session context):
 /// - GET_TASK: strong when the requester actually obtained a CONTROL port
@@ -427,6 +430,8 @@ pub enum ShieldError {
     MissingEntry,
     #[error("instance was provably launched externally (signed-helper laundering); authority admission is rejected for its exact lifetime")]
     ExternalLaunchRejected,
+    #[error("instance authority predates the last Process Shield disable interval (protection continuity lost); restart the exact process to restore SecretAuthority")]
+    ProtectionContinuityLost,
 }
 
 #[derive(Debug)]
@@ -821,6 +826,16 @@ impl MacProcessShield {
                     "same audit key changed stable identity".into(),
                 ));
             }
+            // P1-4 review: an entry admitted in an older shield epoch lost its
+            // protection continuity when Process Shield was disabled and
+            // re-enabled. Re-promoting it here would hand secret bytes to a
+            // process that was unprotected during the disabled interval, while
+            // its task-protection stays false (stale epoch). Fail closed:
+            // promotion DENIES and only a restart (fresh AUTH_EXEC, current
+            // epoch entry) restores SecretAuthority.
+            if entry.epoch != self.epoch {
+                return Err(ShieldError::ProtectionContinuityLost);
+            }
             entry.facts = facts.clone();
             entry.session = session;
             entry.authority = true;
@@ -951,7 +966,13 @@ impl MacProcessShield {
         self.entries
             .iter()
             .filter(|(key, entry)| {
-                entry.admission == ShieldAdmission::PreexistingUnverified
+                // P1-4 review: entries admitted in an older shield epoch lost
+                // protection continuity (Process Shield was disabled and
+                // re-enabled) and must also keep health Reduced until the
+                // exact process restarts, exactly like PreexistingUnverified
+                // entries.
+                (entry.admission == ShieldAdmission::PreexistingUnverified
+                    || entry.epoch != self.epoch)
                     && self.current_by_pid.get(&key.pid) == Some(*key)
             })
             .count()
@@ -1490,6 +1511,68 @@ mod tests {
         assert_eq!(shield.live_preexisting_count(), 0);
         assert!(!shield.is_preexisting(10));
         assert_eq!(shield.preexisting_admitted_total(), 1);
+    }
+
+    #[test]
+    fn epoch_advance_invalidates_authority_until_restart() {
+        // P1-4 review: Process Shield disabled -> enabled must not carry
+        // over pre-disable clean-trust assertions. After advance_epoch(), a
+        // previously admitted Main loses task protection, health counts it as
+        // unverified, and re-promoting it FAILS closed (ProtectionContinuity
+        // Lost) until the exact process restarts and is re-admitted in the
+        // current epoch.
+        use crate::process_shield::ShieldError;
+
+        let mut shield = MacProcessShield::new();
+        let main = facts(10, 1, 100);
+        shield
+            .admit_browser(
+                main.clone(),
+                Some(crate::browser_trust::BrowserExecutableRole::Main),
+                None,
+                false,
+            )
+            .unwrap();
+        assert!(shield.is_task_protected(&main));
+        assert_eq!(shield.live_preexisting_count(), 0);
+
+        // Disable -> enable: epoch advances.
+        shield.advance_epoch();
+        assert!(
+            !shield.is_task_protected(&main),
+            "stale-epoch authority must not be task-protected"
+        );
+        assert_eq!(
+            shield.live_preexisting_count(),
+            1,
+            "stale-epoch entries keep health Reduced (counted as unverified)"
+        );
+
+        // Re-promotion fails closed: secret bytes must NOT be allowed while
+        // the process is not actually task-protected.
+        assert!(matches!(
+            shield.ensure_authority(&main),
+            Err(ShieldError::ProtectionContinuityLost)
+        ));
+        assert!(
+            !shield.is_task_protected(&main),
+            "failed promotion must not grant task protection"
+        );
+
+        // Restart: the new exact instance is re-admitted in the current
+        // epoch and authority is restored.
+        shield.remove_terminal(main.key);
+        let restarted = facts(10, 2, 200);
+        shield
+            .admit_browser(
+                restarted.clone(),
+                Some(crate::browser_trust::BrowserExecutableRole::Main),
+                None,
+                false,
+            )
+            .unwrap();
+        assert!(shield.is_task_protected(&restarted));
+        assert_eq!(shield.live_preexisting_count(), 0);
     }
 
     #[test]
