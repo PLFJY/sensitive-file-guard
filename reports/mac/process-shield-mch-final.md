@@ -282,3 +282,25 @@ failure) is a product decision, intentionally not implemented here.
 - REMEDIATION (user action): open the MCH app GUI, flip the master
   protection switch ON, apply (LocalAuthentication). No code deploy needed
   for this step.
+## 19. Operator checklist (deterministic, human-gated)
+
+1. OPEN `/Applications/Sensitive File Guard MCH.app` (current 0.1.0 works).
+2. FLIP the master protection switch (File Shield) to ON; APPLY (LocalAuthentication).
+   - This writes policy_enabled=true into the authoritative config; File Shield
+     resumes immediately (classify()/namespace gates re-arm on the next apply).
+3. VERIFY:
+   `'/Applications/Sensitive File Guard MCH.app/Contents/MacOS/guardctl' --json status`
+   must show enforcement_active=true and status=DEGRADED (not NOT_ENFORCING).
+4. DEPLOY the 0.1.1 hardening bundle (config default-on + GET_TASK_READ notify
+   telemetry): `./scripts/macos/deploy-mch-fixes.sh`; approve the extension
+   version replacement in System Settings.
+5. VERIFY the new extension: guardctl status shows version 0.1.1, Process Shield
+   Reduced reason includes the GET_TASK_READ notify downgrade, and no new
+   Deny(UnknownProcess) rows appear during normal browsing.
+6. OPTIONAL MCH2 authority matrix (real evidence, metadata only): enroll a
+   DISPOSABLE Chrome profile in the GUI, then
+   `LIVE_ES_ACCEPTANCE=... DISPOSABLE_CHROME_PROFILE=... scripts/macos/capture-process-authority-matrix.sh`.
+
+Post-deploy acceptance re-checks still required: File Shield enforcement live
+test (trusted browser own profile ALLOW; unknown process protected-file
+BLOCKED), MCH2 matrix, and the next-reboot extension re-check.
