@@ -201,34 +201,14 @@ impl guard_platform::ProcessIdentityResolver for MacProcessIdentityResolver {
             .read()
             .map_err(|_| anyhow::anyhow!("macOS browser trust lock is poisoned"))?
             .classify(&facts, resource_owner_uid);
-        // Runtime authority admission (MCH5) + warm-start reconciliation
-        // (MPS Hardening 2, Option B): a File-Shield-trusted browser whose
-        // exact live instance is NOT yet a SecretAuthority (helper never
-        // promoted, or already-running process whose AUTH_EXEC was never
-        // observed) is admitted into Process Shield BEFORE any protected read
-        // is allowed. Required ordering: admit -> then ALLOW secret bytes.
-        // Forbidden: ALLOW first, shield later. Fail closed on admission
-        // errors: an internal enforcement-state failure must DENY the
-        // protected open rather than proceed unshielded.
-        if trust.browser.is_some() && trust.tier.is_trusted() {
-            // MCH0: with Process Shield disabled, no admission happens: a
-            // trusted browser's protected reads are judged by File Shield
-            // alone.
-            if self.shield_enabled() {
-                if let Some(shield) = &self.shield {
-                    let mut shield = shield
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    if !shield.is_task_protected(&facts) {
-                        shield.ensure_authority(&facts).map_err(|error| {
-                            anyhow::anyhow!(
-                                "failed to admit trusted browser as SecretAuthority before protected read: {error}"
-                            )
-                        })?;
-                    }
-                }
-            }
-        }
+        // P1 review (promotion timing): resolve() is a pure identity
+        // resolution. It must NOT promote a process to SecretAuthority merely
+        // because a protected event is being resolved: promotion is a security
+        // authority transition that belongs only at the point where the policy
+        // has decided to ALLOW protected secret bytes (see
+        // MacProcessIdentityResolver::promote_authority, called by the
+        // File Shield ALLOW path). Resolving an event that will ultimately be
+        // DENIED, or a write-only open, must never grant authority.
         let integrity = if !self.shield_enabled() {
             // MCH0: Process Shield disabled -> the live shield state (stale
             // entries from before the toggle) never influences File Shield;
@@ -282,6 +262,38 @@ impl guard_platform::ProcessIdentityResolver for MacProcessIdentityResolver {
 }
 
 impl MacProcessIdentityResolver {
+    /// P1 review (MCH5 rework): runtime SecretAuthority promotion, called ONLY
+    /// by the File Shield ALLOW path once the policy has decided to grant
+    /// protected secret bytes to a trusted browser process. Fail closed:
+    /// admission errors (invalid identity, provably externally launched
+    /// signed-helper laundering) DENY the read instead of proceeding
+    /// unshielded. With Process Shield disabled no promotion happens (File
+    /// Shield judges alone). Idempotent for already-task-protected instances.
+    pub fn promote_authority(&self, facts: &MacProcessFacts) -> anyhow::Result<()> {
+        if !self.shield_enabled() {
+            return Ok(());
+        }
+        let Some(shield) = &self.shield else {
+            return Ok(());
+        };
+        let mut shield = shield
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Idempotent for instances that already carry browser SecretAuthority.
+        // An instance shielded only by a dynamic lease reason must still get
+        // its browser authority recorded (so lease expiry keeps it protected
+        // as a browser), so the short-circuit is on browser authority, not on
+        // generic task protection.
+        if shield.is_browser_authority(facts) {
+            return Ok(());
+        }
+        shield.ensure_authority(facts).map_err(|error| {
+            anyhow::anyhow!(
+                "failed to admit trusted browser as SecretAuthority before protected bytes were allowed: {error}"
+            )
+        })
+    }
+
     /// The live Process Shield state, when wired (MPS5/MPS6).
     pub fn shield(&self) -> Option<std::sync::Arc<std::sync::Mutex<MacProcessShield>>> {
         self.shield.clone()
@@ -682,7 +694,11 @@ mod tests {
     }
 
     #[test]
-    fn resolver_marks_trusted_browser_warm_start_as_preexisting() {
+    fn resolve_is_pure_and_promote_authority_admits_warm_start_as_preexisting() {
+        // P1 review (promotion timing): resolve() is pure identity
+        // resolution and must NOT create SecretAuthority. The warm-start
+        // reconciliation happens only when the File Shield ALLOW path calls
+        // promote_authority().
         use crate::identity::MacProcessGraph;
         use crate::process_shield::{MacProcessShield, ShieldAdmission};
         use std::sync::Arc;
@@ -711,13 +727,14 @@ mod tests {
             Arc::new(std::sync::RwLock::new(store)),
             Arc::clone(&shield),
         );
-        // Before any protected read, the browser is NOT shielded.
-        assert!(!shield.lock().unwrap().is_shielded_exact(&facts));
-        // First resolve() (protected AUTH_OPEN path) reconciles warm start.
+        // resolve() must NOT admit: identity only.
         let identity = resolver.resolve(facts.key.pid, 501).unwrap();
         assert!(identity.browser.is_some());
         assert!(identity.trust_tier.is_trusted());
-        assert_eq!(identity.integrity, guard_core::ProcessIntegrity::Normal);
+        assert!(!shield.lock().unwrap().is_shielded_exact(&facts));
+        // The File Shield ALLOW path promotes; warm start becomes
+        // PreexistingUnverified.
+        resolver.promote_authority(&facts).unwrap();
         assert!(shield.lock().unwrap().is_shielded_exact(&facts));
         assert!(shield.lock().unwrap().is_preexisting(facts.key.pid));
         assert_eq!(
@@ -725,8 +742,8 @@ mod tests {
             Some(ShieldAdmission::PreexistingUnverified)
         );
         assert_eq!(shield.lock().unwrap().live_preexisting_count(), 1);
-        // A second resolve() is idempotent: still exactly one admission.
-        resolver.resolve(facts.key.pid, 501).unwrap();
+        // A second promotion is idempotent: still exactly one admission.
+        resolver.promote_authority(&facts).unwrap();
         assert_eq!(shield.lock().unwrap().preexisting_admitted_total(), 1);
     }
 
@@ -832,7 +849,10 @@ mod tests {
     }
 
     #[test]
-    fn resolver_fails_closed_when_preexisting_reconciliation_rejected() {
+    fn promote_authority_fails_closed_on_identity_conflict() {
+        // P1 review (promotion timing): resolve() is pure; the promotion
+        // entry point must fail closed when the exact instance cannot be
+        // admitted (same audit key, different stable identity).
         use crate::identity::MacProcessGraph;
         use crate::process_shield::{MacProcessShield, ShieldReasonKind};
         use std::sync::Arc;
@@ -854,9 +874,10 @@ mod tests {
 
         // Shield already contains an entry for the SAME audit key
         // (pid=50, pidversion=3) but a DIFFERENT stable identity
-        // (start=200). admit_preexisting must reject this as
-        // "same audit key changed stable identity", so the resolver
-        // must fail closed instead of returning a trusted Normal identity.
+        // (start=200). promote_authority must reject this as
+        // "same audit key changed stable identity", so the File Shield
+        // ALLOW path fails closed instead of granting secret bytes to an
+        // unshielded instance.
         let mut shield = MacProcessShield::new();
         let mut conflicting = graph_facts.clone();
         conflicting.start_time_us = 200;
@@ -876,28 +897,24 @@ mod tests {
             Arc::new(Mutex::new(shield)),
         );
 
-        // The trusted browser cannot be reconciled -> resolve() must Err,
-        // so no trusted Normal identity escapes to the portable policy.
-        let result = resolver.resolve(graph_facts.key.pid, 501);
+        let result = resolver.promote_authority(&graph_facts);
         let error = match result {
-            Ok(_) => panic!("resolve() must fail closed when reconciliation is rejected"),
+            Ok(_) => panic!("promote_authority must fail closed on identity conflict"),
             Err(error) => error.to_string(),
         };
         assert!(
-            error.contains(
-                "failed to admit trusted browser as SecretAuthority before protected read"
-            ),
+            error.contains("same audit key changed stable identity"),
             "unexpected error: {error}"
         );
     }
 
     #[test]
-    fn resolver_promotes_session_helper_before_protected_read() {
-        // MCH5 ordering at the File Shield layer: a session-member helper that
-        // was NOT task-protected at exec time is admitted as SecretAuthority
-        // BEFORE the protected read is allowed. resolve() (the protected
-        // AUTH_OPEN choke point) returns a trusted identity only after the
-        // admission succeeded.
+    fn promote_authority_admits_session_helper_but_resolve_stays_pure() {
+        // P1 review (promotion timing + MCH5 ordering): the File Shield
+        // ALLOW path calls promote_authority() BEFORE the protected bytes are
+        // allowed; resolve() itself never promotes. A session-member helper
+        // (not task-protected at exec time) is admitted as SecretAuthority at
+        // the promotion point with AuthExec admission.
         use crate::browser_trust::BrowserExecutableRole;
         use crate::identity::MacProcessGraph;
         use crate::process_shield::{MacProcessShield, ShieldAdmission};
@@ -954,15 +971,18 @@ mod tests {
             Arc::new(std::sync::RwLock::new(store)),
             Arc::clone(&shield),
         );
-        // The helper's first protected read promotes it BEFORE the identity
-        // (and thus the ALLOW) is returned.
+        // resolve() stays pure: no admission, no task protection.
         let identity = resolver.resolve(helper.key.pid, 501).unwrap();
         assert!(identity.browser.is_some());
         assert!(identity.trust_tier.is_trusted());
+        assert!(!shield.lock().unwrap().is_task_protected(&helper));
+        // The promotion point admits the session helper BEFORE the protected
+        // bytes are allowed.
+        resolver.promote_authority(&helper).unwrap();
         let shield = shield.lock().unwrap();
         assert!(
             shield.is_task_protected(&helper),
-            "helper must be admitted as SecretAuthority before the protected read is allowed"
+            "helper must be admitted as SecretAuthority before the protected bytes are allowed"
         );
         assert_eq!(
             shield.admission_of_pid(helper.key.pid),
@@ -970,6 +990,99 @@ mod tests {
             "launch-observed session member must not be PreexistingUnverified"
         );
         assert_eq!(shield.live_preexisting_count(), 0);
+    }
+
+    #[test]
+    fn promote_authority_rejects_externally_launched_helper() {
+        // P0 review: signed-helper laundering. A genuine signed helper whose
+        // parent is NOT an enrolled browser is Rejected(ExternalLaunch); that
+        // rejection is sticky for the exact instance and MUST survive the
+        // runtime promotion path: its protected own-profile AUTH_OPEN must
+        // DENY (promote_authority fails) and it must never become a
+        // SecretAuthority.
+        use crate::browser_session::SessionMembership;
+        use crate::browser_trust::BrowserExecutableRole;
+        use crate::identity::MacProcessGraph;
+        use crate::process_shield::{MacProcessShield, ShieldError};
+        use std::sync::Arc;
+        use std::sync::Mutex;
+
+        let temp = tempfile::tempdir().unwrap();
+        let helper_exe = temp
+            .path()
+            .join("Chrome.app/Contents/Frameworks/Chrome Helper.app/Contents/MacOS/Chrome Helper");
+        std::fs::create_dir_all(helper_exe.parent().unwrap()).unwrap();
+        std::fs::write(&helper_exe, b"signed fixture").unwrap();
+        let store = MacBrowserTrustStore::load_and_revalidate(vec![signed_browser(
+            temp.path(),
+            &helper_exe,
+            BrowserExecutableRole::Helper,
+        )])
+        .unwrap();
+        let graph = Arc::new(Mutex::new(MacProcessGraph::default()));
+        let shield = Arc::new(Mutex::new(MacProcessShield::new()));
+        let mut helper = process(&helper_exe, 501, "TEAM", "com.example.chrome");
+        helper.key.pid = 51;
+        helper.key.pidversion = 4;
+        helper.start_time_us = 101;
+        // Parent facts exist but the parent is NOT an enrolled browser
+        // (attacker process / shell): ExternalLaunch.
+        let attacker_path = temp.path().join("attacker");
+        std::fs::write(&attacker_path, b"attacker binary").unwrap();
+        let mut attacker_parent = process(&attacker_path, 501, "TEAM", "com.example.attacker");
+        attacker_parent.key.pid = 52;
+        attacker_parent.key.pidversion = 4;
+        attacker_parent.start_time_us = 102;
+        graph
+            .lock()
+            .unwrap()
+            .observe(attacker_parent.clone(), std::time::Instant::now())
+            .unwrap();
+        let membership = shield
+            .lock()
+            .unwrap()
+            .admit_browser(
+                helper.clone(),
+                Some(BrowserExecutableRole::Helper),
+                Some(attacker_parent.key),
+                false,
+            )
+            .unwrap();
+        assert!(
+            matches!(membership, SessionMembership::Rejected(_)) && membership.is_external(),
+            "attacker-launched helper must be Rejected(ExternalLaunch)"
+        );
+        graph
+            .lock()
+            .unwrap()
+            .observe(helper.clone(), std::time::Instant::now())
+            .unwrap();
+        let resolver = MacProcessIdentityResolver::new_shared_with_shield(
+            Arc::clone(&graph),
+            Arc::new(std::sync::RwLock::new(store)),
+            Arc::clone(&shield),
+        );
+        // The protected own-profile read must fail closed: the externally
+        // launched helper can never be promoted to SecretAuthority, and it
+        // stays unprotected (never task-protected).
+        let error = match resolver.promote_authority(&helper) {
+            Ok(()) => panic!("externally launched helper must not be promoted"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("launched externally"),
+            "unexpected error: {error}"
+        );
+        assert!(matches!(
+            resolver
+                .shield()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .ensure_authority(&helper),
+            Err(ShieldError::ExternalLaunchRejected)
+        ));
+        assert!(!shield.lock().unwrap().is_task_protected(&helper));
     }
 
     #[test]

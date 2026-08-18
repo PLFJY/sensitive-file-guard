@@ -425,6 +425,8 @@ pub enum ShieldError {
     InvalidIdentity(String),
     #[error("shield entry for the exact instance is missing")]
     MissingEntry,
+    #[error("instance was provably launched externally (signed-helper laundering); authority admission is rejected for its exact lifetime")]
+    ExternalLaunchRejected,
 }
 
 #[derive(Debug)]
@@ -446,6 +448,14 @@ struct ShieldEntry {
     /// read (MCH5). Non-browser reasons (GuardComponent / DynamicLeaseRoot)
     /// are always task-protected regardless of this flag.
     authority: bool,
+    /// P1 review (protection continuity): the shield epoch this entry was
+    /// admitted in. When Process Shield is disabled and later re-enabled,
+    /// `advance_epoch()` invalidates every prior authority assertion: a
+    /// process whose clean trust was established before the disabled interval
+    /// cannot be re-trusted without re-observation. Stale entries keep their
+    /// integrity state but lose task-protection authority until the exact
+    /// process restarts and is re-admitted.
+    epoch: u64,
 }
 
 /// Live Process Shield state, keyed by exact stable process instance.
@@ -453,6 +463,10 @@ struct ShieldEntry {
 pub struct MacProcessShield {
     entries: HashMap<AuditProcessKey, ShieldEntry>,
     current_by_pid: HashMap<u32, AuditProcessKey>,
+    /// P1 review: protection-continuity epoch. Bumped when Process Shield is
+    /// re-enabled after being disabled; every entry from an older epoch loses
+    /// task-protection authority (see ShieldEntry::epoch).
+    epoch: u64,
     /// MCH3: verified launch-topology sessions for browser processes.
     sessions: BrowserSessionTracker,
     admitted: u64,
@@ -477,6 +491,18 @@ pub struct MacProcessShield {
 impl MacProcessShield {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// P1 review (protection continuity): advance the shield epoch. Called
+    /// when Process Shield transitions disabled -> enabled: authority
+    /// assertions made before the disabled interval cannot be re-trusted
+    /// without re-observation, so every entry from an older epoch loses
+    /// task-protection authority (health reports the stale instances as
+    /// unverified until the exact process restarts and is re-admitted).
+    /// Integrity state is preserved: a Compromised flag is never cleared by
+    /// a toggle.
+    pub fn advance_epoch(&mut self) {
+        self.epoch = self.epoch.saturating_add(1);
     }
 
     /// Admit (or add a reason to) an exact live instance. Validates the stable
@@ -516,6 +542,7 @@ impl MacProcessShield {
                         admission: ShieldAdmission::AuthExec,
                         session: None,
                         authority: false,
+                        epoch: self.epoch,
                     },
                 );
                 self.current_by_pid.insert(key.pid, key);
@@ -566,6 +593,7 @@ impl MacProcessShield {
                         admission: ShieldAdmission::PreexistingUnverified,
                         session: None,
                         authority: false,
+                        epoch: self.epoch,
                     },
                 );
                 self.current_by_pid.insert(key.pid, key);
@@ -745,6 +773,7 @@ impl MacProcessShield {
                         admission: ShieldAdmission::AuthExec,
                         session,
                         authority: true,
+                        epoch: self.epoch,
                     },
                 );
                 self.current_by_pid.insert(key.pid, key);
@@ -770,7 +799,22 @@ impl MacProcessShield {
             .validate()
             .map_err(|error| ShieldError::InvalidIdentity(error.to_string()))?;
         let key = facts.key;
+        // P0 review: a provably externally launched (signed-helper laundering)
+        // instance must NEVER become a SecretAuthority. The rejection is
+        // sticky for the exact live instance (recorded at AUTH_EXEC, cleared
+        // only on exit), so this check cannot be bypassed by a later warm-start
+        // fallback or a runtime promotion path.
+        if self.sessions.is_external_launch(&key) {
+            return Err(ShieldError::ExternalLaunchRejected);
+        }
         let session = self.sessions.session_of(&key);
+        // P2 review: admission kind must reflect whether the launch was
+        // OBSERVED via AUTH_EXEC, not whether the instance became a session
+        // member. Role-less (ExplicitHash) enrollments and rejected launches
+        // are still observed; reporting them as PreexistingUnverified would
+        // claim an unverified launch for a process we clearly saw exec (and a
+        // rejected launch already failed above).
+        let launch_observed = session.is_some() || self.sessions.was_observed_launch(&key);
         if let Some(entry) = self.entries.get_mut(&key) {
             if entry.facts.stable_id() != facts.stable_id() || entry.facts.uid != facts.uid {
                 return Err(ShieldError::InvalidIdentity(
@@ -780,10 +824,17 @@ impl MacProcessShield {
             entry.facts = facts.clone();
             entry.session = session;
             entry.authority = true;
+            // A pre-existing entry created by another reason (e.g. a dynamic
+            // lease root) may carry AuthExec by default; correct the admission
+            // to reflect the actual launch observation for THIS browser
+            // authority (a warm-start browser stays PreexistingUnverified).
+            if !launch_observed {
+                entry.admission = ShieldAdmission::PreexistingUnverified;
+            }
             *entry.reasons.entry(ShieldReasonKind::Browser).or_insert(0) += 1;
             return Ok(());
         }
-        let admission = if session.is_some() {
+        let admission = if launch_observed {
             ShieldAdmission::AuthExec
         } else {
             ShieldAdmission::PreexistingUnverified
@@ -799,6 +850,7 @@ impl MacProcessShield {
                 admission,
                 session,
                 authority: true,
+                epoch: self.epoch,
             },
         );
         self.current_by_pid.insert(key.pid, key);
@@ -816,7 +868,28 @@ impl MacProcessShield {
         self.entries.get(&facts.key).is_some_and(|entry| {
             entry.facts.stable_id() == facts.stable_id()
                 && entry.facts.uid == facts.uid
+                // P1 review: an entry admitted in an older shield epoch
+                // (Process Shield was disabled and re-enabled) lost its
+                // authority assertion; it is not task-protected until the
+                // exact process restarts and is re-admitted.
+                && entry.epoch == self.epoch
                 && (entry.authority || !entry.reasons.contains_key(&ShieldReasonKind::Browser))
+        })
+    }
+
+    /// P1 review: whether the exact instance already carries browser
+    /// SecretAuthority (Browser reason + authority in the CURRENT epoch).
+    /// Promotion is idempotent for these; an instance shielded only by a
+    /// dynamic lease (or GuardComponent) reason still needs its browser
+    /// authority recorded so lease expiry cannot silently drop its
+    /// browser protection.
+    pub fn is_browser_authority(&self, facts: &MacProcessFacts) -> bool {
+        self.entries.get(&facts.key).is_some_and(|entry| {
+            entry.facts.stable_id() == facts.stable_id()
+                && entry.facts.uid == facts.uid
+                && entry.epoch == self.epoch
+                && entry.authority
+                && entry.reasons.contains_key(&ShieldReasonKind::Browser)
         })
     }
 

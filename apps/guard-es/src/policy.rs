@@ -436,6 +436,31 @@ impl MacPolicy {
                 let _ = event.permission.deny();
             }
             Decision::Allow => {
+                // P1 review (MCH5 rework): SecretAuthority promotion happens
+                // ONLY at this point, where the policy has decided to grant
+                // protected secret bytes. Resolving a protected event must
+                // never grant authority (the event may still be denied, or be
+                // a write-only open). Fail closed: a promotion error (invalid
+                // identity, provably externally launched signed-helper
+                // laundering) DENIES the read.
+                if let Err(error) = self.resolver.promote_authority(&event.facts.process) {
+                    inner.stats.denied = inner.stats.denied.saturating_add(1);
+                    drop(inner);
+                    self.record(
+                        if event.resource.kind == ProtectedResourceKind::SshPrivateKey {
+                            "ssh_key_access_blocked"
+                        } else {
+                            "browser_access_denied"
+                        },
+                        &event.resource,
+                        Some(&process),
+                        Decision::Deny(DenyReason::UnknownProcess),
+                        format!("SecretAuthority admission failed closed: {error}"),
+                        now,
+                    );
+                    let _ = event.permission.deny();
+                    return;
+                }
                 inner.stats.allowed = inner.stats.allowed.saturating_add(1);
                 drop(inner);
                 self.record_debug(

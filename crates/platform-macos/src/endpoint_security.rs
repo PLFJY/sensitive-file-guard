@@ -457,6 +457,26 @@ impl EndpointSecurityConfig {
         }
     }
 
+    /// P1 review: whether two exact instances belong to the SAME enrolled
+    /// browser (same BrowserId + same owner UID). Used to narrow the
+    /// warm-start notify fallback: BrowserIdentity must never become a
+    /// relationship authority across enrollments (a warm-start Firefox
+    /// requester must not get fallback relationship with a Chrome
+    /// SecretAuthority target).
+    pub fn same_browser_enrollment(&self, a: &MacProcessFacts, b: &MacProcessFacts) -> bool {
+        match &self.scope {
+            ProtectionScope::Browser { trust, .. } => {
+                let trust = trust
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let ta = trust.classify(a, a.uid);
+                let tb = trust.classify(b, b.uid);
+                a.uid == b.uid && ta.browser.is_some() && ta.browser == tb.browser
+            }
+            _ => false,
+        }
+    }
+
     /// MCH3: the enrolled role (Main / Helper) of an exact process, from the
     /// trust store. BrowserIdentity context only: never task authority.
     pub fn browser_role_of(
@@ -784,7 +804,28 @@ impl EndpointSecurityBackend {
     /// access, applies no strong-signal transitions and never influences File
     /// Shield; File Shield stays fully active.
     pub fn set_process_shield_enabled(&mut self, flag: Arc<AtomicBool>) {
+        let was_disabled = !self
+            .context
+            .process_shield_enabled
+            .load(std::sync::atomic::Ordering::Acquire);
         self.context.process_shield_enabled = flag;
+        let now_enabled = self
+            .context
+            .process_shield_enabled
+            .load(std::sync::atomic::Ordering::Acquire);
+        // P1 review (protection continuity): re-enabling Process Shield after
+        // a disabled interval must not carry over clean-trust assertions made
+        // before the gap. Bump the shield epoch so every live authority entry
+        // admitted before the disable loses task-protection authority until
+        // the exact process restarts and is re-admitted (health reports the
+        // stale instances as unverified).
+        if was_disabled && now_enabled {
+            self.context
+                .shield
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .advance_epoch();
+        }
     }
 
     /// Whether AUTH_GET_TASK_READ is actually enforced on this host (SDK/OS
@@ -1601,12 +1642,17 @@ impl CallbackContext {
         let relation = shield.signal_relation(&requester.key, &target.key);
         // Fallback for UNVERIFIABLE membership (warm start / sequence gap):
         // browser identity alone (MCH7 heuristic) keeps warm-start browsers
-        // from false-compromise transitions. BrowserIdentity is context for
-        // signal interpretation only; it never grants task authority.
+        // from false-compromise transitions. P1 review: the fallback is
+        // narrowed to the SAME enrolled browser as the target (same
+        // BrowserId + UID) - BrowserIdentity must never become relationship
+        // authority across enrollments (a warm-start Firefox requester must
+        // not get fallback relationship with a Chrome target). BrowserIdentity
+        // is context for signal interpretation only; it never grants task
+        // authority.
         let fallback_related = matches!(
             self.config.shield_eligible(&requester, requester.uid),
             Some(ShieldReasonKind::Browser)
-        );
+        ) && self.config.same_browser_enrollment(&requester, &target);
         let strong = crate::process_shield::strong_signal_decision(
             kind,
             legitimate,

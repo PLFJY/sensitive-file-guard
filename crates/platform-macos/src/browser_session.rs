@@ -114,6 +114,10 @@ pub struct BrowserSessionTracker {
     key_to_session: HashMap<AuditProcessKey, SessionId>,
     current_by_pid: HashMap<u32, AuditProcessKey>,
     external_by_key: HashMap<AuditProcessKey, ()>,
+    /// Exact instances whose launch was observed via AUTH_EXEC (including
+    /// rejected and role-less launches). Used to distinguish "launch
+    /// observed" from "session member" when choosing admission kinds.
+    observed_by_auth_exec: HashMap<AuditProcessKey, ()>,
     next_id: SessionId,
     roots: u64,
     joins: u64,
@@ -135,6 +139,11 @@ impl BrowserSessionTracker {
         parent: Option<AuditProcessKey>,
         parent_is_enrolled_browser: bool,
     ) -> SessionMembership {
+        // Every AUTH_EXEC-observed browser instance is recorded as such, even
+        // when it is later rejected: launch observation is a fact independent
+        // of session membership (P2 review: ExplicitHash / role-less
+        // enrollments must not be reported as unverified launches).
+        self.observed_by_auth_exec.insert(facts.key, ());
         // PID reuse: a stale mapping for the same PID from a different
         // instance must never leak membership into the new instance.
         if let Some(previous) = self.current_by_pid.get(&facts.key.pid) {
@@ -207,6 +216,24 @@ impl BrowserSessionTracker {
         self.key_to_session.get(key).copied()
     }
 
+    /// True when the exact instance was provably rejected as an externally
+    /// launched (signed-helper laundering) process. The rejection is sticky
+    /// for the exact live instance: it is recorded at AUTH_EXEC and removed
+    /// only on process exit, so no later admission path (runtime authority
+    /// promotion, warm-start fallback) can wash it into a session member or
+    /// a SecretAuthority.
+    pub fn is_external_launch(&self, key: &AuditProcessKey) -> bool {
+        self.external_by_key.contains_key(key)
+    }
+
+    /// True when the exact instance's launch was observed via AUTH_EXEC by
+    /// this shield (whether or not it became a session member). Rejected and
+    /// role-less (ExplicitHash) launches are still observed; this is the
+    /// launch-observed fact, distinct from session membership.
+    pub fn was_observed_launch(&self, key: &AuditProcessKey) -> bool {
+        self.observed_by_auth_exec.contains_key(key)
+    }
+
     /// True when the exact instance is a verified session member.
     pub fn is_member(&self, key: &AuditProcessKey) -> bool {
         self.key_to_session.contains_key(key)
@@ -273,6 +300,7 @@ impl BrowserSessionTracker {
 
     fn remove_membership(&mut self, key: AuditProcessKey) {
         self.external_by_key.remove(&key);
+        self.observed_by_auth_exec.remove(&key);
         let Some(sid) = self.key_to_session.remove(&key) else {
             return;
         };

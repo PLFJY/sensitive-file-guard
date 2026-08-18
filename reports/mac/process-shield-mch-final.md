@@ -367,3 +367,71 @@ tests pass, clippy clean.
 
 Deployment note: this GUI fix is in the repo; re-run
 scripts/macos/build-deploy-self-use.sh to install a bundle that includes it
+## 22. External security review fixes (P0/P1/P2, committed)
+
+An independent review of HEAD found two P0 security blockers and several
+P1/P2 issues in the MCH5 dynamic-promotion design. All are addressed:
+
+### P0-1 [NOT ACCEPTED, partially mitigated] pre-authority capability window
+- Finding: a browser helper is NOT task-protected until its first protected
+  read promotes it; handle_task() ALLOWs task requests against non-authority
+  helpers, so an attacker could acquire a durable Mach task right before the
+  helper is promoted to SecretAuthority. Guard cannot revoke a task right it
+  never denied.
+- Mitigation (code): promotion now happens ONLY at the File Shield ALLOW
+  point (promote_authority), never during identity resolution, and the
+  provably-external laundering path is closed (P0-2). The residual window
+  (a helper that is about to be promoted was previously unprotected) is
+  explicitly NOT ACCEPTED until the MCH2 authority matrix identifies the
+  real secret-holder roles so they can be shielded at AUTH_EXEC. The report
+  no longer claims "promoted helper takeover -> PREVENTED".
+
+### P0-2 [FIXED] Rejected(ExternalLaunch) was not sticky
+- Finding: session_of() returns None for Rejected(ExternalLaunch), and
+  ensure_authority() treated None as warm start, so a laundered helper
+  (attacker-launched genuine signed helper) could be promoted to
+  SecretAuthority on its first protected own-profile open.
+- Fix: BrowserSessionTracker::is_external_launch() + ShieldError::
+  ExternalLaunchRejected; ensure_authority() fails closed for the exact
+  instance's lifetime (sticky until exit). New test
+  promote_authority_rejects_externally_launched_helper.
+
+### P1-3 [FIXED] promotion happened too early (inside resolve)
+- resolve() no longer promotes; MacProcessIdentityResolver::promote_authority
+  is called only by the File Shield ALLOW branch (decision granted secret
+  bytes), failing closed on admission errors. Write-only opens, cross-profile
+  DENYs and prompts never grant authority. Tests rewritten to the new
+  contract (resolve stays pure).
+
+### P1-4 [FIXED] Disable->Enable lacked a protection-continuity epoch
+- MacProcessShield::advance_epoch() bumps a shield epoch on the disabled->
+  enabled transition (wired in set_process_shield_enabled); entries admitted
+  in an older epoch lose task-protection authority until the exact process
+  restarts and is re-admitted (health reports them as unverified). Integrity
+  (Compromised) state is preserved across the toggle.
+
+### P1-5 [FIXED] warm-start notify fallback treated any enrolled browser as
+### related
+- The Unverifiable fallback now requires the requester and target to belong
+  to the SAME enrolled browser (same BrowserId + UID) via
+  EndpointSecurityConfig::same_browser_enrollment; BrowserIdentity can no
+  longer act as cross-enrollment relationship authority.
+
+### P1-6 [EVIDENCE, Reduced stays] GET_TASK_READ notify semantics
+- New probe scripts/macos/correlate-task-read-auth-notify.sh runs a
+  controlled /bin/ps task_read on guard-es and pairs the AUTH deny counter
+  with the notify event: one probe produced task_read_denied +1 AND
+  notify_get_task_read at the same ts_ms (1787032072000) with the same
+  requester/target - strong temporal correlation consistent with a single
+  acquisition, but the audit cannot prove one syscall produced both callbacks
+  vs two adjacent requests. GET_TASK_READ strong-signal semantics stay NOT
+  ACCEPTED; health stays Reduced (matches the review's own conclusion).
+
+### P2-7 [FIXED] ExplicitHash (Safari) launch-observed truthfulness
+- admission kind now uses "launch observed via AUTH_EXEC" (was_observed_launch)
+  instead of session membership as a proxy; a role-less ExplicitHash Main
+  that Guard clearly saw exec is reported AuthExec, not PreexistingUnverified.
+  ensure_authority() also corrects admission when upgrading an entry that a
+  different reason (e.g. dynamic lease) created.
+
+Tests: 297 passed / 0 failed (was 295; +2 net after rewrites), clippy clean.
