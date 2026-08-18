@@ -152,6 +152,21 @@ impl MacPolicy {
         // MCH0: the Process Shield toggle is applied atomically with the rest
         // of the policy; the ES backend and identity resolver read the same
         // flag.
+        //
+        // P1-4 review (round 3): the disabled -> enabled transition is
+        // detected HERE, at the authoritative config-apply point, and the
+        // shield epoch is advanced BEFORE the enabled value is published.
+        // There is deliberately no transition side effect in the ES callback
+        // hot path (process_shield_active) and no dependence on UI/status
+        // polling: a protected AUTH_OPEN that races a toggle cannot observe
+        // enabled==true while the epoch was not yet advanced, and a fast
+        // OFF->ON with no intermediate shield callback still bumps the epoch.
+        let shield_was_disabled = !self
+            .process_shield_enabled
+            .load(std::sync::atomic::Ordering::Acquire);
+        if shield_was_disabled && config.process_shield_enabled {
+            self.resolver.advance_shield_epoch();
+        }
         self.process_shield_enabled.store(
             config.process_shield_enabled,
             std::sync::atomic::Ordering::Release,
@@ -474,6 +489,38 @@ impl MacPolicy {
                 let _ = event.permission.allow_exact();
             }
             Decision::AllowByLease(_) => {
+                // P0-1 review (round 3): the lease reader itself must become a
+                // SecretAuthority before secret bytes are delivered - not just
+                // the exact lease root. A browser reader (Main or helper) is
+                // promoted here and the read FAILS CLOSED on admission errors;
+                // non-browser readers (SSH clients) are covered by their own
+                // dynamic lease-root shielding. This does not claim to close
+                // the pre-authority window (a reader that was unprotected
+                // before this point is documented NOT ACCEPTED until the MCH2
+                // authority matrix); it prevents an unprotected reader from
+                // receiving bytes while claiming continuity.
+                if process.browser.is_some() {
+                    if let Err(error) = self.resolver.promote_authority(&event.facts.process) {
+                        inner.stats.denied = inner.stats.denied.saturating_add(1);
+                        drop(inner);
+                        self.record(
+                            if event.resource.kind == ProtectedResourceKind::SshPrivateKey {
+                                "ssh_key_access_blocked"
+                            } else {
+                                "browser_access_denied"
+                            },
+                            &event.resource,
+                            Some(&process),
+                            Decision::Deny(DenyReason::UnknownProcess),
+                            format!(
+                                "lease reader SecretAuthority admission failed closed: {error}"
+                            ),
+                            now,
+                        );
+                        let _ = event.permission.deny();
+                        return;
+                    }
+                }
                 inner.stats.allowed = inner.stats.allowed.saturating_add(1);
                 drop(inner);
                 self.record_debug(
@@ -781,22 +828,46 @@ impl MacPolicy {
             ShieldAuditEvent::ExecAdmitted {
                 target,
                 reason,
+                role,
                 membership,
-            } => (
-                "process_shield_exec_admitted",
-                Some(target),
-                None,
-                Decision::Allow,
-                format!(
-                    "shield_reason={}{}",
-                    reason.label(),
-                    if reason == platform_macos::process_shield::ShieldReasonKind::Browser {
-                        format!(" session_membership={}", membership.label())
-                    } else {
-                        String::new()
-                    }
-                ),
-            ),
+            } => {
+                // P2 audit truthfulness: an admitted BROWSER MAIN (the
+                // permanent authority candidate) gets a shield entry and task
+                // protection at exec time, so it is `authority_admitted`.
+                // Every other admission (helpers, role-less enrollments,
+                // rejected launches, warm-start unverifiable admissions of
+                // helpers) is session-topology bookkeeping only - it does NOT
+                // enter the shield with task protection, so it is reported as
+                // `session_admitted`.
+                let is_authority_admission = reason
+                    == platform_macos::process_shield::ShieldReasonKind::Browser
+                    && role == Some(platform_macos::browser_trust::BrowserExecutableRole::Main)
+                    && matches!(
+                        membership,
+                        platform_macos::browser_session::SessionMembership::NewRoot(_)
+                            | platform_macos::browser_session::SessionMembership::Joined(_)
+                    );
+                let event_code = if is_authority_admission {
+                    "process_shield_authority_admitted"
+                } else {
+                    "process_shield_session_admitted"
+                };
+                (
+                    event_code,
+                    Some(target),
+                    None,
+                    Decision::Allow,
+                    format!(
+                        "shield_reason={}{}",
+                        reason.label(),
+                        if reason == platform_macos::process_shield::ShieldReasonKind::Browser {
+                            format!(" session_membership={}", membership.label())
+                        } else {
+                            String::new()
+                        }
+                    ),
+                )
+            }
             ShieldAuditEvent::ExecDeniedLaunchInjection {
                 target,
                 present_vars,
@@ -2504,6 +2575,7 @@ mod tests {
             .handle_shield(ShieldAuditEvent::ExecAdmitted {
                 target: target.clone(),
                 reason: platform_macos::process_shield::ShieldReasonKind::Browser,
+                role: Some(platform_macos::browser_trust::BrowserExecutableRole::Main),
                 membership: platform_macos::browser_session::SessionMembership::Rejected(
                     platform_macos::browser_session::RejectionKind::Unverifiable,
                 ),
@@ -2547,7 +2619,7 @@ mod tests {
             .recent_events(fixture.uid, 100, None, None)
             .unwrap();
         for required in [
-            "process_shield_exec_admitted",
+            "process_shield_session_admitted",
             "process_shield_launch_injection_denied",
             "process_shield_exec_malformed_denied",
             "process_shield_task_control_denied",

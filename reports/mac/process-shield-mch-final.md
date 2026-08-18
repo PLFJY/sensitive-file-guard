@@ -464,3 +464,33 @@ Tests: 297 passed / 0 failed (was 295; +2 net after rewrites), clippy clean.
   CONTAINED, AUTH denials are PREVENTED.
 
 Tests: 299 passed / 0 failed, clippy clean, fmt applied.
+### Review round 3 rework (epoch ordering + lease reader + truthfulness, committed)
+
+- P1-4 [epoch ordering CLOSED]: the disabled -> enabled transition now lives
+  in MacPolicy::apply_config (the authoritative config-apply point): the
+  shield epoch is advanced BEFORE the enabled flag is published, so no
+  protected AUTH_OPEN can observe enabled==true while the epoch was not yet
+  advanced, and a fast OFF->ON with no intermediate shield callback still
+  bumps the epoch. The ES hot-path gate (process_shield_active) is a pure
+  read again - no transition side effects, no dependence on UI/status
+  polling scheduling.
+- P0-1 [scope expanded, minimal mitigation]: AllowByLease readers (migration /
+  SSH lease descendants that actually receive secret bytes) are now also
+  promoted to SecretAuthority before delivery when they are enrolled
+  browsers (fail closed on admission errors); non-browser lease readers stay
+  covered by dynamic lease-root shielding. The residual pre-authority
+  window for lease descendants remains NOT ACCEPTED (documented) until the
+  MCH2 authority redesign decides exact-root-only vs race-free observed
+  descendant shielding.
+- P2 truthfulness: remaining DETECTED + CONTAINED comments corrected in
+  guard-core Decision::Detected, ShieldAuditEvent::TaskNotify and
+  MacProcessShield::note_task_notify - telemetry-only kinds are DETECTED,
+  strong resolutions are DETECTED + CONTAINED, AUTH denials are PREVENTED.
+- P2 audit semantics: ShieldAuditEvent::ExecAdmitted now carries the enrolled
+  role; guard-es records browser Mains admitted via a verified session as
+  process_shield_authority_admitted and every other admission (helpers,
+  role-less enrollments, warm-start/rejected) as
+  process_shield_session_admitted. No more 'exec_admitted' implying a shield
+  entry that does not exist.
+
+Tests: 299 passed / 0 failed, clippy clean, fmt applied.

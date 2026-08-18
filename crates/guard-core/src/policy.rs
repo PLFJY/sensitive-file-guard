@@ -42,8 +42,11 @@ pub enum Decision {
     RequireSshKeyConfirmation,
     /// Audit-only: a notify-only signal (task-capability obtained, trace,
     /// remote thread, code-signing invalidation) was observed against a
-    /// shielded target. Never returned by `evaluate`; DETECTED + CONTAINED,
-    /// never PREVENTED.
+    /// shielded target. Never returned by `evaluate`. Posture is context
+    /// dependent: STRONG resolutions are DETECTED + CONTAINED (Compromised
+    /// transition + authority revocation); telemetry-only kinds on the macOS
+    /// build (GET_TASK_READ, TRACE, CS_INVALIDATED) are DETECTED only.
+    /// Notify signals never PREVENT - only AUTH gates do.
     Detected,
 }
 

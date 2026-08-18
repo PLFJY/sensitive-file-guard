@@ -277,6 +277,19 @@ impl guard_platform::ProcessIdentityResolver for MacProcessIdentityResolver {
 }
 
 impl MacProcessIdentityResolver {
+    /// P1-4 review (round 3): advance the shield protection-continuity
+    /// epoch. Called by the authoritative config-apply path BEFORE the
+    /// re-enabled Process Shield flag is published, so no AUTH_OPEN can
+    /// observe enabled==true with a stale epoch.
+    pub fn advance_shield_epoch(&self) {
+        if let Some(shield) = &self.shield {
+            shield
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .advance_epoch();
+        }
+    }
+
     /// P1 review (MCH5 rework): runtime SecretAuthority promotion, called ONLY
     /// by the File Shield ALLOW path once the policy has decided to grant
     /// protected secret bytes to a trusted browser process. Fail closed:

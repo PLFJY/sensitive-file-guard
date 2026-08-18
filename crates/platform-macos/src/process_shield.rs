@@ -998,7 +998,10 @@ impl MacProcessShield {
     }
 
     /// Count a notify-only signal observed against a shielded target.
-    /// Notify events are DETECTED + CONTAINED, never PREVENTED.
+    /// Notify events never PREVENT (only AUTH gates do). On this build
+    /// GET_TASK_READ / TRACE / CS_INVALIDATED are DETECTED telemetry only;
+    /// only STRONG resolutions (GET_TASK control / REMOTE_THREAD_CREATE for
+    /// an unknown external requester) are DETECTED + CONTAINED.
     pub fn note_task_notify(&mut self, kind: TaskNotifyKind) {
         match kind {
             TaskNotifyKind::GetTask | TaskNotifyKind::GetTaskRead => {
