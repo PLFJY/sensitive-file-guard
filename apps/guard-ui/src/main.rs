@@ -787,6 +787,23 @@ fn event_row(event: &guard_ipc::EventInfo) -> gtk::ListBoxRow {
     event_row_with_decision(event, decision)
 }
 
+/// MCH hardening (live evidence, this host): a routine /bin/ps poller on the
+/// machine performs task_read on task-protected processes (browser Mains,
+/// guard components) and is AUTH-denied every time (PREVENTED). Such routine
+/// READ denials are NOT meaningful security events — notifying the user on
+/// every one reproduces the daily-use "blocked events" noise (§16: notifications
+/// must focus on meaningful events; normal activity stays telemetry in the GUI
+/// event list). task CONTROL denials remain notifiable (injection vector), as do
+/// protected-file denials and confirmed compromises. Enforcement is unchanged:
+/// the AUTH deny and the audit row still happen for task_read_denied.
+#[cfg(target_os = "macos")]
+fn should_notify_macos(event: &guard_ipc::EventInfo) -> bool {
+    (event.decision.starts_with("Deny")
+        && event.event_code != "system_process_access_suppressed"
+        && event.event_code != "process_shield_task_read_denied")
+        || event.event_code == "process_shield_compromised"
+}
+
 #[cfg(target_os = "macos")]
 fn mac_notification_text(event: &guard_ipc::EventInfo) -> (String, String) {
     let executable = std::path::Path::new(&event.exe)
@@ -1740,10 +1757,7 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
                     // Denied task-attempt events surface as security
                     // notifications (no popup decision). A confirmed
                     // compromise is high priority.
-                    let notify = (event.decision.starts_with("Deny")
-                        && event.event_code != "system_process_access_suppressed")
-                        || event.event_code == "process_shield_compromised";
-                    if notify {
+                    if should_notify_macos(&event) {
                         let (title, body) = mac_notification_text(&event);
                         if let Err(error) = platform_macos::notifications::send(&title, &body) {
                             eprintln!("Guard: macOS system notification failed: {error:#}");
@@ -2732,6 +2746,62 @@ mod tests {
         let (_, body) = mac_notification_text(&event);
         assert!(!body.contains("/Users/"));
         assert!(body.contains("browser_cookie_store"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_notification_filter_suppresses_routine_task_read_denies() {
+        // MCH hardening: routine system tooling (ps-style process polls) is
+        // AUTH-denied task_read on SecretAuthority targets; that is PREVENTED
+        // telemetry, not a user-notifiable attack. task_control_denied and
+        // protected-file denials stay notifiable.
+        let base = guard_ipc::EventInfo {
+            id: 1,
+            event_code: "process_shield_task_read_denied".into(),
+            ts_ms: 1,
+            uid: 501,
+            pid: 10,
+            start_time: 1,
+            decision: "Deny(UnknownProcess)".into(),
+            deny_reason: Some("UnknownProcess".into()),
+            reason_code: Some("browser_protected_resource".into()),
+            resource_kind: "Other".into(),
+            resource_kind_code: "other".into(),
+            resource_browser: None,
+            resource_profile: None,
+            path: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome".into(),
+            exe: "/bin/ps".into(),
+            exe_owner_uid: 501,
+            trust_tier: "SystemPackage".into(),
+            process_browser: None,
+            parent_pid: None,
+            parent_exe: None,
+            lease_id: None,
+            backend_diag: "requester_exe=/bin/ps requester_uid=501 kind=task_read".into(),
+        };
+        assert!(
+            !should_notify_macos(&base),
+            "routine task_read deny must stay telemetry"
+        );
+        let mut control = base.clone();
+        control.event_code = "process_shield_task_control_denied".into();
+        assert!(
+            should_notify_macos(&control),
+            "task control deny (injection vector) must notify"
+        );
+        let mut file = base.clone();
+        file.event_code = "browser_access_denied".into();
+        assert!(
+            should_notify_macos(&file),
+            "protected-file deny must notify"
+        );
+        let mut compromised = base.clone();
+        compromised.event_code = "process_shield_compromised".into();
+        compromised.decision = "Detected".into();
+        assert!(
+            should_notify_macos(&compromised),
+            "confirmed compromise must notify"
+        );
     }
 
     #[test]

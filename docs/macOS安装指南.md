@@ -14,12 +14,11 @@ scripts/macos/build-deploy-self-use.sh
 
 ## 手工流程
 
-1. 在 SIP 仍开启时创建身份：`scripts/macos/create-self-use-signing-identity.sh`。若出现 keychain 密码提示，使用脚本生成并保存在登录 Keychain 中的专用密码，不是 macOS 登录密码；无法解锁旧 keychain 时换新路径，不要删除旧 keychain。
+1. 创建身份：`scripts/macos/create-self-use-signing-identity.sh`。身份直接放入**登录 Keychain**（`Guard Local Development Certificate`，用户域受信），无独立 Keychain、无独立密码，构建全程不需要任何密码输入。
 2. 构建并验证：
 
    ```sh
    SELF_USE_SIP_OFF=1 SELF_USE_SIGNING_IDENTITY='Guard Local Development Certificate' \
-   SELF_USE_SIGNING_KEYCHAIN="$HOME/Library/Keychains/GuardSelfUse.keychain-db" \
    CODESIGN_TIMESTAMP=none scripts/macos/build-release-app.sh
    VERIFY_SIGNING_MODE=self-use scripts/macos/verify-bundle.sh build/macos-release/Sensitive File Guard.app
    ```

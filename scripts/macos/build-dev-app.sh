@@ -44,17 +44,10 @@ if [ "$self_use" = 1 ]; then
         echo "SELF_USE_SIP_OFF cannot be combined with SKIP_SIGNING=1" >&2
         exit 2
     }
-    if [ -n "$self_use_keychain" ]; then
-        keychain_password=$(security find-generic-password -a "$self_use_keychain" \
-            -s top.plfjy.SensitiveFileGuard.self-use-keychain -w 2>/dev/null || \
-            security find-generic-password -a "$USER" \
-                -s top.plfjy.SensitiveFileGuard.self-use-keychain -w 2>/dev/null) || {
-            echo "cannot unlock SELF_USE_SIGNING_KEYCHAIN: local keychain password is unavailable" >&2
-            exit 2
-        }
-        security unlock-keychain -p "$keychain_password" "$self_use_keychain"
-        unset keychain_password
-    fi
+    # The self-use signing identity lives in the login Keychain (created by
+    # create-self-use-signing-identity.sh) and is trusted in the user domain.
+    # The login Keychain is unlocked by the system at login, so there is
+    # deliberately NO separate password and NO unlock step anywhere here.
     signing_identity=$("$script_dir/resolve-self-use-signing-identity.sh" \
         "$signing_identity" "$self_use_keychain")
     "$script_dir/self-use-safety-gate.sh"

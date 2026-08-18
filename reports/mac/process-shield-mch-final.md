@@ -304,3 +304,39 @@ failure) is a product decision, intentionally not implemented here.
 Post-deploy acceptance re-checks still required: File Shield enforcement live
 test (trusted browser own profile ALLOW; unknown process protected-file
 BLOCKED), MCH2 matrix, and the next-reboot extension re-check.
+## 20. Self-use signing chain overhaul (no standalone Keychain, no password)
+
+VERIFIED FACT (this round): the build failed with errSecInternalComponent when
+the standalone GuardSelfUse Keychain became locked, and the stored
+credential items could not unlock it (the keychain password was lost; none of
+the stored candidates matched). The old chain depended on a separate
+Keychain + stored password lookup (security find-generic-password +
+unlock-keychain) - a fragile, unnecessary mechanism.
+
+FIX (committed): the entire chain was removed and replaced by the login
+Keychain:
+- Deleted: GuardSelfUse.keychain-db, GuardSelfUse-v2.keychain-db, stale
+  password items, the old login-keychain Guard certificate, and
+  scripts/macos/self-use-keychain.password.
+- create-self-use-signing-identity.sh now generates the identity directly
+  into ~/Library/Keychains/login.keychain-db (import with -A ACL, then
+  user-domain trust via security add-trusted-cert -d). No password exists
+  anywhere; the login Keychain is unlocked by the system at login.
+- build-dev-app.sh / build-release-app.sh contain NO password or keychain-
+  unlock operations at all; the identity is resolved by name through the
+  default search list. resolve-self-use-signing-identity.sh dedupes
+  find-identity sections by hash.
+- docs/macos-self-use-keychain.md + the Chinese build docs were updated; the
+  old GuardSelfUse password guidance is gone.
+- New identity leaf hash: 7C10AC671A4D1DE712F6F533CB91AF4F8C05148B. XPC
+  SigningRequirements are runtime-derived (SigningRequirements::current_
+  process), so no code change was needed - verified by test-xpc-auth.sh
+  (XPC transport test identity: local certificate 7C10AC..., PASS).
+- Rebuilt bundle build/macos/Sensitive File Guard.app: 0.1.1, signed with
+  the login identity, codesign --verify --deep --strict VERIFY_OK.
+
+Deploy note: the new app (and its bundled extension) are signed with the NEW
+certificate, so the app's guardctl/GUI cannot XPC-connect to the OLD running
+extension (0.1.0, old certificate) until the new extension is activated and
+approved in System Settings. Sequence: install bundle -> activate new
+extension (approve) -> then guardctl status works.

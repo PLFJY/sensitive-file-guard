@@ -24,17 +24,8 @@ fi
 if [ "$self_use" = 1 ]; then
     identity=${SELF_USE_SIGNING_IDENTITY:?SELF_USE_SIGNING_IDENTITY is required for SELF_USE_SIP_OFF=1}
     signing_keychain=${SELF_USE_SIGNING_KEYCHAIN:-}
-    if [ -n "$signing_keychain" ]; then
-        keychain_password=$(security find-generic-password -a "$signing_keychain" \
-            -s top.plfjy.SensitiveFileGuard.self-use-keychain -w 2>/dev/null || \
-            security find-generic-password -a "$USER" \
-                -s top.plfjy.SensitiveFileGuard.self-use-keychain -w 2>/dev/null) || {
-            echo "cannot unlock SELF_USE_SIGNING_KEYCHAIN: local keychain password is unavailable" >&2
-            exit 2
-        }
-        security unlock-keychain -p "$keychain_password" "$signing_keychain"
-        unset keychain_password
-    fi
+    # The self-use signing identity lives in the login Keychain (see
+    # build-dev-app.sh): system-unlocked at login, no separate password.
     identity=$("$script_dir/resolve-self-use-signing-identity.sh" \
         "$identity" "$signing_keychain")
     signing_mode=self-use

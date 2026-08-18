@@ -13,7 +13,7 @@ build_root=${MACOS_RELEASE_ROOT:-"$repo_dir/build/macos-release"}
 app="$build_root/Sensitive File Guard.app"
 destination=${MACOS_INSTALL_DESTINATION:-/Applications/Sensitive File Guard.app}
 identity=${SELF_USE_SIGNING_IDENTITY:-Guard Local Development Certificate}
-keychain=${SELF_USE_SIGNING_KEYCHAIN:-"$HOME/Library/Keychains/GuardSelfUse.keychain-db"}
+keychain=${SELF_USE_SIGNING_KEYCHAIN:-"$HOME/Library/Keychains/login.keychain-db"}
 build_number=${GUARD_BUILD_NUMBER:-$(date +%s)}
 
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
