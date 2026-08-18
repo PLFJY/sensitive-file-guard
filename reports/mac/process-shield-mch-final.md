@@ -344,3 +344,26 @@ certificate, so the app's guardctl/GUI cannot XPC-connect to the OLD running
 extension (0.1.0, old certificate) until the new extension is activated and
 approved in System Settings. Sequence: install bundle -> activate new
 extension (approve) -> then guardctl status works.
+## 21. Protection-page auto-refresh (GUI, user-reported)
+
+VERIFIED FACT (user report + code): the protection policy page appeared
+unopenable (the master File Shield switch stayed disabled when the editable
+draft never loaded) and required switching pages or clicking the floating
+Refresh status button to see current policy content.
+
+ROOT CAUSE: the editable draft was hydrated from the daemon exactly once on
+first load; every later 2-second poll intentionally skipped re-hydration (to
+never discard in-progress edits), so external policy changes never reached
+the protection page and a transient first-load failure left the page empty
+with the master switch disabled until a manual refresh.
+
+FIX (committed 2ed6ac7): on every poll, when a draft exists and the user has
+NO unapplied edits (Apply not sensitive), resync the draft from the daemon's
+authoritative configuration; a JSON-equality gate skips redundant re-renders.
+The page now follows guardctl / other-window / re-apply changes automatically
+and self-heals within one poll cycle; active edits are preserved untouched.
+Unit test configuration_snapshot_changed_detects_policy_drift_only; 295
+tests pass, clippy clean.
+
+Deployment note: this GUI fix is in the repo; re-run
+scripts/macos/build-deploy-self-use.sh to install a bundle that includes it
