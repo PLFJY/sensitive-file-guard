@@ -240,11 +240,18 @@ fn decide_ssh(event: &AccessEvent, leases: &LeaseSet, now: u64) -> Decision {
         }
     }
     for lease in &leases.ssh_read {
+        // P0 review round 4: the SSH-read lease is exact-reader-ONLY. The
+        // reader was dynamically shielded at approval time; granting an
+        // arbitrary (potentially unprotected) descendant AllowByLease would
+        // hand secret bytes to a process that was never task-protected. Only
+        // the exact approved reader root may use the lease. (Migration
+        // leases keep tree matching pending the MCH2 authority matrix that
+        // decides exact-root-only vs race-free observed descendants.)
         if lease.resource == event.resource.id
             && lease.uid == proc.uid
             && !lease.revoked
             && now < lease.expires_at
-            && process_is_in_tree(proc, &lease.root)
+            && proc.stable == lease.root
         {
             return Decision::AllowByLease(lease.id);
         }

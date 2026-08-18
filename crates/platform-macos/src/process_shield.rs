@@ -35,6 +35,12 @@ pub enum ShieldReasonKind {
     GuardComponent,
     /// Exact process-tree root of a live migration/SSH-read lease (MPS6).
     DynamicLeaseRoot,
+    /// Synthetic acceptance target (guard-test-probe shield-target in the
+    /// disposable synthetic Process Shield harness). NOT a browser: it must
+    /// get a real task-protected shield entry at exec time, independent of
+    /// the Browser/role model, so the synthetic adversarial harness actually
+    /// tests Guard enforcement (review round 4).
+    SyntheticTarget,
 }
 
 impl ShieldReasonKind {
@@ -43,6 +49,7 @@ impl ShieldReasonKind {
             Self::Browser => "browser",
             Self::GuardComponent => "guard_component",
             Self::DynamicLeaseRoot => "dynamic_lease_root",
+            Self::SyntheticTarget => "synthetic_target",
         }
     }
 }

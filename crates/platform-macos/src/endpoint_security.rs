@@ -434,8 +434,15 @@ impl EndpointSecurityConfig {
             ProtectionScope::Synthetic {
                 shield_executables, ..
             } => {
+                // P0 review round 4: a synthetic shield target is NOT a
+                // browser. Returning Browser here would route it through
+                // admit_browser(role=None), which creates NO shield entry and
+                // NO task protection, silently hollowing out the synthetic
+                // adversarial harness. Use a dedicated SyntheticTarget reason
+                // so the exec path admits it into the shield (task-protected
+                // regardless of the Browser/role model).
                 if shield_executables.contains(&target.executable.path) {
-                    return Some(ShieldReasonKind::Browser);
+                    return Some(ShieldReasonKind::SyntheticTarget);
                 }
                 None
             }
@@ -3270,9 +3277,51 @@ mod tests {
         unrelated.executable.path = other_exe;
         assert_eq!(
             config.shield_eligible(&eligible, 501),
-            Some(ShieldReasonKind::Browser)
+            Some(ShieldReasonKind::SyntheticTarget)
         );
         assert_eq!(config.shield_eligible(&unrelated, 501), None);
+    }
+
+    #[test]
+    fn synthetic_target_admits_real_shield_entry_and_task_protection() {
+        // P0 review round 4: a synthetic shield target must get a genuine
+        // task-protected shield entry at AUTH_EXEC. Routing it through the
+        // Browser/role model (role=None) used to create NO entry and NO task
+        // protection, silently hollowing out the synthetic adversarial
+        // harness.
+        use crate::process_shield::MacProcessShield;
+
+        let temp = tempfile::tempdir().unwrap();
+        let protected = temp.path().join("protected");
+        std::fs::write(&protected, b"synthetic protected").unwrap();
+        let target_exe = temp.path().join("shield-target");
+        std::fs::write(&target_exe, b"synthetic shield target").unwrap();
+        let target_exe = std::fs::canonicalize(&target_exe).unwrap();
+        let config =
+            EndpointSecurityConfig::synthetic_with_shield([protected], [target_exe.clone()])
+                .unwrap();
+        let mut facts = fixture_process("fixture.browser");
+        facts.executable.path = target_exe;
+        let mut shield = MacProcessShield::new();
+        let reason = config
+            .shield_eligible(&facts, 501)
+            .expect("synthetic target must be shield-eligible");
+        assert_eq!(reason, ShieldReasonKind::SyntheticTarget);
+        // The exec path admits it into the shield (admit(), not admit_browser).
+        shield.admit(facts.clone(), reason).unwrap();
+        assert!(
+            shield.is_task_protected(&facts),
+            "synthetic target must be genuinely task-protected"
+        );
+        // Task capability requests against it are evaluated (deny for an
+        // unknown requester), which is what the harness asserts via the
+        // probe + Guard task-deny evidence channel.
+        let requester = fixture_process("fixture.attacker");
+        assert!(!crate::process_shield::task_access_allowlist(
+            &requester,
+            &facts,
+            crate::process_shield::TaskAccessKind::Read,
+        ));
     }
 
     #[test]

@@ -493,4 +493,34 @@ Tests: 299 passed / 0 failed, clippy clean, fmt applied.
   process_shield_session_admitted. No more 'exec_admitted' implying a shield
   entry that does not exist.
 
-Tests: 299 passed / 0 failed, clippy clean, fmt applied.
+### Review round 4 rework (synthetic harness + lease fail-closed + lease continuity, committed)
+
+- P0 [synthetic harness restored]: synthetic shield targets now use a
+  dedicated ShieldReasonKind::SyntheticTarget instead of borrowing the
+  Browser/role model, so admit_browser(role=None) no longer silently skips
+  their shield entry: the synthetic adversarial harness actually exercises
+  Guard task protection again. The PoC extension appends every TaskDenied
+  (exact pid + kind) to GUARD_ES_POC_TASK_DENY_FILE, and the harness now
+  asserts BOTH the kernel probe refusal AND the Guard-side deny record
+  before reporting PREVENTED. New unit test
+  synthetic_target_admits_real_shield_entry_and_task_protection.
+- P0/P1 [lease-root shielding fail-closed]: shield_dynamic_lease_root() now
+  returns anyhow::Result and every approval path (migration approve/grace/
+  coalesce, SSH read) revokes the freshly created lease and DENIES the
+  AUTH_OPEN when the exact root cannot be made task-protected (previously
+  the admission error was silently dropped).
+- P0 [non-browser lease descendants]: SshReadAccessLease is now
+  EXACT-READER-ONLY (proc.stable == lease.root): a descendant can never
+  receive secret bytes while never having been task-protected; it must go
+  through its own confirmation. Migration leases keep tree matching pending
+  the MCH2 authority matrix decision (exact-root-only vs race-free observed
+  descendants).
+- P1 [lease continuity across OFF->ON]: on the Process Shield disabled ->
+  enabled transition, apply_config now revokes every live migration and
+  SSH-read lease (with the epoch advance) before publishing enabled.
+- P2 [audit truthfulness]: GuardComponent admissions are reported as
+  process_shield_guard_component_admitted and synthetic targets as
+  process_shield_synthetic_target_admitted - never as browser session
+  admissions.
+
+Tests: 300 passed / 0 failed, clippy clean, fmt applied.

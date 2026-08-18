@@ -79,12 +79,35 @@ fn run_poc() -> ExitCode {
     // written to this file, the exact live instance is transitioned via the
     // same strong-signal path used by real notify-only compromise events.
     let compromise_file = option_env!("GUARD_ES_POC_COMPROMISE_FILE").map(PathBuf::from);
+    // P0 review round 4: test-only evidence channel. Every Process Shield
+    // task denial observed by the synthetic extension is appended to this
+    // file (exact target pid + kind) so the acceptance harness can assert
+    // that GUARD denied the probe - not just that the kernel refused the
+    // task port for its own reasons. Metadata only.
+    let task_deny_file = option_env!("GUARD_ES_POC_TASK_DENY_FILE").map(PathBuf::from);
     eprintln!("guard-es: development AUTH_OPEN+Process Shield PoC active for one synthetic fixture; cache=false");
     loop {
         // Drain metadata-only Process Shield audit handoffs.
         match backend.recv_shield_timeout(Duration::from_millis(50)) {
             Ok(event) => {
                 eprintln!("guard-es: shield event: {event:?}");
+                if let Some(file) = &task_deny_file {
+                    if let platform_macos::endpoint_security::ShieldAuditEvent::TaskDenied {
+                        kind,
+                        target,
+                        ..
+                    } = &event
+                    {
+                        let _ = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(file)
+                            .and_then(|mut handle| {
+                                use std::io::Write;
+                                writeln!(handle, "pid={} kind={}", target.key.pid, kind.label())
+                            });
+                    }
+                }
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {

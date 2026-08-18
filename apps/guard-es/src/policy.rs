@@ -165,6 +165,11 @@ impl MacPolicy {
             .process_shield_enabled
             .load(std::sync::atomic::Ordering::Acquire);
         if shield_was_disabled && config.process_shield_enabled {
+            // P0/P1 review round 4: leases are protection-continuity state
+            // too. After a disabled interval, every live migration / SSH-read
+            // lease root may have been controlled; revoke them all (with the
+            // epoch advance) before publishing enabled.
+            self.revoke_live_leases();
             self.resolver.advance_shield_epoch();
         }
         self.process_shield_enabled.store(
@@ -725,28 +730,47 @@ impl MacPolicy {
     /// MPS6: dynamically shield the exact lease root for the lease lifetime.
     /// The root becomes a Process Shield target so a same-user attacker cannot
     /// take over the approved reader via a task port.
-    fn shield_dynamic_lease_root(&self, root: &ProcessStableId) {
+    /// MPS6: dynamically shield the exact lease root for the lease lifetime.
+    /// The root becomes a Process Shield target so a same-user attacker cannot
+    /// take over the approved reader via a task port.
+    ///
+    /// P0 review round 4: this is no longer fail-open. When Process Shield is
+    /// enabled, an admission failure (unresolvable identity, stale epoch from
+    /// a disabled interval, invalid stable identity) is returned to the
+    /// caller, which must revoke the freshly created lease and DENY the
+    /// AUTH_OPEN - never approve a lease whose root could not be made
+    /// task-protected.
+    fn shield_dynamic_lease_root(&self, root: &ProcessStableId) -> anyhow::Result<()> {
         // MCH0: with Process Shield disabled, no dynamic lease-root shielding
-        // happens (the shield would not enforce task access anyway).
+        // happens (the shield would not enforce task access anyway); the
+        // caller's approval proceeds under File-Shield-only semantics.
         if !self.resolver.shield_enabled() {
-            return;
+            return Ok(());
         }
-        let Some(shield) = self.resolver.shield() else {
-            return;
-        };
-        let Some(facts) = self.resolver.current_facts(root.pid) else {
-            return;
-        };
+        let shield = self
+            .resolver
+            .shield()
+            .ok_or_else(|| anyhow::anyhow!("Process Shield state is unavailable"))?;
+        let facts = self
+            .resolver
+            .current_facts(root.pid)
+            .ok_or_else(|| anyhow::anyhow!("lease root is no longer live (pid {})", root.pid))?;
         if facts.stable_id() != *root {
-            return;
+            anyhow::bail!("lease root stable identity changed (pid {})", root.pid);
         }
-        let _ = shield
+        let admitted = shield
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .admit(
                 facts,
                 platform_macos::process_shield::ShieldReasonKind::DynamicLeaseRoot,
             );
+        admitted.map_err(|error| {
+            anyhow::anyhow!(
+                "lease root could not be admitted to Process Shield (pid {}): {error}",
+                root.pid
+            )
+        })
     }
 
     /// Remove the dynamic lease-root shield reason. Other reasons (browser,
@@ -847,8 +871,18 @@ impl MacPolicy {
                         platform_macos::browser_session::SessionMembership::NewRoot(_)
                             | platform_macos::browser_session::SessionMembership::Joined(_)
                     );
+                // P2 review round 4: a GuardComponent admission genuinely
+                // creates a task-protected shield entry, but it is NOT a
+                // browser session admission; report it distinctly.
                 let event_code = if is_authority_admission {
                     "process_shield_authority_admitted"
+                } else if reason == platform_macos::process_shield::ShieldReasonKind::GuardComponent
+                {
+                    "process_shield_guard_component_admitted"
+                } else if reason
+                    == platform_macos::process_shield::ShieldReasonKind::SyntheticTarget
+                {
+                    "process_shield_synthetic_target_admitted"
                 } else {
                     "process_shield_session_admitted"
                 };
@@ -1083,8 +1117,13 @@ impl MacPolicy {
             (lease_id, siblings)
         };
         // MPS6: the bound lease root is dynamically shielded for the lease
-        // lifetime.
-        self.shield_dynamic_lease_root(&details.target_root);
+        // lifetime. P0 review round 4: fail closed - if the root cannot be
+        // made task-protected, revoke the freshly created lease and DENY.
+        if let Err(error) = self.shield_dynamic_lease_root(&details.target_root) {
+            self.revoke_lease(lease_id);
+            let _ = request.try_resolve(false);
+            anyhow::bail!("lease root could not be shielded; migration denied: {error}");
+        }
         if let Err(error) = request.try_resolve(true) {
             self.revoke_lease(lease_id);
             anyhow::bail!("retained AUTH_OPEN was no longer resolvable: {error}");
@@ -1221,8 +1260,23 @@ impl MacPolicy {
                 Ok((lease_id, _)) => {
                     drop(inner);
                     // MPS6: the SSH-read lease root is dynamically shielded
-                    // for the capability lifetime.
-                    self.shield_dynamic_lease_root(&details.target_root);
+                    // for the capability lifetime. P0 review round 4: fail
+                    // closed - if the root cannot be made task-protected,
+                    // revoke the lease and DENY.
+                    if let Err(error) = self.shield_dynamic_lease_root(&details.target_root) {
+                        self.revoke_ssh_lease(lease_id);
+                        request.resolve(false);
+                        self.note_ssh_denied();
+                        self.record(
+                            "ssh_key_access_blocked",
+                            &details.resource,
+                            Some(&details.target),
+                            Decision::Deny(DenyReason::IdentityMismatch),
+                            format!("lease root could not be shielded; SSH read denied: {error}"),
+                            now,
+                        );
+                        anyhow::bail!("lease root could not be shielded: {error}")
+                    }
                     lease_id
                 }
                 Err(error) => {
@@ -1514,7 +1568,21 @@ impl MacPolicy {
         match approved {
             Ok((lease_id, _)) => {
                 // MPS6: dynamically shield the grace-approved root too.
-                self.shield_dynamic_lease_root(&details.target_root);
+                // P0 review round 4: fail closed when the root cannot be
+                // made task-protected.
+                if let Err(error) = self.shield_dynamic_lease_root(&details.target_root) {
+                    self.revoke_lease(lease_id);
+                    let _ = permission.deny();
+                    self.record(
+                        "browser_access_denied",
+                        &details.resource,
+                        None,
+                        Decision::Deny(DenyReason::UnknownProcess),
+                        format!("grace-approved lease root could not be shielded: {error}"),
+                        now,
+                    );
+                    return;
+                }
                 if permission.allow().is_ok() {
                     let mut inner = self
                         .inner
@@ -1565,7 +1633,21 @@ impl MacPolicy {
         match approved {
             Ok((lease_id, _)) => {
                 // MPS6: dynamically shield the coalesced root too.
-                self.shield_dynamic_lease_root(&details.target_root);
+                // P0 review round 4: fail closed when the root cannot be
+                // made task-protected.
+                if let Err(error) = self.shield_dynamic_lease_root(&details.target_root) {
+                    self.revoke_lease(lease_id);
+                    let _ = request.try_resolve(false);
+                    self.record(
+                        "browser_access_denied",
+                        &details.resource,
+                        None,
+                        Decision::Deny(DenyReason::UnknownProcess),
+                        format!("coalesced lease root could not be shielded: {error}"),
+                        now,
+                    );
+                    return;
+                }
                 if request.try_resolve(true).is_ok() {
                     let mut inner = self
                         .inner
@@ -1586,6 +1668,24 @@ impl MacPolicy {
                 }
             }
             Err(_) => request.resolve(false),
+        }
+    }
+
+    /// P0/P1 review round 4: revoke every live migration and SSH-read lease.
+    /// Called on the Process Shield disabled -> enabled transition: a lease
+    /// root that was unprotected during the disabled interval must not keep
+    /// granting AllowByLease afterwards.
+    fn revoke_live_leases(&self) {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for lease in &mut inner.runtime.leases_mut().migration {
+            lease.revoked = true;
+            lease.state = MigrationLeaseState::Dead;
+        }
+        for lease in &mut inner.runtime.leases_mut().ssh_read {
+            lease.revoked = true;
         }
     }
 
@@ -2426,6 +2526,10 @@ mod tests {
             .resolve_ssh_read_at(&pending[0].id, fixture.uid, true, now + 1)
             .is_err());
 
+        // P0 review round 4: the SSH-read lease is EXACT-READER-ONLY. A
+        // descendant (even of the approved reader) is not covered by the
+        // lease and must go through its own confirmation - it must NOT
+        // receive secret bytes while never having been task-protected.
         let descendant = fixture.facts("reader", 81, Some(reader.key));
         fixture.observe(descendant.clone());
         let (event, descendant_state) = fixture.event(
@@ -2437,10 +2541,12 @@ mod tests {
         fixture.policy.handle_at(event, now + 2);
         assert_eq!(
             *descendant_state.lock().unwrap(),
-            Terminal::Flags(ES_FFLAG_READ)
+            Terminal::Pending,
+            "lease descendant must require its own confirmation (exact-reader-only)"
         );
 
         let unrelated = fixture.facts("reader", 82, None);
+        let unrelated_pid = unrelated.key.pid;
         fixture.observe(unrelated.clone());
         let (event, unrelated_state) = fixture.event(
             unrelated,
@@ -2451,12 +2557,27 @@ mod tests {
         fixture.policy.handle_at(event, now + 2);
         assert_eq!(*unrelated_state.lock().unwrap(), Terminal::Pending);
         let unrelated_pending = fixture.policy.ssh_pending_for_uid(fixture.uid);
-        assert_eq!(unrelated_pending.len(), 1);
+        assert_eq!(unrelated_pending.len(), 2);
+        // Locate the unrelated reader's confirmation by its exact target root
+        // (the descendant's entry has a different root).
+        let unrelated_entry = unrelated_pending
+            .iter()
+            .find(|pending| pending.pid == unrelated_pid)
+            .expect("unrelated reader pending entry");
         fixture
             .policy
-            .resolve_ssh_read_at(&unrelated_pending[0].id, fixture.uid, false, now + 3)
+            .resolve_ssh_read_at(&unrelated_entry.id, fixture.uid, false, now + 3)
             .unwrap();
         assert_eq!(*unrelated_state.lock().unwrap(), Terminal::Flags(0));
+        // The descendant's own confirmation is also denied (exact-reader-only).
+        let descendant_entry = unrelated_pending
+            .iter()
+            .find(|pending| pending.pid == 81)
+            .expect("descendant pending entry");
+        fixture
+            .policy
+            .resolve_ssh_read_at(&descendant_entry.id, fixture.uid, false, now + 3)
+            .unwrap();
 
         let mut cross_uid = fixture.facts("reader", 83, None);
         cross_uid.uid = fixture.uid.saturating_add(1);

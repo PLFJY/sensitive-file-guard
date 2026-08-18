@@ -29,6 +29,9 @@ app="$app_root/Sensitive File Guard.app"
 poc_app_bundle_id=${APP_BUNDLE_ID:-top.plfjy.SensitiveFileGuard}
 extension_bundle_id=${SYSTEM_EXTENSION_BUNDLE_ID:-"$poc_app_bundle_id.guard-es"}
 canary="SDF_CANARY_MPS9_$$_$(date +%s)"
+# P0 review round 4: Guard-side task-deny evidence channel (the PoC extension
+# appends every Process Shield TaskDenied here: exact target pid + kind).
+task_deny_file="$fixture_dir/task-denied.txt"
 watchdog_pid=
 installed_by_script=0
 
@@ -77,6 +80,7 @@ GUARD_ES_POC=1 \
 GUARD_ES_POC_FILE="$protected" \
 GUARD_ES_POC_ALLOW_EXE="$probe" \
 GUARD_ES_POC_COMPROMISE_FILE="$compromise_file" \
+GUARD_ES_POC_TASK_DENY_FILE="$task_deny_file" \
 SELF_USE_SIP_OFF=1 SELF_USE_SIGNING_IDENTITY="$SELF_USE_SIGNING_IDENTITY" \
 APP_BUNDLE_ID="$poc_app_bundle_id" \
 SYSTEM_EXTENSION_BUNDLE_ID="$extension_bundle_id" \
@@ -159,6 +163,9 @@ check "clean synthetic target admitted and baseline protected read allowed" \
 
 # 2. Untrusted same-user task control probe -> denied.
 # The probe exits 4 exactly when the kernel refused the task port.
+# P0 review round 4: PREVENTED requires BOTH the kernel refusal AND a
+# Guard-side TaskDenied record for the exact target (the synthetic target is
+# now genuinely task-protected via ShieldReasonKind::SyntheticTarget).
 set +e
 "$probe" probe-task "$target_pid" control
 control_exit=$?
@@ -178,6 +185,22 @@ if [ "$read_exit" -eq 4 ]; then
     pass=$((pass + 1)); echo "PASS: task read acquisition denied (exit 4)"
 else
     fail=$((fail + 1)); echo "FAIL: task read acquisition not denied (exit $read_exit)"
+fi
+
+# 3b. Guard-side evidence: the PoC extension recorded TaskDenied rows for the
+# exact target (control AND read). Without this, the kernel refusal alone
+# would not prove Guard enforced anything.
+sleep 1
+if grep -q "pid=$target_pid kind=task_control" "$task_deny_file" 2>/dev/null; then
+    pass=$((pass + 1)); echo "PASS: Guard recorded task_control deny for the synthetic target"
+else
+    fail=$((fail + 1)); echo "FAIL: no Guard task_control deny recorded for pid=$target_pid"
+    cat "$task_deny_file" >&2 2>/dev/null || true
+fi
+if grep -q "pid=$target_pid kind=task_read" "$task_deny_file" 2>/dev/null; then
+    pass=$((pass + 1)); echo "PASS: Guard recorded task_read deny for the synthetic target"
+else
+    fail=$((fail + 1)); echo "FAIL: no Guard task_read deny recorded for pid=$target_pid"
 fi
 
 # 4+5. No usable capability; canary not recovered.
