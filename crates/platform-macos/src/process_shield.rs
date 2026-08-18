@@ -538,6 +538,16 @@ impl MacProcessShield {
                         "same audit key changed stable identity".into(),
                     ));
                 }
+                // P1 review round 5: an entry admitted in an older shield
+                // epoch (Process Shield disabled and re-enabled) cannot gain
+                // ANY security-sensitive shield reason - a stale process may
+                // have been controlled during the disabled interval, and a
+                // fresh reason must not make it look task-protected when
+                // is_task_protected() stays false (stale epoch). The exact
+                // process must restart and be re-admitted.
+                if entry.epoch != self.epoch {
+                    return Err(ShieldError::ProtectionContinuityLost);
+                }
                 entry.facts = facts.clone();
                 *entry.reasons.entry(reason).or_insert(0) += 1;
                 Ok(())
@@ -588,6 +598,12 @@ impl MacProcessShield {
                     return Err(ShieldError::InvalidIdentity(
                         "same audit key changed stable identity".into(),
                     ));
+                }
+                // P1 review round 5: same stale-epoch rule as admit() - a
+                // process from an older shield epoch cannot regain a
+                // security-sensitive reason without a restart.
+                if entry.epoch != self.epoch {
+                    return Err(ShieldError::ProtectionContinuityLost);
                 }
                 entry.facts = facts.clone();
                 *entry.reasons.entry(reason).or_insert(0) += 1;
@@ -1583,6 +1599,44 @@ mod tests {
             .unwrap();
         assert!(shield.is_task_protected(&restarted));
         assert_eq!(shield.live_preexisting_count(), 0);
+    }
+
+    #[test]
+    fn stale_dynamic_lease_root_readmission_fails_closed() {
+        // P1 review round 5: a DynamicLeaseRoot entry from an older shield
+        // epoch (Process Shield disabled and re-enabled) must NOT be
+        // re-admissible: admit() Ok() on a stale entry would claim shielding
+        // while is_task_protected() stays false. The exact process must
+        // restart.
+        use crate::process_shield::{ShieldError, ShieldReasonKind};
+
+        let mut shield = MacProcessShield::new();
+        let root = facts(20, 1, 200);
+        shield
+            .admit(root.clone(), ShieldReasonKind::DynamicLeaseRoot)
+            .unwrap();
+        assert!(shield.is_task_protected(&root));
+
+        // Disable -> enable: epoch advances, entry becomes stale.
+        shield.advance_epoch();
+        assert!(!shield.is_task_protected(&root));
+        let readmission = shield.admit(root.clone(), ShieldReasonKind::DynamicLeaseRoot);
+        assert!(
+            matches!(readmission, Err(ShieldError::ProtectionContinuityLost)),
+            "stale-epoch re-admission must fail closed"
+        );
+        assert!(
+            !shield.is_task_protected(&root),
+            "failed re-admission must not grant task protection"
+        );
+
+        // Restart: a fresh exact instance is admitted in the current epoch.
+        shield.remove_terminal(root.key);
+        let restarted = facts(20, 2, 300);
+        shield
+            .admit(restarted.clone(), ShieldReasonKind::DynamicLeaseRoot)
+            .unwrap();
+        assert!(shield.is_task_protected(&restarted));
     }
 
     #[test]

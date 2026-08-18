@@ -85,6 +85,11 @@ fn run_poc() -> ExitCode {
     // that GUARD denied the probe - not just that the kernel refused the
     // task port for its own reasons. Metadata only.
     let task_deny_file = option_env!("GUARD_ES_POC_TASK_DENY_FILE").map(PathBuf::from);
+    // P1 review round 5: test-only evidence channel for launch-injection
+    // denials (exact target pid), so the harness can attribute a killed
+    // DYLD-poisoned launch to GUARD's ExecDeniedLaunchInjection rather than
+    // just observing the process did not start.
+    let launch_deny_file = option_env!("GUARD_ES_POC_LAUNCH_DENY_FILE").map(PathBuf::from);
     eprintln!("guard-es: development AUTH_OPEN+Process Shield PoC active for one synthetic fixture; cache=false");
     loop {
         // Drain metadata-only Process Shield audit handoffs.
@@ -105,6 +110,22 @@ fn run_poc() -> ExitCode {
                             .and_then(|mut handle| {
                                 use std::io::Write;
                                 writeln!(handle, "pid={} kind={}", target.key.pid, kind.label())
+                            });
+                    }
+                }
+                if let Some(file) = &launch_deny_file {
+                    if let platform_macos::endpoint_security::ShieldAuditEvent::ExecDeniedLaunchInjection {
+                        target,
+                        ..
+                    } = &event
+                    {
+                        let _ = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(file)
+                            .and_then(|mut handle| {
+                                use std::io::Write;
+                                writeln!(handle, "pid={}", target.key.pid)
                             });
                     }
                 }

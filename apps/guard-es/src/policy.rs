@@ -758,19 +758,30 @@ impl MacPolicy {
         if facts.stable_id() != *root {
             anyhow::bail!("lease root stable identity changed (pid {})", root.pid);
         }
-        let admitted = shield
+        let mut shield = shield
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        shield
             .admit(
-                facts,
+                facts.clone(),
                 platform_macos::process_shield::ShieldReasonKind::DynamicLeaseRoot,
-            );
-        admitted.map_err(|error| {
-            anyhow::anyhow!(
-                "lease root could not be admitted to Process Shield (pid {}): {error}",
-                root.pid
             )
-        })
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "lease root could not be admitted to Process Shield (pid {}): {error}",
+                    root.pid
+                )
+            })?;
+        // P1 review round 5: postcondition - admission must have actually
+        // established task protection (an Ok() on a stale-epoch entry would
+        // otherwise claim shielding while is_task_protected() stays false).
+        if !shield.is_task_protected(&facts) {
+            anyhow::bail!(
+                "lease root admission did not establish task protection (pid {})",
+                root.pid
+            );
+        }
+        Ok(())
     }
 
     /// Remove the dynamic lease-root shield reason. Other reasons (browser,

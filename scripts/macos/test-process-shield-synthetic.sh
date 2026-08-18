@@ -32,6 +32,8 @@ canary="SDF_CANARY_MPS9_$$_$(date +%s)"
 # P0 review round 4: Guard-side task-deny evidence channel (the PoC extension
 # appends every Process Shield TaskDenied here: exact target pid + kind).
 task_deny_file="$fixture_dir/task-denied.txt"
+# P1 review round 5: Guard-side launch-injection deny evidence.
+launch_deny_file="$fixture_dir/launch-denied.txt"
 watchdog_pid=
 installed_by_script=0
 
@@ -81,6 +83,7 @@ GUARD_ES_POC_FILE="$protected" \
 GUARD_ES_POC_ALLOW_EXE="$probe" \
 GUARD_ES_POC_COMPROMISE_FILE="$compromise_file" \
 GUARD_ES_POC_TASK_DENY_FILE="$task_deny_file" \
+GUARD_ES_POC_LAUNCH_DENY_FILE="$launch_deny_file" \
 SELF_USE_SIP_OFF=1 SELF_USE_SIGNING_IDENTITY="$SELF_USE_SIGNING_IDENTITY" \
 APP_BUNDLE_ID="$poc_app_bundle_id" \
 SYSTEM_EXTENSION_BUNDLE_ID="$extension_bundle_id" \
@@ -207,12 +210,20 @@ fi
 check "no readable pages (canary not recovered)" "$probe" probe-memory "$target_pid"
 
 # 6. Poisoned DYLD_INSERT_LIBRARIES launch -> denied (no READY file).
+# P1 review round 5: also require Guard-side ExecDeniedLaunchInjection evidence
+# so the deny is attributed to GUARD, not merely 'the process did not start'.
 ready2="$fixture_dir/ready2"
 if DYLD_INSERT_LIBRARIES="$fixture_dir/lib-poc-inject.dylib" \
     "$probe" shield-target "$ready2" 5 >/dev/null 2>&1; then
     check "DYLD_INSERT_LIBRARIES launch denied" sh -c "test ! -e \"$ready2\""
 else
     check "DYLD_INSERT_LIBRARIES launch denied" sh -c "test ! -e \"$ready2\""
+fi
+sleep 1
+if [ -s "$launch_deny_file" ]; then
+    pass=$((pass + 1)); echo "PASS: Guard recorded ExecDeniedLaunchInjection for the DYLD-poisoned launch"
+else
+    fail=$((fail + 1)); echo "FAIL: no Guard launch-injection deny record"
 fi
 
 # 7. Harmless diagnostic DYLD var remains compatible.
