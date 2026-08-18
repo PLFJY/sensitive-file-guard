@@ -6,10 +6,19 @@ REDUCED / NOT ACCEPTED (formal). All code-able redesign phases are implemented,
 unit-tested, and the core daily-use + adversarial gates are LIVE-verified on the
 deployed build on this host. The final acceptance sentence cannot be written
 until the remaining HUMAN steps complete (one GUI enrollment approval; one
-manual extension install; reboot-pending stale extension versions).
+reboot-pending stale extension version check).
+
+POST-REBOOT RECOVERY VERIFIED (this host): the user re-applied the policy via
+the MCH app after a reboot; standard-path app = MCH build; active extension
+0.1.0/1; config restored 3 browsers / 27 files / 2 ssh; MCH era audit shows 0
+task DENY / 0 false Compromised. The 36 recorded sysmond DENYs are ALL
+pre-MCH-era (audit id < 709299, old-build window). MCH8 extension gate closed
+LIVE in the user's real Chrome (extension loaded, 5 extension renderers, all
+session_membership=joined, 0 DENY / 0 false Compromised).
 
 Commits: d5d0fe6 (redesign) · 984b2ff (MCH9-10 live evidence) · a864e72 (MCH8 +
-lifecycle).
+lifecycle) · 6e12b96 + d8d3d1d (final report) · 2b2b7f3 + inventory
+(diagnostic validate-local).
 
 ## 1. Verified root causes of the daily-use regression
 
@@ -110,9 +119,13 @@ enrollment). Active is never claimed.
 ## 14. Remaining blockers / unverified assumptions
 
 - GUI enrollment approval for a disposable protected profile (MCH2 matrix +
-  protected-profile ALLOW gate) — human step.
-- Manual extension install for the MCH8 live run — human step.
-- Reboot-pending stale extension versions — human step.
+  protected-profile ALLOW gate) — human step (BLOCKED, pending user action).
+- MCH8 extension gate — CLOSED (user installed the harmless MV3 fixture in
+  their real Chrome; live run: extension loaded, 5 `--extension-process`
+  renderers all session_membership=joined, 0 task DENY / 0 false Compromised).
+- Reboot-pending stale extension versions — resolved on this host (MCH build
+  re-activated after reboot, 0 deactivations in 60m; a FUTURE reboot re-check
+  remains on the acceptance path).
 - Live laundering probe (helper too short-lived) — harness limitation.
 - Warm-start session fallback heuristic on real browsers — assumption until a
   long-lived observation.
@@ -149,3 +162,51 @@ its SecretAuthority. This is the designed trade-off of the containment model
 (an unallowlisted same-user process that obtained a task send right on a
 protected browser is contained), and it is exactly the behavior the acceptance
 criteria require (confirmed compromise -> File Shield authority revoke).
+
+## 17. Post-reboot recovery + MCH8 extension compatibility (live, this host)
+
+### 17.1 Post-reboot state (verified after user re-applied policy via MCH app)
+
+- Standard-path `/Applications/Sensitive File Guard.app` = MCH build (guard-es
+  binary Aug 18 01:10, 4419312 bytes; restored via ditto from the MCH app after
+  an incomplete user sudo replacement).
+- Active system extension: `0.1.0/1 [activated enabled]`; guard-es pid running
+  from the D0DBA6FD-... container path; 0 deactivations over a 60-minute
+  window. No reversion when the standard-path GUI is opened (the old app no
+  longer exists there).
+- Config: 3 browsers (Chrome + Firefox + Safari w/ custom_hash) · 27 protected
+  files · 2 SSH keys (user re-enrolled Chrome + SSH after a GUI overwrite).
+- Audit markers: `session_membership=new_root/joined` present on browser
+  launches and helper spawns.
+
+### 17.2 The 36 recorded task DENYs are all pre-MCH era (sysmond, old build)
+
+- All 36 DENY rows have requester=/usr/libexec/sysmond and audit id < 709299;
+  the earliest MCH-era marker is id 709299. The DENYs belong to the brief
+  old-build window (the user's old-app GUI re-activated the old extension
+  version 1786965466 before the MCH re-activation).
+- MCH era (id >= 709299): **0 task DENY, 0 Detected/Compromised** — including
+  the sysmond READ exception now ALLOWED, matching the evidence-backed design.
+
+### 17.3 MCH8: extension loaded in real Chrome, zero shield impact
+
+- User installed the harmless MV3 fixture (`mch8-fixture@guard.invalid`) in
+  their real Chrome. Process-argv inspection: Chrome Main (pid 649) + **5
+  `--extension-process` renderer helpers** running, i.e. the extension is
+  genuinely loaded and executing.
+- Process Shield classification of those processes during the run:
+  session_membership=joined, no authority promotion, no strong-signal
+  transition — **0 task DENY storm, 0 false Compromised**.
+- Conclusion: extension background/content activity produces no Process Shield
+  deny storm and no false integrity transitions on the MCH build. The daily-use
+  regression (repeated blocked events under normal browsing) is not reproduced
+  on the current build; the pre-MCH flat-requester allowlist redesign is
+  confirmed effective.
+
+### 17.4 Robustness finding (documented, not changed)
+
+A single stale ExplicitHash enrollment (Safari after macOS Cryptex remount)
+failed the entire config atomically at load (browsers=0, files=0, trust
+revalidate FAIL), silently disabling all protection until the user re-applied
+the policy. Per-item granularity (skip/flag stale entries instead of atomic
+failure) is a product decision, intentionally not implemented here.
