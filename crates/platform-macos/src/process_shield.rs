@@ -222,6 +222,20 @@ impl TaskNotifyKind {
 /// Reduced. Flip this constant to true only after that evidence exists.
 pub const CS_INVALIDATED_STRONG_SIGNAL_UNVALIDATED: bool = true;
 
+/// MCH7 live evidence (this host): NOTIFY_GET_TASK_READ fired with
+/// requester=/bin/ps against the extension's own GuardComponent process at the
+/// same moment AUTH_GET_TASK_READ DENIED that exact requester (audit:
+/// process_shield_compromised, signal=notify_get_task_read requester_exe=/bin/ps
+/// integrity=Compromised). The notify therefore does NOT prove a capability
+/// acquisition that bypassed our prevention: routine Apple system tooling
+/// (ps) triggers read notifies even for AUTH-denied requesters. Treating every
+/// such notify as a strong signal produces false Compromised transitions on
+/// live protected processes (the daily-use regression class). GET_TASK_READ
+/// notify is DETECTED telemetry only; Process Shield health reports Reduced
+/// until adversarial evidence proves a reliable read-notify semantic. Flip
+/// this constant to false only after that evidence exists.
+pub const GET_TASK_READ_NOTIFY_STRONG_SIGNAL_UNVALIDATED: bool = true;
+
 /// Resolve whether a notify-only signal is a strong compromise input for an
 /// exact shielded target, using requester context (MPS4/MCH7/MCH3).
 ///
@@ -230,9 +244,15 @@ pub const CS_INVALIDATED_STRONG_SIGNAL_UNVALIDATED: bool = true;
 /// File Shield / lease authority is revoked.
 ///
 /// Rules (MCH7 revalidation + MCH3 session context):
-/// - GET_TASK / GET_TASK_READ: strong when the requester actually obtained the
-///   capability without any accepted relationship (not allowlisted) AND is not
-///   a verified browser-internal (same-session) process.
+/// - GET_TASK: strong when the requester actually obtained a CONTROL port
+///   without any accepted relationship (not allowlisted) AND is not a verified
+///   browser-internal (same-session) process. AUTH_GET_TASK is always
+///   subscribed, so a control notify from a non-allowlisted requester means the
+///   port came from a path our auth gate did not cover — genuinely unusual.
+/// - GET_TASK_READ: DETECTED telemetry only. Live evidence: notify fires for
+///   routine Apple tooling (ps) even when AUTH_GET_TASK_READ denied the same
+///   requester, so it is not reliable evidence of bypassed prevention
+///   (GET_TASK_READ_NOTIFY_STRONG_SIGNAL_UNVALIDATED; health reports Reduced).
 /// - REMOTE_THREAD_CREATE: strong for an UNKNOWN EXTERNAL requester: not
 ///   allowlisted, not same-session, provably different-session or provably
 ///   externally launched (signed-helper laundering). When session membership
@@ -257,9 +277,10 @@ pub fn strong_signal_decision(
         SignalRelation::Unverifiable => fallback_related,
     };
     match kind {
-        TaskNotifyKind::GetTask | TaskNotifyKind::GetTaskRead => {
-            !legitimate_relationship && !related
-        }
+        TaskNotifyKind::GetTask => !legitimate_relationship && !related,
+        // MCH7 (live evidence): GET_TASK_READ notify is DETECTED telemetry
+        // only; see GET_TASK_READ_NOTIFY_STRONG_SIGNAL_UNVALIDATED.
+        TaskNotifyKind::GetTaskRead => false,
         TaskNotifyKind::RemoteThreadCreate => !legitimate_relationship && !related,
         TaskNotifyKind::CsInvalidated => false,
         TaskNotifyKind::Trace => false,
@@ -1227,9 +1248,9 @@ mod tests {
     fn strong_signal_decision_resolves_context_per_requester() {
         use crate::browser_session::SignalRelation;
 
-        // GET_TASK / GET_TASK_READ: strong when the requester was NOT
-        // allowlisted AND not a verified browser-internal (same-session)
-        // process (contextual; MPS Hardening + MCH3).
+        // GET_TASK (CONTROL): strong when the requester was NOT allowlisted
+        // AND not a verified browser-internal (same-session) process
+        // (contextual; MPS Hardening + MCH3).
         assert!(strong_signal_decision(
             TaskNotifyKind::GetTask,
             false,
@@ -1246,6 +1267,29 @@ mod tests {
             TaskNotifyKind::GetTask,
             true,
             SignalRelation::RequesterExternal,
+            false
+        ));
+
+        // GET_TASK_READ notify: DETECTED telemetry only (MCH7 live evidence:
+        // routine /bin/ps against a GuardComponent produced a read notify even
+        // though AUTH_GET_TASK_READ denied the same requester -> the notify is
+        // not reliable evidence of bypassed prevention). Never strong.
+        assert!(!strong_signal_decision(
+            TaskNotifyKind::GetTaskRead,
+            false,
+            SignalRelation::Unverifiable,
+            false
+        ));
+        assert!(!strong_signal_decision(
+            TaskNotifyKind::GetTaskRead,
+            false,
+            SignalRelation::RequesterExternal,
+            false
+        ));
+        assert!(!strong_signal_decision(
+            TaskNotifyKind::GetTaskRead,
+            true,
+            SignalRelation::SameSession,
             false
         ));
 

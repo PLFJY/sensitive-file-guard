@@ -179,14 +179,20 @@ criteria require (confirmed compromise -> File Shield authority revoke).
 - Audit markers: `session_membership=new_root/joined` present on browser
   launches and helper spawns.
 
-### 17.2 The 36 recorded task DENYs are all pre-MCH era (sysmond, old build)
+### 17.2 The recorded task DENYs are all pre-MCH era (sysmond, old build)
 
-- All 36 DENY rows have requester=/usr/libexec/sysmond and audit id < 709299;
-  the earliest MCH-era marker is id 709299. The DENYs belong to the brief
-  old-build window (the user's old-app GUI re-activated the old extension
-  version 1786965466 before the MCH re-activation).
-- MCH era (id >= 709299): **0 task DENY, 0 Detected/Compromised** — including
-  the sysmond READ exception now ALLOWED, matching the evidence-backed design.
+- Every stored DENY has id <= 709285 (newest, timestamp 09:36, requester
+  /usr/libexec/sysmond task_read, old build). The earliest MCH-era marker is
+  id 709299 (Firefox new_root, 09:42). The DENYs belong to the brief old-build
+  window (the user's old-app GUI re-activated the old extension version
+  1786965466 before the MCH re-activation). Audit id gaps correspond to
+  TaskNotify telemetry events that consume sequence ids but are not persisted
+  (telemetry counters only); the stored ALLOW/DENY/Detected set is complete.
+- MCH era (id >= 709299, timestamps >= 09:42): **0 task DENY, 0 browser
+  activity Compromised** — including the sysmond READ exception now ALLOWED.
+- Warm-start admissions after the 11:06 restart (Chrome Main 649, Firefox
+  Main 3204, Chrome renderer 50892) carry session_membership=
+  rejected_unverifiable -> shield_preexisting=3 -> Reduced reason.
 
 ### 17.3 MCH8: extension loaded in real Chrome, zero shield impact
 
@@ -210,3 +216,62 @@ failed the entire config atomically at load (browsers=0, files=0, trust
 revalidate FAIL), silently disabling all protection until the user re-applied
 the policy. Per-item granularity (skip/flag stale entries instead of atomic
 failure) is a product decision, intentionally not implemented here.
+
+## 18. Live hardening findings + fixes (this round, all verified on this host)
+
+### 18.1 VERIFIED FACT — File Shield enforcement was OFF (policy_enabled=false)
+
+- Live status (repeatable): enforcement_active=false, status=NOT_ENFORCING,
+  backend_state=DEGRADED (snapshot.active=true; DEGRADED comes from the
+  backend health), mac policy counters protected_events=0 / allowed=0 /
+  denied=0 for the current instance, while namespace_allowed=904 shows every
+  namespace event being allowed.
+- Root cause chain: MacBackendConfig.policy_enabled carried #[serde(default)]
+  -> a config file without the field deserializes to FALSE; prepare_config/
+  apply_config then set MacProtectedResources.enabled=false; classify()
+  returns None for every protected AUTH_OPEN and authorize_namespace returns
+  true -> **File Shield is fully bypassed** (all protected opens allowed).
+  The GUI preserves the loaded value across applies, so the false value
+  survived every policy apply.
+- Evidence File Shield was previously ON: audit 708900 (02:12)
+  Deny(ProcessIntegrityCompromised) "protected-resource authority revoked"
+  — a real protected-open deny that predates the off state.
+- FIX (committed): policy_enabled now serde-defaults to true (fail-safe
+  toward protection, matching process_shield_enabled precedent); new test
+  policy_enabled_missing_field_defaults_to_enabled.
+- IMPACT on acceptance evidence: the "0 false Process-Shield-caused
+  protected-profile DENY" items were vacuous while File Shield was off;
+  File Shield enforcement must be RE-VERIFIED after re-enablement.
+### 18.2 VERIFIED FACT — GET_TASK_READ notify false Compromised on guard-es
+
+- Audit 709304 (11:12:18): process_shield_compromised,
+  signal=notify_get_task_read, requester=/bin/ps, target=guard-es itself
+  (GuardComponent entry, uid 0), integrity=Compromised. Triggered by a
+  routine `ps -o lstart` diagnostic on the extension process (this session's
+  own probe — same class as the round-9 Firefox incident, now on the
+  extension).
+- AUTH_GET_TASK_READ is enforced on this host (task_read_supported=true,
+  task_read_denied=1 for that exact ps request) YET the notify still fired:
+  the notify does NOT prove a capability obtained despite our prevention;
+  routine Apple tooling triggers read notifies anyway.
+- FIX (committed): NOTIFY_GET_TASK_READ is DETECTED telemetry only
+  (strong_signal_decision returns false for GetTaskRead; new const
+  GET_TASK_READ_NOTIFY_STRONG_SIGNAL_UNVALIDATED); Process Shield health
+  reports Reduced with the concrete reason. Tests: strong_signal_decision
+  GetTaskRead assertions + task_notify_get_task_read_is_telemetry_when_enabled.
+- GET_TASK (control) notify stays contextual-strong: AUTH_GET_TASK is always
+  subscribed, so a control notify from a non-allowlisted requester remains a
+  genuine anomaly; no control-notify false positive has been observed.
+- Round-9 consequence reclassification: the probe that previously contained
+  the warm-start Firefox Main via read notify would now stay telemetry (the
+  AUTH deny already PREVENTED the capability — the central guarantee is
+  unchanged); containment via CONTROL notify remains.
+
+### 18.3 Tests executed (this round)
+
+- cargo test --workspace --all-features: 294 passed / 0 failed (was 292; +2 new).
+- cargo clippy --all-targets --all-features -- -D warnings: clean.
+- cargo fmt: applied (pre-existing guardctl inventory formatting drift included).
+- REMEDIATION (user action): open the MCH app GUI, flip the master
+  protection switch ON, apply (LocalAuthentication). No code deploy needed
+  for this step.

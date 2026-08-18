@@ -1581,6 +1581,11 @@ impl CallbackContext {
         // platform daemons managing processes/sessions) stay telemetry.
         // MCH7 + MCH3: no kind is unconditionally strong; strong_signal_decision
         // resolves every signal with the verified BrowserSession relationship.
+        // MCH7 live evidence (this host): GET_TASK_READ notify fired for
+        // /bin/ps against the extension's own GuardComponent process even
+        // though AUTH_GET_TASK_READ denied the same requester, so READ notifies
+        // are NOT reliable evidence of bypassed prevention -> strong_signal_decision
+        // keeps GetTaskRead telemetry-only (health reports Reduced).
         let legitimate = crate::process_shield::task_access_allowlist(
             &requester,
             &target,
@@ -2908,6 +2913,55 @@ mod tests {
         assert!(
             shield_receiver.try_recv().is_err(),
             "no shield audit handoff while Process Shield is disabled"
+        );
+    }
+
+    #[test]
+    fn task_notify_get_task_read_is_telemetry_when_enabled() {
+        // MCH7 (live evidence): NOTIFY_GET_TASK_READ fired for /bin/ps against
+        // a GuardComponent even though AUTH_GET_TASK_READ denied the same
+        // requester (audit process_shield_compromised, signal=notify_get_task_read
+        // requester_exe=/bin/ps). The read notify is therefore DETECTED
+        // telemetry only: the exact target must stay Normal and the handoff
+        // must be a TaskNotify event, never Compromised.
+        let (_temp, config, _cookies) = browser_namespace_fixture();
+        let (context, shield_receiver, _open_receiver) = notify_context(config, true);
+        let target = fixture_process("fixture.browser");
+        context
+            .shield
+            .lock()
+            .unwrap()
+            .ensure_authority(&target)
+            .unwrap();
+        let raw = RawTaskEvent {
+            deadline: 1_000,
+            process: raw_process_facts(99, 7, 99_000, b"/bin/ps", b"", b""),
+            target: raw_process_facts(
+                target.key.pid as i32,
+                target.key.pidversion as i32,
+                target.start_time_us,
+                b"/Applications/Fixture.app/Contents/MacOS/Fixture",
+                b"TEAM123456",
+                b"fixture.browser",
+            ),
+        };
+        context.handle_task_notify(11, &raw); // NOTIFY_GET_TASK_READ
+        assert_eq!(
+            context
+                .shield
+                .lock()
+                .unwrap()
+                .integrity_of_pid(target.key.pid),
+            ProcessIntegrity::Normal,
+            "GET_TASK_READ notify must not auto-compromise until validated"
+        );
+        // Telemetry handoff still recorded (DETECTED), not a Compromised event.
+        let event = shield_receiver
+            .recv_timeout(Duration::from_millis(100))
+            .ok();
+        assert!(
+            matches!(event, Some(ShieldAuditEvent::TaskNotify { kind, .. }) if kind == TaskNotifyKind::GetTaskRead),
+            "GET_TASK_READ notify must be recorded as TaskNotify telemetry"
         );
     }
 

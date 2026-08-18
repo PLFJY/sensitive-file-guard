@@ -188,7 +188,12 @@ mod allowlist_tests {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MacBackendConfig {
     pub version: u32,
-    #[serde(default)]
+    /// Master File Shield switch. MUST default to enabled when the field is
+    /// absent: an older configuration that predates this field must keep the
+    /// protection it was authored with, never silently disable the whole
+    /// File Shield (a missing field must not be indistinguishable from an
+    /// explicit off). The GUI always writes the explicit value on apply.
+    #[serde(default = "default_policy_enabled")]
     pub policy_enabled: bool,
     /// Independent Process Shield toggle (MCH0). Defaults to enabled so older
     /// configurations that predate this field keep today's behavior; the user
@@ -203,6 +208,12 @@ pub struct MacBackendConfig {
 
 /// Serde default for process_shield_enabled: an absent field means enabled.
 pub fn default_process_shield_enabled() -> bool {
+    true
+}
+
+/// Serde default for policy_enabled: an absent field means File Shield is
+/// enabled (fail-safe toward protection, matching the field's intent).
+pub fn default_policy_enabled() -> bool {
     true
 }
 
@@ -723,6 +734,27 @@ mod tests {
         assert!(!round.process_shield_enabled);
         assert!(round.policy_enabled);
         round.validate().unwrap();
+    }
+
+    #[test]
+    fn policy_enabled_missing_field_defaults_to_enabled() {
+        // Regression (live finding): a configuration authored before the
+        // policy_enabled field existed (or by any writer that omitted it) used
+        // to deserialize to false, silently disabling File Shield enforcement
+        // (status NOT_ENFORCING, all protected opens allowed) while the GUI
+        // preserved the false value through every apply. Absent must mean
+        // enabled, never an implicit off.
+        let mut cfg = config();
+        cfg.policy_enabled = true;
+        let json = serde_json::to_string(&cfg).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        value.as_object_mut().unwrap().remove("policy_enabled");
+        let parsed: MacBackendConfig = serde_json::from_value(value).unwrap();
+        assert!(
+            parsed.policy_enabled,
+            "absent policy_enabled must default to true (File Shield stays on)"
+        );
+        parsed.validate().unwrap();
     }
 
     #[test]

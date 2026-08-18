@@ -587,7 +587,8 @@ fn process_shield_info(
         || !notify_active
         || health.process_graph_degraded
         || preexisting
-        || platform_macos::process_shield::CS_INVALIDATED_STRONG_SIGNAL_UNVALIDATED;
+        || platform_macos::process_shield::CS_INVALIDATED_STRONG_SIGNAL_UNVALIDATED
+        || platform_macos::process_shield::GET_TASK_READ_NOTIFY_STRONG_SIGNAL_UNVALIDATED;
     let (state, reason) = if !process_shield_enabled {
         // MCH0: explicit user/policy toggle. File Shield remains active; only
         // browser process-injection protection is unavailable. Never presented
@@ -624,6 +625,12 @@ fn process_shield_info(
         if platform_macos::process_shield::CS_INVALIDATED_STRONG_SIGNAL_UNVALIDATED {
             reasons.push(
                 "code-signing invalidation signal is downgraded to telemetry until validated (MCH7)"
+                    .to_string(),
+            );
+        }
+        if platform_macos::process_shield::GET_TASK_READ_NOTIFY_STRONG_SIGNAL_UNVALIDATED {
+            reasons.push(
+                "GET_TASK_READ notify semantics are downgraded to telemetry until validated (MCH7 live evidence: routine system tooling triggers read notifies despite AUTH deny)"
                     .to_string(),
             );
         }

@@ -447,13 +447,29 @@ fn run_config_validate_local() -> anyhow::Result<()> {
     );
     // Inventory (metadata only: ids, paths, signing IDs; never file contents).
     for browser in &config.browser_trust {
-        println!("  browser: id={} profile={}", browser.browser_id.0, browser.profile_root.display());
+        println!(
+            "  browser: id={} profile={}",
+            browser.browser_id.0,
+            browser.profile_root.display()
+        );
         for executable in &browser.executables {
             match executable {
-                platform_macos::browser_trust::MacExecutableEnrollment::Signed { role, path, signing_id, .. } => {
-                    println!("    exe: role={:?} signing_id={signing_id} path={}", role, path.display());
+                platform_macos::browser_trust::MacExecutableEnrollment::Signed {
+                    role,
+                    path,
+                    signing_id,
+                    ..
+                } => {
+                    println!(
+                        "    exe: role={:?} signing_id={signing_id} path={}",
+                        role,
+                        path.display()
+                    );
                 }
-                platform_macos::browser_trust::MacExecutableEnrollment::ExplicitHash { path, .. } => {
+                platform_macos::browser_trust::MacExecutableEnrollment::ExplicitHash {
+                    path,
+                    ..
+                } => {
                     println!("    exe: custom_hash path={}", path.display());
                 }
             }
@@ -463,10 +479,18 @@ fn run_config_validate_local() -> anyhow::Result<()> {
         println!("  ssh_key: {}", key.display());
     }
     for rule in &config.mac_allowlist.system_processes {
-        println!("  mac_system_process: signing_id={} path={}", rule.signing_id, rule.path.display());
+        println!(
+            "  mac_system_process: signing_id={} path={}",
+            rule.signing_id,
+            rule.path.display()
+        );
     }
     for tool in &config.mac_allowlist.trusted_tools {
-        println!("  mac_trusted_tool: signing_id={} path={}", tool.signing_id.as_deref().unwrap_or("?"), tool.path.display());
+        println!(
+            "  mac_trusted_tool: signing_id={} path={}",
+            tool.signing_id.as_deref().unwrap_or("?"),
+            tool.path.display()
+        );
     }
     let index = match platform_macos::resource_index::MacResourceIndex::from_enrollments(
         &config.browser_trust,
