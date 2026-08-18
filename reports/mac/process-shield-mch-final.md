@@ -279,25 +279,29 @@ failure) is a product decision, intentionally not implemented here.
 - cargo test --workspace --all-features: 294 passed / 0 failed (was 292; +2 new).
 - cargo clippy --all-targets --all-features -- -D warnings: clean.
 - cargo fmt: applied (pre-existing guardctl inventory formatting drift included).
-- REMEDIATION (user action): open the MCH app GUI, flip the master
-  protection switch ON, apply (LocalAuthentication). No code deploy needed
-  for this step.
+- REMEDIATION (user action): after deploying, open the standard app GUI, flip
+  the master protection switch ON, apply (LocalAuthentication). No code
+  deploy needed for this step beyond the standard build.
 ## 19. Operator checklist (deterministic, human-gated)
 
-1. OPEN `/Applications/Sensitive File Guard MCH.app` (current 0.1.0 works).
-2. FLIP the master protection switch (File Shield) to ON; APPLY (LocalAuthentication).
-   - This writes policy_enabled=true into the authoritative config; File Shield
-     resumes immediately (classify()/namespace gates re-arm on the next apply).
-3. VERIFY:
-   `'/Applications/Sensitive File Guard MCH.app/Contents/MacOS/guardctl' --json status`
-   must show enforcement_active=true and status=DEGRADED (not NOT_ENFORCING).
-4. DEPLOY the 0.1.1 hardening bundle (config default-on + GET_TASK_READ notify
-   telemetry): `./scripts/macos/deploy-mch-fixes.sh`; approve the extension
-   version replacement in System Settings.
-5. VERIFY the new extension: guardctl status shows version 0.1.1, Process Shield
-   Reduced reason includes the GET_TASK_READ notify downgrade, and no new
-   Deny(UnknownProcess) rows appear during normal browsing.
-6. OPTIONAL MCH2 authority matrix (real evidence, metadata only): enroll a
+1. BUILD + INSTALL in one command (identity lives in the login Keychain; no
+   password anywhere):
+   `./scripts/macos/build-deploy-self-use.sh`   (prompts for the sudo password
+   once, moves the old app to Trash, installs the new release bundle to
+   /Applications/Sensitive File Guard.app, verifies the signature).
+2. OPEN the app, click install/update the protection extension and approve in
+   System Settings; grant Full Disk Access when prompted. The extension swap
+   replaces the old-certificate 0.1.0 build (new identity leaf 7C10AC...).
+3. FLIP the master protection switch (File Shield) to ON; APPLY
+   (LocalAuthentication). This writes policy_enabled=true; File Shield resumes
+   immediately. Restart Chrome/Firefox once so no stale false-Compromised
+   state from the old build survives.
+4. VERIFY:
+   `'/Applications/Sensitive File Guard.app/Contents/MacOS/guardctl' --json status`
+   must show enforcement_active=true and status=DEGRADED (not NOT_ENFORCING);
+   Process Shield Reduced reasons include the GET_TASK_READ notify downgrade;
+   no new Deny(UnknownProcess) rows appear during normal browsing.
+5. OPTIONAL MCH2 authority matrix (real evidence, metadata only): enroll a
    DISPOSABLE Chrome profile in the GUI, then
    `LIVE_ES_ACCEPTANCE=... DISPOSABLE_CHROME_PROFILE=... scripts/macos/capture-process-authority-matrix.sh`.
 
