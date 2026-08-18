@@ -118,6 +118,13 @@ enrollment). Active is never claimed.
 
 ## 14. Remaining blockers / unverified assumptions
 
+- File Shield re-enablement — human step (URGENT, pending user action): the
+  applied policy carries policy_enabled=false -> File Shield is OFF (all
+  protected opens allowed). Fix is coded (default-on) and the 0.1.1 bundle is
+  built; the user must flip the GUI master protection switch ON and apply, or
+  deploy 0.1.1 and re-apply (deploy-mch-fixes.sh).
+- 0.1.1 deploy + extension activation approval — human step (deploy script
+  ready: scripts/macos/deploy-mch-fixes.sh).
 - GUI enrollment approval for a disposable protected profile (MCH2 matrix +
   protected-profile ALLOW gate) — human step (BLOCKED, pending user action).
 - MCH8 extension gate — CLOSED (user installed the harmless MV3 fixture in
