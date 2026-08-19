@@ -14,6 +14,25 @@ Linux 的 authoritative backend 是 root 身份运行的 `guardd`，通过 fanot
 - 配置带有 `config_version`；未知的更高版本会被显式拒绝，而不是被当前版本误读。`guardctl setup` 会写入当前版本。
 - 没有非空、经过审阅的 `/etc/guardd/config.json` 时，服务不得显示为已配置或已保护。
 
+### 根文件系统标记：guardd 默认 SAFETY REFUSAL
+
+`strict-filesystem` 用 `FAN_MARK_FILESYSTEM` 标记受保护 profile 所在的**整个文件系统**：其上
+每一次 `open()` 都先经过 guardd 权限裁决。若该文件系统是**根文件系统**，全机每个进程的每次
+文件打开都排队经过 guardd；daemon 繁忙/停滞时会造成**整机 IO 阻塞**（真实发生过两次全盘
+锁死）。因此：
+
+- **formal accepted 的 strict-filesystem 部署不包括根文件系统标记**。
+- 当受保护 profile 与 `/` 的 `st_dev` 相同（同一文件系统）时，guardd **默认拒绝启动**，错误
+  会明确说明这是 **SAFETY REFUSAL**（不是 fanotify unsupported），并提示把 profile 放到专门的
+  非根文件系统。
+- 仅当显式设置 `GUARDD_ALLOW_ROOT_FS_MARK=1` 时才标记根文件系统。该 override 是**危险的**：
+  它让整个根文件系统的 `open` 都经过 guardd，daemon 停滞可导致整机 IO wedge；**不属于正式的
+  accepted/frozen deployment capability**，**测试代码永远不得设置**。
+
+这一拒绝发生在启动阶段（`guardd` 主进程对 profile 所在路径做 `st_dev` 与 `/` 的比较），是
+部署契约的一部分；`guardctl status` 在 daemon 因该原因未运行时按服务未启动处理，具体原因见
+daemon 启动日志中的 SAFETY REFUSAL 措辞。
+
 ## 事件与决策
 
 fanotify 事件先按资源范围筛选，再验证 PID、启动时间、规范化可执行路径、设备号、inode 和 UID。未命中受保护范围的事件立即放行；命中后，未知进程默认拒绝。浏览器迁移和 SSH 读取可以进入有界人工确认，但超时、队列压力、进程退出或身份变化都拒绝。

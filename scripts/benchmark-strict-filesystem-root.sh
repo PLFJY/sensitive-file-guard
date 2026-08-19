@@ -132,6 +132,13 @@ OPEN_ITERATIONS="${OPEN_ITERATIONS:-100000}"
 ALLOWED_ITERATIONS="${ALLOWED_ITERATIONS:-10000}"
 DENIED_ITERATIONS="${DENIED_ITERATIONS:-2000}"
 
+# LFH0 LOCKED performance baseline (HARNESS §4 / ACCEPTANCE.md): the budget is
+# measured against these values, NOT against the current run's "absent" row
+# (rebaselining against a fresh absent row would silently mask a regression).
+# Source: reports/linux/evidence/lfh0-benchmark.txt (strict | unprotected).
+LFH0_STRICT_UNPROTECTED_P95_US=35.3
+LFH0_STRICT_UNPROTECTED_OPENSPERSEC=44673
+
 echo "==> A. guardd absent"
 bench absent unprotected "$PROBE" "$ORDINARY" "$OPEN_ITERATIONS"
 bench absent browser "$ENROLLED" "$COOKIE" "$ALLOWED_ITERATIONS"
@@ -192,6 +199,29 @@ if status["fanotify_overflows"] or status["classifier_failures"]:
 denied=json.load(open(w/"strict-denied.json", encoding="utf-8"))
 if denied["denied"] != denied["iterations"] or denied["successful"]:
     raise SystemExit("denied benchmark did not deny every protected open")
+
+# ACCEPTANCE.md performance gate against the LFH0 LOCKED baseline.
+strict_unprotected=load("strict","unprotected")
+cur_p95_us=strict_unprotected["latency_ns"]["p95"]/1e3
+cur_ops=strict_unprotected["opens_per_sec"]
+base_p95=35.3
+base_ops=44673
+PERF_P95_FACTOR=1.20
+PERF_THROUGHPUT_FACTOR=0.85
+allowed_p95=base_p95*PERF_P95_FACTOR
+required_ops=base_ops*PERF_THROUGHPUT_FACTOR
+print("Performance gate (vs LFH0 locked strict-unprotected baseline):")
+print(f"  current p95      : {cur_p95_us:.1f} us")
+print(f"  baseline p95     : {base_p95:.1f} us")
+print(f"  allowed p95 (<= {PERF_P95_FACTOR}x): {allowed_p95:.1f} us")
+print(f"  current opens/sec: {cur_ops:.0f}")
+print(f"  baseline opens/s : {base_ops:.0f}")
+print(f"  required opens/s (>= {PERF_THROUGHPUT_FACTOR}x): {required_ops:.0f}")
+if cur_p95_us > allowed_p95:
+    raise SystemExit(f"performance FAIL: strict unprotected p95 {cur_p95_us:.1f}us > allowed {allowed_p95:.1f}us")
+if cur_ops < required_ops:
+    raise SystemExit(f"performance FAIL: strict unprotected throughput {cur_ops:.0f} < required {required_ops:.0f}")
 PY
 
-echo "PASS: performance benchmark completed with no fanotify overflow or classifier failure"
+echo "PASS: performance benchmark — no fanotify overflow/classifier failure, denied all protected"
+echo "      opens, and strict-unprotected p95/throughput within the LFH0 locked budget."

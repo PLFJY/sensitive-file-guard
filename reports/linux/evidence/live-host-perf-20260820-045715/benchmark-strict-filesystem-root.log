@@ -1,0 +1,37 @@
+isolated loop-backed ext4: /dev/loop0 at /tmp/guard-perf-mnt-Xxldjv (never touches the root fs)
+==> A. guardd absent
+==> B. conservative mode
+==> C. strict-filesystem mode
+Performance results:
+state | workload | iterations | wall_ms | opens/sec | p50/p95/p99/max_us | overhead
+absent | unprotected | 100000 | 103.039 | 970507 | 0.7/1.4/2.4/93.4 | 1.00x
+absent | browser | 10000 | 10.494 | 952968 | 0.7/1.2/1.4/30.2 | 1.00x
+absent | denied | 2000 | 1.990 | 1004905 | 0.7/0.8/1.2/28.1 | 1.00x
+conservative | unprotected | 100000 | 99.613 | 1003885 | 0.8/0.9/1.6/27.9 | 0.97x
+conservative | browser | 10000 | 444.941 | 22474 | 38.3/80.5/119.4/867.5 | 42.40x
+conservative | denied | 2000 | 87.157 | 22947 | 37.5/57.3/126.2/1164.8 | 43.79x
+strict | unprotected | 100000 | 2388.361 | 41869 | 20.8/31.2/65.8/2093.9 | 23.18x
+strict | browser | 10000 | 478.208 | 20911 | 42.7/63.4/122.3/1236.1 | 45.57x
+strict | denied | 2000 | 89.569 | 22329 | 41.0/56.5/129.6/647.9 | 45.00x
+cargo check wall seconds:
+  absent: not measured (SKIP_BUILD)
+  conservative: not measured (SKIP_BUILD)
+  strict: not measured (SKIP_BUILD)
+Strict queue health:
+  strict_events_total: 112006
+  strict_fast_allowed: 100006
+  protected_events: 12000
+  fanotify_overflows: 0
+  audit_dropped: 0
+  classifier_failures: 0
+  strict_alias_scans: 0
+  strict_alias_matches: 0
+Performance gate (vs LFH0 locked strict-unprotected baseline):
+  current p95      : 31.2 us
+  baseline p95     : 35.3 us
+  allowed p95 (<= 1.2x): 42.4 us
+  current opens/sec: 41869
+  baseline opens/s : 44673
+  required opens/s (>= 0.85x): 37972
+PASS: performance benchmark — no fanotify overflow/classifier failure, denied all protected
+      opens, and strict-unprotected p95/throughput within the LFH0 locked budget.

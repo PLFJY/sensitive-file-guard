@@ -29,11 +29,12 @@ successfully opened. This is an access firewall, not an antivirus/EDR/DLP.
   key bytes, browser DB rows, or private-key material).
 
 ## LIVE-TEST SAFETY — HARD RULES (two real system-wide lockups)
-The ONLY root cause of a total system lock is a `FAN_MARK_FILESYSTEM` mark on
-the ROOT filesystem: strict mode then gates EVERY open on the whole machine
-through guardd, and a busy/slow daemon stalls every process. This happened
-TWICE (test fixture placed on `/var/tmp`, then on `$REPO/target` — both on the
-root mount). These rules are mandatory, not advisory:
+The root cause of BOTH observed system-wide lockups was a `FAN_MARK_FILESYSTEM`
+mark on the ROOT filesystem: strict mode then gates EVERY open on the whole
+machine through guardd, and a busy/slow daemon stalls every process. (This is
+not claimed to be the only possible cause of a total lock — rule 4 below notes
+that gating any shared critical filesystem such as `/tmp` can also wedge the
+desktop if the daemon stalls. These rules are mandatory, not advisory:
 
 1. **NEVER perform `FAN_MARK_FILESYSTEM` on the root mount** (any path whose
    `st_dev` equals `/`'s). Verify with `stat -c %d`, not by pathname: `/home`,

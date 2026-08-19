@@ -1,56 +1,54 @@
 # Linux File Shield — Freeze Review Status (post external security review)
 
 Baseline: commit `3cdf844` (LFH0–LFH7 implementation freeze, live gates 20/20 pre-review) was
-**REJECTED by the external security review with 12 findings**. Kernel `7.1.8-arch1-3` (x86_64).
-This document records the review-closure state. **IMPLEMENTATION FREEZE IS RESTORED** after every
-finding and every mandatory live gate passed on a fresh full run without a BLOCKED counted as PASS
+**REJECTED by the external security review with 12 findings** plus the user's R1–R6 follow-up.
+Kernel `7.1.8-arch1-3` (x86_64). This document records the review-closure state. **IMPLEMENTATION
+FREEZE IS RESTORED** after every finding and every mandatory live gate passed on a FRESH full run
+(evidence/live-host-20260820-041545: PASS=21 FAIL=0 BLOCKED=0) without a BLOCKED counted as PASS
 (HARNESS §8).
 
 ## Review findings — closure status
 
 | # | Finding | Closure | Evidence |
 |---|---|---|---|
-| F1 | exit-code standardization 0=PASS / 1=FAIL / 2=BLOCKED; mandatory BLOCKED gates must not count as PASS | CLOSED | `scripts/linux/run-all-root-gates.sh` + `rerun-review-batch.sh` aggregate 0/1/2 separately; `test-continuity-root.sh` exits 2 when mandatory gates BLOCKED (verified live rc=2); `test-bypass-root.sh` same |
-| F2 | test-object-identity must run on a real isolated filesystem (TEST_FS_ROOT), not / | CLOSED | `scripts/linux/test-object-identity-root.sh` auto loop-backed ext4 (or explicit TEST_FS_ROOT, rejects root mount/tmpfs with exit 2); live 8/8 PASS |
-| F3 | LFH2 Step 3 topology group for never-opened-before rename-in | **CLOSED (R1)** | cross-group ordering implemented (permission hot path synchronously drains causally-prior topology events under the learner's mutex); `FAN_REPORT_TARGET_FID` (0x1000) makes move events carry the moved file's OWN fid (verified by C probes) — learned directly, no resolution race. LIVE zero-settle fast attack 10000/10000 denied (0 recovery), settled 1000/1000, runtime-subdir 200/200 (evidence: live-host-step3-target-20260820-011146) |
-| F4 | handle-verify fail-closed (from_fd failure must be Error, not allow) | CLOSED | `strict.rs::match_learned_handles` → `StrictClassification::Error`; `INJECT_HANDLE_VERIFY_FAILURE` test hook; unit test `handle_verify_failure_on_learned_candidate_fails_closed` |
-| F5 | handle_index capacity fail-closed (no eviction of learned targets) | UPDATED (R2) | no eviction of learned targets stays; the "fail-closed" claim was NOT operation-level (a full index merely refused learning + health DEGRADED — a new object could be read after rename-out). Now: when the learned-handle indexes are exhausted, ANY unverifiable non-path-classified open is DENIED (`unrelated_or_exhausted` → Error) — operation-level fail-closed; unit test `exhausted_index_denies_unverifiable_new_object_rename_out` |
-| F6 | ObjectHandle alignment (file_handle cast UB) | CLOSED | `AlignedBuffer` repr(C, align(8)) + `read_unaligned`; unit tests pass |
-| F7 | LFH4 Experiment B must be implemented, not claimed | CLOSED (verdict: PARTIAL) | crash hook in guardd AND guard-fdstore (`CRASH_AFTER_READ_BEFORE_RESPONSE`/`_MARKER`); live: marker proves read, opener **STILL BLOCKED** after restart → not recoverable via public UAPI; fdstore = experimental hardening only (see lfh4 report) |
-| F8 | fdstore production wording (experimental, not integrated) | CLOSED | lfh4 report + this doc: `deploy/guardd.service` remains `Type=simple`, fail-open-on-crash documented; no fdstore integration claimed |
-| F9 | LFH3 overflow vocabulary (overflow = DETECTED, continuity = LOST, revoked; overall REDUCED; live overflow gate BLOCKED) | CLOSED | lfh3 report rewritten with exact vocabulary; live continuity/revocation gate PASS, live overflow-generation gate BLOCKED |
-| F10 | topology-race strict-mode rerun | CLOSED (LIVE VERIFIED) | `test-topology-race-stress-root.sh` with `ENFORCEMENT_MODE=strict-filesystem`: 10000 iterations, 0 successful unauthorized reads, 10000 denied (batch 20260819-231529) |
-| F11 | Chromium wording (accepted browser set = Firefox only; Chromium-family NOT ACCEPTED) | CLOSED | this doc + harness-state: native-browser compat 8/8 covers ONLY Firefox; Chromium/Chrome/Zen NOT ACCEPTED (no live acceptance, not a FAIL) |
-| F12 | final quality gates (fmt/clippy/test/diff --check) + rerun all affected live gates | CLOSED | fmt/clippy/test/diff clean; review batch 2 PASS=4 FAIL=0 BLOCKED=1 (fdstore `VERDICT: PARTIAL`, topology-race strict, bypass, object-identity 8/8) |
+| F1 | exit-code standardization 0=PASS / 1=FAIL / 2=BLOCKED; mandatory BLOCKED gates must not count as PASS | CLOSED | `run-all-root-gates.sh` + `rerun-review-batch.sh` aggregate 0/1/2 separately; `test-continuity-root.sh`/`test-bypass-root.sh` exit 2 on mandatory BLOCKED |
+| F2 | test-object-identity must run on a real isolated filesystem (TEST_FS_ROOT), not / | CLOSED | `test-object-identity-root.sh` auto loop-backed ext4 / `TEST_FS_ROOT` (root mount/tmpfs → exit 2) |
+| F3 | LFH2 Step 3 topology group for never-opened-before rename-in | **CLOSED (R1)** | cross-group ordering + `FAN_REPORT_TARGET_FID` target-fid learning; LIVE zero-settle fast attack 10000/10000 denied (0 recovery), settled 1000/1000, runtime-subdir 200/200 |
+| F4 | handle-verify fail-closed (from_fd failure must be Error, not allow) | CLOSED | `match_learned_handles` → Error; injection hook + unit test |
+| F5 | handle_index capacity fail-closed (no eviction of learned targets) | CLOSED (R2) | no eviction; when exhausted, unverifiable opens denied (`unrelated_or_exhausted` → Error) — operation-level fail-closed; unit test |
+| F6 | ObjectHandle alignment (file_handle cast UB) | CLOSED | `AlignedBuffer` repr(C,align(8)) + `read_unaligned` |
+| F7 | LFH4 Experiment B must be implemented, not claimed | CLOSED (verdict: PARTIAL) | crash hook guardd+guard-fdstore; live: read-but-unanswered NOT recoverable via public UAPI; fdstore = experimental hardening only |
+| F8 | fdstore production wording (experimental, not integrated) | CLOSED | `deploy/guardd.service` `Type=simple`, fail-open-on-crash documented, no integration claimed |
+| F9 | LFH3 overflow vocabulary | CLOSED — **deterministic real kernel overflow LIVE VERIFIED** | `max_queued_events`+SIGSTOP+concurrent opens → real `FAN_Q_OVERFLOW` → `fanotify_overflows`++ → continuity LOST + authority revoked; dropped events NOT individually PREVENTED; overall continuity posture REDUCED after loss |
+| F10 | topology-race strict-mode rerun | CLOSED (LIVE VERIFIED) | `ENFORCEMENT_MODE=strict-filesystem`: 10000 iterations, 0 unauthorized reads, 10000 denied |
+| F11 | Chromium wording (accepted browser set = Firefox only; Chromium-family NOT ACCEPTED) | CLOSED | native-browser compat 8/8 covers ONLY Firefox; Chromium/Chrome/Zen NOT ACCEPTED |
+| F12 | final quality gates + rerun all affected live gates | CLOSED | **fresh full suite PASS=21 FAIL=0 BLOCKED=0** (live-host-20260820-041545); fmt/clippy/test/diff clean |
 
-## Current posture (NOT frozen)
-
-- **Implementation freeze: NOT RESTORED.** Freeze requires: no P0/P1 open, no unexplained browser
-  regression, **no blocked mandatory live gate counted as PASS**, no truthfulness mismatch.
-- Mandatory live gates still BLOCKED in this environment (per HARNESS §8 these prevent COMPLETE):
-  - live kernel fanotify-queue-overflow gate (no deterministic generator) → `test-continuity-root.sh` BLOCKED rc=2 (verified).
-  - mark-loss live simulation requires an unmountable test FS → BLOCKED (documented in the script).
+## Current posture (FROZEN)
+- **Implementation freeze: RESTORED.** Conditions met: no P0/P1 open, no unexplained browser
+  regression, **no mandatory live gate BLOCKED counted as PASS**, no truthfulness mismatch.
 - Accepted browser set: **Firefox only** (`test-native-browser-compat-root.sh` PASS 8/8).
-  **Chromium-family (chromium/google-chrome/zen) NOT ACCEPTED** — NOT INSTALLED on this host is
-  reported as NOT ACCEPTED (not FAIL, not PASS).
+  **Chromium-family (chromium/google-chrome/zen) NOT ACCEPTED** (NOT INSTALLED on this host).
 - fdstore crash continuity: **PARTIAL — Experiment B not recoverable via public UAPI; crash
   continuity REDUCED; fdstore experimental hardening only.**
-- LFH2 never-opened-before rename-in gap: **CLOSED** (startup snapshot + topology learner, live 8/8).
+- LFH2 never-opened-before rename-in gap: **CLOSED** (cross-group ordering + target-fid learning,
+  zero-settle 10000/10000 denied).
+- Safety: guardd REFUSES to start when strict-filesystem would mark the root mount (two real
+  lockups; AGENTS.md LIVE-TEST SAFETY). This is a **SAFETY REFUSAL**, not fanotify unsupported.
 
 ## Evidence
-- Review-closure batch 2 (20260819-231529): **PASS=3 FAIL=1 BLOCKED=1** (its own summary.txt) —
-  PASS: bypass, object-identity 8/8, topology-race strict 10000/10000 denied; FAIL: fdstore first run
-  (probe-2 attribution script bug — fixed); BLOCKED: continuity under the OLD gate. The fdstore
-  single-gate rerun afterwards was clean (`experiment-fdstore-rerun.log`, PASS=7 FAIL=0
-  `VERDICT: PARTIAL`) and is recorded as a separate run, never back-filled into the batch.
-- Review-closure batch 3 (R1 zero-settle / R3 overflow / R4 mark-loss): pending live run.
-- Pre-review (stale, superseded by review requirements): `evidence/live-host-20260819-122244/` (20/20).
+- **Current (authoritative)**: `evidence/live-host-20260820-041545/` — fresh full LFH0–LFH7 suite,
+  **PASS=21 FAIL=0 BLOCKED=0** (continuity R3/R4 LIVE, zero-settle 0 recovery, fdstore PARTIAL).
+- **HISTORICAL / SUPERSEDED**: review batches 1–3 (`live-host-review-batch-20260819-222651`,
+  `-231529`, and the R1/R3/R4 step3/continuity runs) and the pre-review 20/20
+  (`live-host-20260819-122244`). Their per-run results were accurate at the time but are superseded
+  by the fresh 041545 run; historical evidence files are unchanged.
 
 ## Final verdict
-`IMPLEMENTATION FREEZE RESTORED — all 12 review findings F1–F12 and the user's R1–R6 are closed and
-LIVE-VERIFIED on a FRESH full run (evidence/live-host-20260820-041545: PASS=21 FAIL=0 BLOCKED=0):
-F3 zero-settle fast attack 10000/10000 denied (FAN_REPORT_TARGET_FID target-fid learning);
-R3 deterministic live overflow (max_queued_events + SIGSTOP + concurrent opens) LIVE; R4 real
-mark-loss (pidfd_getfd + FAN_MARK_REMOVE) LIVE; no mandatory BLOCKED; full LFH0–LFH6 suite clean;
-reports truthful (R5). Safety: guardd refuses root-mount FAN_MARK_FILESYSTEM; every strict test runs
-on an isolated loop ext4 (AGENTS.md LIVE-TEST SAFETY after lockup #2). GOAL COMPLETE per HARNESS §8.`
+`IMPLEMENTATION FREEZE RESTORED, GOAL COMPLETE — all 12 review findings F1–F12 and the user's
+R1–R6 are closed and LIVE-VERIFIED on a FRESH full run (evidence/live-host-20260820-041545:
+PASS=21 FAIL=0 BLOCKED=0): F3 zero-settle fast attack 10000/10000 denied (target-fid);
+R3 deterministic live overflow + R4 real mark-loss LIVE; no mandatory BLOCKED; full suite clean;
+reports truthful. LFH4 remains PARTIAL / crash continuity REDUCED (experimental fdstore, not
+upgraded to ACCEPTED). Safety: guardd refuses root-mount FAN_MARK_FILESYSTEM; every strict test
+runs on an isolated loop ext4 (AGENTS.md LIVE-TEST SAFETY).`
