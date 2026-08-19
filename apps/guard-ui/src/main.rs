@@ -2964,6 +2964,7 @@ mod tests {
             protected_events: 0,
             fanotify_overflows: Some(0),
             classifier_failures: Some(0),
+            handle_index_full: None,
             strict_alias_scans: Some(0),
             strict_alias_matches: Some(0),
             topology_degraded: Some(false),

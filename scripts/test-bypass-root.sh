@@ -40,6 +40,9 @@ BLOCKED=0
 note_pass() { echo "PASS: $1"; PASS=$((PASS+1)); }
 note_fail() { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
 note_blocked() { echo "BLOCKED: $1"; BLOCKED=$((BLOCKED+1)); }
+# A MANDATORY blocked gate is a required acceptance test that could not run;
+# it forces exit code 2 and must never be aggregated as PASS.
+note_mandatory_blocked() { echo "BLOCKED(mandatory): $1"; MANDATORY_BLOCKED=$((MANDATORY_BLOCKED + 1)); }
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "ERROR: this script must be run as root (needs CAP_SYS_ADMIN for fanotify)."
@@ -167,7 +170,7 @@ ln "$COOKIES" "$WORK/hardlink-to-cookies" 2>/dev/null || true
 if [ -f "$WORK/hardlink-to-cookies" ]; then
   assert_denied "hardlink reads cookies" read "$WORK/hardlink-to-cookies"
 else
-  note_blocked "hardlink (filesystem does not support hardlinks across dirs)"
+  note_mandatory_blocked "hardlink bypass could not run (filesystem does not support hardlinks across dirs)"
 fi
 
 # ===========================================================================
@@ -326,7 +329,7 @@ PY
   note_pass "latency benchmark measured"
 else
   echo "    (python3 not available for p50/p95 computation)"
-  note_blocked "latency benchmark (python3 absent)"
+  note_mandatory_blocked "latency benchmark (python3 absent)"
 fi
 
 # ===========================================================================

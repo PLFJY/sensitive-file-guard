@@ -397,6 +397,11 @@ pub struct StatusInfo {
     pub fanotify_overflows: Option<u64>,
     #[serde(default)]
     pub classifier_failures: Option<u64>,
+    /// LFH5 review: the dynamic-object handle index reached capacity. Fail
+    /// closed: existing learned identities are never evicted, new candidates
+    /// are not learned, and the overall posture degrades.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handle_index_full: Option<bool>,
     #[serde(default)]
     pub strict_alias_scans: Option<u64>,
     #[serde(default)]
@@ -967,6 +972,7 @@ mod tests {
             protected_events: 2,
             fanotify_overflows: Some(0),
             classifier_failures: Some(0),
+            handle_index_full: None,
             strict_alias_scans: Some(3),
             strict_alias_matches: Some(2),
             topology_degraded: Some(false),

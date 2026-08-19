@@ -46,17 +46,11 @@ fanotify permission events: queued unread → read by listener → moves to inte
 | Claim | Verdict | Evidence |
 |---|---|---|
 | fdstore can hold a fanotify group fd (mechanism implemented) | LIVE VERIFIED | `guard-fdstore` store/claim + SCM_RIGHTS; journal: stored group fd=3 → restart → claimed stored group fd=3 (LISTEN_FDS=1) |
-| crash hook fires after read, before response | PREVENTED (code) | CRASH_AFTER_READ_BEFORE_RESPONSE hook |
-| live Experiment A (unread event survives) | LIVE VERIFIED (ACCEPTED) | probe blocked 0.5s after SIGKILL (fdstore duplicate holds the group); fresh open denied after restart |
-| live Experiment B (read pending recovery) | LIVE VERIFIED (ACCEPTED) | queued event processed by the claimed group after restart; probe unblocked with DENY; marks still enforce |
+| crash hook fires after read, before response | LIVE VERIFIED | CRASH_AFTER_READ_BEFORE_RESPONSE + CRASH_AFTER_READ_MARKER in guardd AND guard-fdstore; Experiment B marker written with the event pid |
+| Experiment A: unread event survives the crash (group preserved) | LIVE VERIFIED | probe blocked 0.5s after SIGKILL (fdstore duplicate holds the group); fresh open denied after restart (marks survive). The "queued event answered after restart" probe-2 outcome was UNATTRIBUTED in the real-host runs (the probe's rc file was never captured; the canary was never read — no fail-open) |
+| Experiment B: read-but-unanswered permission recovered by the claimed group | **NOT RECOVERABLE via public UAPI** | marker proves the daemon read the exact event (pid recorded); after restart the opener is **STILL BLOCKED** (permission pending, no responder exists — the response fd died with the crashed process); canary never read |
 
-Live evidence: `reports/linux/evidence/live-host-*/experiment-fdstore-root.log` — `VERDICT: ACCEPTED (fdstore preserved the fanotify group; queued event processed after restart; marks still enforce)` (PASS=4 FAIL=0).
-
-### Fixes discovered by the live run (real-host, previously unexercised code)
-- `fanotify_mark` passed `FAN_OPEN_PERM` inside the **flags** argument (it is a mask bit) → EINVAL. Fixed: flags = `FAN_MARK_ADD` only.
-- `fdstore_store` called `CMSG_FIRSTHDR` before setting `msg_control` (NULL deref UB) and sent on an unconnected datagram socket (`EDESTADDRREQ`). Fixed: connect first, set `msg_control` before `CMSG_FIRSTHDR`.
-- The response hardcoded the legacy `FAN_DENY=0`; modern kernels define `FAN_DENY=0x02` and reject `0` with EINVAL. Fixed: `libc::FAN_DENY`.
-- The experiment script's probe-2 oracle waited 2s, but `RestartSec=1` brings the claim helper back within 1s; the 0.5s dead-window check now proves the fdstore hold.
+Live evidence: `reports/linux/evidence/live-host-review-batch-20260819-231529/experiment-fdstore-rerun.log` — PASS=7 FAIL=0 BLOCKED=0; probe2 "unblocked with denial after restart (rc=1)" (attribution race fixed: the probe subshell previously aborted on the nonzero denial before writing its rc — `set -e` inherited into the `( ... ) &` subshell; fixed with `set +e` + `KEEP_WORK` no longer deletes the kept dir); B: marker pid=…, "opener STILL BLOCKED after restart (pending permission not recoverable via public UAPI)", "synthetic canary never read"; `VERDICT: PARTIAL`.
 
 ## Final phase verdict
-`LIVE VERDICT: ACCEPTED (Experiment A + B oracles all PASS on the real host); previously BLOCKED by nspawn seccomp`
+`PARTIAL — Experiment A group-preservation proven; Experiment B read-but-unanswered recovery NOT possible via supported public interfaces (the pending permission stays blocked after restart) → LFH4 = PARTIAL, crash continuity stays REDUCED. The fdstore mechanism is experimental hardening only; production guardd keeps `deploy/guardd.service` `Type=simple` with the documented fail-open-on-crash semantics (no fdstore integration claimed).`

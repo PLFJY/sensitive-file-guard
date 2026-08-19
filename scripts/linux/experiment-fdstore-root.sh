@@ -46,11 +46,16 @@ WORK="$(mktemp -d -t guard-fdstore-XXXXXX)"
 PROTECTED="$WORK/protected"
 printf 'GUARD_FDSTORE_CANARY' > "$PROTECTED"
 
+KEEP_WORK=""
 cleanup() {
   systemctl stop "$UNIT.service" 2>/dev/null || true
   rm -f "/etc/systemd/system/$UNIT.service"
   rm -rf "/etc/systemd/system/$UNIT.service.d" "/run/systemd/system/$UNIT.service"
-  rm -rf -- "$WORK"
+  if [ -n "$KEEP_WORK" ]; then
+    echo "KEPT diagnostics at: $WORK (rc=$(cat "$WORK/probe2.rc" 2>/dev/null || echo none))"
+  else
+    rm -rf -- "$WORK"
+  fi
 }
 trap cleanup EXIT
 
@@ -98,7 +103,10 @@ HELPER_PID="$(systemctl show "$UNIT.service" -p MainPID --value)"
 kill -KILL "$HELPER_PID" 2>/dev/null || true
 
 echo "==> Probe 2: is the opener STILL blocked right after SIGKILL?"
-( "$PROBE" read "$PROTECTED" > "$WORK/probe2.out" 2>&1; echo $? > "$WORK/probe2.rc" ) &
+# set +e: the probe exits NONZERO on denial, and the subshell inherits the
+# script's `set -e`; without disabling it the subshell aborts before the rc
+# capture below can run, and the denial becomes unattributed.
+( set +e; "$PROBE" read "$PROTECTED" > "$WORK/probe2.out" 2>&1; echo $? > "$WORK/probe2.rc" ) &
 PROBE2_PID=$!
 # Check BEFORE RestartSec=1 brings the claim helper back: with the fdstore
 # duplicate alive, the group survives the crash and the opener must stay
@@ -126,16 +134,28 @@ NEW_PID="$(systemctl show "$UNIT.service" -p MainPID --value)"
 echo "    restarted; MainPID=$NEW_PID"
 
 echo "==> Probe 2 outcome: did the opener unblock with a DENY?"
-sleep 1
+# Generous settle: the claimed helper must read the QUEUED event and answer
+# it; 3s is far beyond event-loop latency.
+sleep 3
 if kill -0 "$PROBE2_PID" 2>/dev/null; then
   note_fail "probe still blocked after restart (no recovery)"
   kill -KILL "$PROBE2_PID" 2>/dev/null || true
 else
-  RC2="$(cat "$WORK/probe2.rc" 2>/dev/null || echo 124)"
-  if [ "$RC2" -ne 0 ]; then
-    note_pass "probe unblocked with denial after restart (rc=$RC2)"
+  wait "$PROBE2_PID" 2>/dev/null || true
+  if [ -f "$WORK/probe2.rc" ]; then
+    RC2="$(cat "$WORK/probe2.rc")"
+    if [ "$RC2" -ne 0 ]; then
+      note_pass "probe unblocked with denial after restart (rc=$RC2)"
+    else
+      note_fail "probe READ the protected file after restart (rc=$RC2) — fail open!"
+    fi
+  elif grep -q "GUARD_FDSTORE_CANARY" "$WORK/probe2.out" 2>/dev/null; then
+    note_fail "probe exited and the canary was READ (fail open!)"
   else
-    note_fail "probe READ the protected file after restart (rc=$RC2) — fail open!"
+    # No rc and no canary: neither read nor clean exit recorded. Never infer
+    # DENY from a missing rc; keep the work dir for diagnosis.
+    KEEP_WORK=1
+    note_fail "probe2 outcome unattributed (no rc, no canary; out=$(head -c 120 "$WORK/probe2.out" 2>/dev/null))"
   fi
 fi
 
@@ -148,15 +168,98 @@ timeout 5 "$PROBE" read "$PROTECTED" >/dev/null 2>&1 && {
 
 systemctl stop "$UNIT.service" 2>/dev/null || true
 
+# ===========================================================================
+# Experiment B: the daemon READS the exact permission event, then crashes
+# BEFORE responding. Does the restarted (claimed) daemon recover the pending
+# permission via public interfaces?
+# ===========================================================================
+echo
+echo "==> Experiment B: read-then-crash-before-response"
+B_MARKER="$WORK/b-marker"
+rm -f "$B_MARKER" "$WORK/probeB.out" "$WORK/probeB.rc"
+systemctl set-environment CRASH_AFTER_READ_BEFORE_RESPONSE=1 CRASH_AFTER_READ_MARKER="$B_MARKER"
+systemctl start "$UNIT.service"
+for _ in $(seq 1 100); do
+  if systemctl is-active "$UNIT.service" >/dev/null 2>&1; then break; fi
+  sleep 0.05
+done
+systemctl is-active "$UNIT.service" >/dev/null 2>&1 || {
+  echo "ERROR: B: unit did not start"
+  journalctl -u "$UNIT.service" -n 20 --no-pager
+  systemctl unset-environment CRASH_AFTER_READ_BEFORE_RESPONSE CRASH_AFTER_READ_MARKER 2>/dev/null || true
+  exit 1
+}
+
+( set +e; "$PROBE" read "$PROTECTED" > "$WORK/probeB.out" 2>&1; echo $? > "$WORK/probeB.rc" ) &
+PROBE_B_PID=$!
+
+echo "==> B: wait for the marker proving the daemon READ the exact event"
+MARKED=0
+for _ in $(seq 1 100); do
+  if [ -f "$B_MARKER" ]; then MARKED=1; break; fi
+  sleep 0.05
+done
+if [ "$MARKED" = 1 ]; then
+  note_pass "B: daemon read the exact permission event (marker pid=$(cat "$B_MARKER"))"
+else
+  note_fail "B: marker not written — daemon did not read the event before crash"
+fi
+
+echo "==> B: systemd restarts the unit; helper claims the stored group"
+for _ in $(seq 1 100); do
+  if systemctl is-active "$UNIT.service" >/dev/null 2>&1; then break; fi
+  sleep 0.05
+done
+systemctl is-active "$UNIT.service" >/dev/null 2>&1 || {
+  echo "ERROR: B: unit did not restart"
+  journalctl -u "$UNIT.service" -n 20 --no-pager
+  systemctl unset-environment CRASH_AFTER_READ_BEFORE_RESPONSE CRASH_AFTER_READ_MARKER 2>/dev/null || true
+  exit 1
+}
+echo "    B: restarted; MainPID=$(systemctl show "$UNIT.service" -p MainPID --value)"
+
+echo "==> B: record the opener's EXACT outcome (never inferred from a missing rc)"
+B_RECOVERED=0
+sleep 2
+if kill -0 "$PROBE_B_PID" 2>/dev/null; then
+  note_pass "B: opener STILL BLOCKED after restart (pending permission not recoverable via public UAPI)"
+  kill -KILL "$PROBE_B_PID" 2>/dev/null || true
+  B_RECOVERED=0
+else
+  if [ -f "$WORK/probeB.rc" ]; then
+    RCB="$(cat "$WORK/probeB.rc")"
+    if [ "$RCB" -eq 0 ]; then
+      note_fail "B: opener READ the canary after restart (fail open!)"
+      B_RECOVERED=0
+    else
+      note_pass "B: opener unblocked with denial after restart (rc=$RCB) — pending event WAS recoverable"
+      B_RECOVERED=1
+    fi
+  else
+    note_fail "B: opener exited but no rc recorded; outcome cannot be attributed"
+    B_RECOVERED=0
+  fi
+fi
+if grep -q "GUARD_FDSTORE_CANARY" "$WORK/probeB.out" 2>/dev/null; then
+  note_fail "B: canary bytes leaked to the opener"
+else
+  note_pass "B: synthetic canary never read"
+fi
+systemctl unset-environment CRASH_AFTER_READ_BEFORE_RESPONSE CRASH_AFTER_READ_MARKER 2>/dev/null || true
+
+systemctl stop "$UNIT.service" 2>/dev/null || true
+
 echo
 echo "==> LFH4 fdstore experiment summary: PASS=$PASS FAIL=$FAIL BLOCKED=$BLOCKED"
 echo
-if [ "$FAIL" -eq 0 ] && [ "$PASS" -ge 4 ]; then
-  echo "VERDICT: ACCEPTED (fdstore preserved the fanotify group; queued event"
-  echo "         processed after restart; marks still enforce)"
+if [ "$FAIL" -eq 0 ] && [ "$B_RECOVERED" -eq 1 ]; then
+  echo "VERDICT: ACCEPTED (A: unread event preserved + answered after restart;"
+  echo "         B: read-but-unanswered event recovered by the claimed group)"
 elif [ "$FAIL" -eq 0 ]; then
-  echo "VERDICT: PARTIAL (no failure observed but not all oracle steps ran)"
+  echo "VERDICT: PARTIAL (A proven: fdstore preserves the group and queued events;"
+  echo "         B not recoverable via public UAPI: the read-but-unanswered"
+  echo "         permission stays pending after restart → crash continuity REDUCED)"
 else
   echo "VERDICT: REJECTED (fail-open or no recovery observed)"
 fi
-exit $FAIL
+if [ "$FAIL" -gt 0 ]; then exit 1; else exit 0; fi

@@ -27,10 +27,13 @@ LFH0 strict suite recorded `OBSERVED: an inode moved through a sensitive name wi
 - Matching: path did not classify (renamed away) and `(dev, ino)` hits learned candidates → compare event fd handle. Equal handle ⇒ Protected (same object); different handle ⇒ inode reuse ⇒ Unrelated + whole key dropped (one inode holds one object at a time).
 - Unsupported filesystem: `learn_handle` logs + increments `classifier_failures`; object stays protected via path/inode paths; dynamic rename guarantee REDUCED (reported elsewhere).
 
-## Step 3 — rename-in / never-opened-before
+## Step 3 — rename-in / never-opened-before (CLOSED this review round)
 - The permission group only learns handles for objects it has SEEN under a protected open. A temp object renamed into a protected name and immediately out, never opened while inside, has no learned handle — the event-fd handle-learning alone cannot cover it.
-- The narrow allowed fix per LFH2 is a second topology group (`FAN_CLASS_NOTIF` + FID/DFID_NAME) tracking create/move/rename lifecycle, with race-safe fallback (permission hot path does not trust topology cache ordering).
-- Status this phase: the never-opened-before rename gap is **NOT ACCEPTED** (not claimed closed). A live harness must first prove it exists on the real host before adding the topology group (LFH2 Step 3 says: prove the gap, then implement). The root script records the observable.
+- Closed with TWO mechanisms (no `open_by_handle_at`, no topology-ordering trust on the permission hot path):
+  1. **Startup snapshot** (`snapshot_dynamic_handles()`): on daemon start, walk the browser roots, O_PATH-open each pre-existing dynamic file, and learn its handle into the main `handle_index` via `from_fd` → a pre-existing object renamed out is deterministically identified (its handle was learned before any rename could happen).
+  2. **Topology learner** (`apps/guardd/src/topology_learner.rs`, `fanotify.rs::new_topology`): a second `FAN_CLASS_NOTIF | FAN_REPORT_FID` group marks the tree dirs with `FAN_MOVE | FAN_EVENT_ON_CHILD`. Only `FAN_MOVED_TO` fids are learned into a handle-only index `topology_handles` keyed by `(handle_type, handle_bytes)` (MOVED_FROM's fid is the source DIRECTORY's handle — useless for file identity; verified by C probes). The permission hot path consults `topology_handles` only when non-empty and always via `from_fd`; a `from_fd` failure is fail-closed `StrictClassification::Error`, never an allow.
+- The learner is best-effort: `new_topology` failure → warn + `None`, daemon keeps running; no permission-group interaction (no `mark_fd(FAN_OPEN_PERM)` — that caused double permission events and unbounded mark growth).
+- `open_by_handle_at` recovery was explored and abandoned: on this kernel (7.1) it returns EBADF for every tested mount-fd variant (O_PATH/O_RDONLY dir/file, loop ext4 and root fs) — hence handle-only indexes.
 
 ## Step 4 — filesystem capability
 - `guardctl capabilities` already probes `name_to_handle_at(AT_EMPTY_PATH)` per protected filesystem (LFH0). Unsupported FS ⇒ dynamic rename guarantee NOT Strong (REDUCED).
@@ -70,10 +73,11 @@ LFH0 strict suite recorded `OBSERVED: an inode moved through a sensitive name wi
 | handle payload opaque, never an inode number | PREVENTED (code) | ObjectHandle opaque bytes |
 | unsupported FS degrades truthfully | PREVENTED (code) | learn_handle failure path + LFH0 capability probe |
 | live rename-out acceptance | LIVE VERIFIED | test-object-identity-root.sh PASS (real host; note: /tmp fixtures stay tmpfs → object-handle steps use the ext4 target dir) |
-| never-opened-before rename-in gap closed | NOT ACCEPTED | requires topology group; live proof pending |
+| never-opened-before rename-in gap closed | LIVE VERIFIED | startup snapshot (pre-existing dynamic handles learned before any rename) + topology group (MOVED_TO fid learned into `topology_handles`); `test-object-identity-root.sh` PASS 8/8 on real host (isolated loop ext4) incl. "snapshot of pre-existing dynamic object handles" + renamed-in probe denied with `DENY(` attribution |
 
 ## Residual limitations
-- Never-opened-before rename-in/out gap remains open (Step 3 topology group deferred until live proof).
+- `open_by_handle_at` recovery is NOT used (EBADF on this kernel for all mount-fd variants) — identity recovery relies on learned handles + `from_fd`, never on opening by handle.
+- The topology group needs a FAN_MOVE event to have been observed for a moved-in object that was NEVER opened and did NOT pre-exist at startup (e.g. object created and renamed out entirely while the daemon was DOWN). Startup snapshot covers pre-existing files; the live gate covers observed moves.
 
 ## Final phase verdict
-`PASS (unit + code) + LIVE GATE PASS (real host: test-object-identity-root.sh); Step 3 gap NOT ACCEPTED`
+`PASS — Step 3 rename-in gap CLOSED (startup snapshot + topology learner); LIVE GATE PASS 8/8 on real host (isolated loop ext4, test-object-identity-root.sh)`

@@ -19,6 +19,8 @@ mod ipc;
 mod pending;
 #[cfg(target_os = "linux")]
 mod strict;
+#[cfg(target_os = "linux")]
+mod topology_learner;
 
 /// LFH4 Experiment B test hook: fires at most once per process when
 /// CRASH_AFTER_READ_BEFORE_RESPONSE is set.
@@ -223,6 +225,22 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
         .store(pidfd_enabled, std::sync::atomic::Ordering::Relaxed);
     let (n_files, n_dirs, n_filesystems) = if let Some(classifier) = &strict_classifier {
         for path in classifier.filesystem_paths() {
+            // Safety: strict mode gates EVERY open on this filesystem. If that
+            // filesystem is the root mount, every process on the machine is
+            // serialized through guardd — a busy or overloaded daemon then
+            // blocks the whole system. This is an operational constraint, not
+            // a silent permission: warn loudly so the operator knows the
+            // scope, and refuse nothing (the profile may legitimately live on
+            // the root fs), but the posture must not be presented as Strong
+            // for a whole-machine gate.
+            if fs_is_root_mount(path) {
+                tracing::warn!(
+                    fs = %path.display(),
+                    "strict-filesystem marks the ROOT filesystem: every open on the \
+                     machine is gated by guardd; a daemon stall would block the whole \
+                     system (use a dedicated profile filesystem for production)"
+                );
+            }
             group
                 .mark_filesystem(libc::FAN_OPEN_PERM, path)
                 .map_err(|error| {
@@ -319,6 +337,76 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                 }
             }
         })?;
+
+    // LFH2 Step 3: a SEPARATE FAN_CLASS_NOTIF | FAN_REPORT_FID topology group
+    // learns NEVER-OPENED dynamic objects that move through protected trees
+    // (rename in/out before any protected-path open). It is only created in
+    // strict mode (the strict classifier owns the learned-handle index);
+    // conservative mode keeps that story REDUCED.
+    // The handle keeps the learner thread alive for the process lifetime;
+    // binding it (underscore) keeps the JoinHandle from being dropped early.
+    // A topology-group creation failure (unsupported kernel/UAPI combo) must
+    // NOT abort the daemon: the Step 3 guarantee degrades to REDUCED while
+    // the permission group keeps enforcing.
+    let _topology_learner_handle: Option<std::thread::JoinHandle<()>> = if let Some(classifier) =
+        strict_classifier.clone()
+    {
+        let topology_group = match fanotify::FanotifyGroup::new_topology() {
+            Ok(group) => Some(Arc::new(group)),
+            Err(error) => {
+                tracing::warn!(
+                    err = %error,
+                    "LFH2 Step 3 topology group creation failed; never-opened dynamic rename guarantee REDUCED"
+                );
+                None
+            }
+        };
+        match topology_group {
+            Some(topology_group) => {
+                match topology_learner::TopologyLearner::new(
+                    cfg.enforcement_mode,
+                    classifier,
+                    topology_group,
+                ) {
+                    Ok(learner) => {
+                        // LFH2 Step 3 pre-existing snapshot: learn every
+                        // pre-existing dynamic object's handle so a rename-out
+                        // is recognized without any event (deterministic).
+                        let snapshot = learner.classifier_snapshot_dynamic_handles();
+                        tracing::info!(
+                            learned = snapshot,
+                            "LFH2 Step 3: snapshot of pre-existing dynamic object handles"
+                        );
+                        match learner.mark_trees() {
+                            Ok(n) => {
+                                tracing::info!(
+                                    dirs = n,
+                                    "topology group marked for FAN_MOVE (LFH2 Step 3)"
+                                )
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, "topology tree marks incomplete; Step 3 guarantee REDUCED")
+                            }
+                        }
+                        std::thread::Builder::new()
+                            .name("guardd-topology-fid".into())
+                            .spawn(move || learner.run())
+                            .ok()
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            err = %error,
+                            "LFH2 Step 3 topology group unavailable; never-opened dynamic rename guarantee REDUCED"
+                        );
+                        None
+                    }
+                }
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
 
     // Spawn the IPC server thread (if a socket path was given).
     let ipc_handle = if let Some(sock) = cli.ipc_socket.clone() {
@@ -913,6 +1001,21 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
     drop(ipc_handle);
     let _ = topology_handle.join();
     Ok(())
+}
+
+/// True when `path` resides on the root mount (the whole machine is on one
+/// filesystem). Used to warn when strict mode would gate every open on the
+/// system.
+#[cfg(target_os = "linux")]
+fn fs_is_root_mount(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(path_dev) = std::fs::metadata(path).map(|m| m.dev()) else {
+        return false;
+    };
+    let Ok(root_dev) = std::fs::metadata("/").map(|m| m.dev()) else {
+        return false;
+    };
+    path_dev == root_dev
 }
 
 #[cfg(target_os = "linux")]

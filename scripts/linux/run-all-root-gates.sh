@@ -38,24 +38,31 @@ declare -a SCRIPTS=(
   "scripts/benchmark-strict-filesystem-root.sh"            # LFH0 benchmark
 )
 
+# Standardized exit codes (review finding 1):
+#   0 = PASS, 1 = FAIL, 2 = BLOCKED (a mandatory gate could not run).
+# A script whose exit code is 2 must NEVER be aggregated as PASS.
 PASS=0
 FAIL=0
+BLOCKED=0
 : > "$OUT/summary.txt"
 for s in "${SCRIPTS[@]}"; do
   name="$(basename "$s" .sh)"
   echo "=== [$name] $(date +%H:%M:%S) START ===" | tee -a "$OUT/summary.txt"
-  if SKIP_BUILD=1 SUDO_USER="${SUDO_USER:-}" bash "$REPO/$s" > "$OUT/$name.log" 2>&1; then
-    echo "=== [$name] PASS ===" | tee -a "$OUT/summary.txt"
-    PASS=$((PASS + 1))
-  else
-    rc=$?
-    echo "=== [$name] FAIL rc=$rc ===" | tee -a "$OUT/summary.txt"
-    FAIL=$((FAIL + 1))
-  fi
+  set +e
+  SKIP_BUILD=1 SUDO_USER="${SUDO_USER:-}" bash "$REPO/$s" > "$OUT/$name.log" 2>&1
+  rc=$?
+  set -e
+  case "$rc" in
+    0) echo "=== [$name] PASS ===" | tee -a "$OUT/summary.txt"; PASS=$((PASS + 1)) ;;
+    1) echo "=== [$name] FAIL rc=1 ===" | tee -a "$OUT/summary.txt"; FAIL=$((FAIL + 1)) ;;
+    2) echo "=== [$name] BLOCKED rc=2 (mandatory gate could not run) ===" | tee -a "$OUT/summary.txt"; BLOCKED=$((BLOCKED + 1)) ;;
+    *) echo "=== [$name] ABORT rc=$rc ===" | tee -a "$OUT/summary.txt"; FAIL=$((FAIL + 1)) ;;
+  esac
   tail -3 "$OUT/$name.log" >> "$OUT/summary.txt"
 done
 
 echo
-echo "=== LIVE HOST GATE SUMMARY: PASS=$PASS FAIL=$FAIL ===" | tee -a "$OUT/summary.txt"
+echo "=== LIVE HOST GATE SUMMARY: PASS=$PASS FAIL=$FAIL BLOCKED=$BLOCKED ===" | tee -a "$OUT/summary.txt"
+echo "    (a mandatory BLOCKED gate prevents GOAL COMPLETE)"
 echo "evidence dir: $OUT"
-exit $FAIL
+if [ "$FAIL" -gt 0 ]; then exit 1; elif [ "$BLOCKED" -gt 0 ]; then exit 2; else exit 0; fi

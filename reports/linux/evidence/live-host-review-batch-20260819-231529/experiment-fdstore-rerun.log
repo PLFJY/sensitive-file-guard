@@ -1,0 +1,29 @@
+==> First start: store a new group + fdstore upload
+    active; MainPID=80521
+==> Probe 1: unknown process opens protected file (blocked while alive)
+PASS: probe denied while listener alive
+==> SIGKILL the helper
+==> Probe 2: is the opener STILL blocked right after SIGKILL?
+PASS: probe still blocked 0.5s after SIGKILL (fdstore holds the group)
+==> systemd restarts the unit; helper claims the stored group
+    restarted; MainPID=80559
+==> Probe 2 outcome: did the opener unblock with a DENY?
+PASS: probe unblocked with denial after restart (rc=1)
+==> Probe 3: fresh open is denied by the restarted (claimed) group
+PASS: probe denied by restarted group (marks survived)
+
+==> Experiment B: read-then-crash-before-response
+==> B: wait for the marker proving the daemon READ the exact event
+PASS: B: daemon read the exact permission event (marker pid=80633)
+==> B: systemd restarts the unit; helper claims the stored group
+    B: restarted; MainPID=80674
+==> B: record the opener's EXACT outcome (never inferred from a missing rc)
+PASS: B: opener STILL BLOCKED after restart (pending permission not recoverable via public UAPI)
+PASS: B: synthetic canary never read
+/home/plfjy/sensitive-file-guard/scripts/linux/experiment-fdstore-root.sh: line 248: 80631 Killed                     ( set +e; "$PROBE" read "$PROTECTED" > "$WORK/probeB.out" 2>&1; echo $? > "$WORK/probeB.rc" )
+
+==> LFH4 fdstore experiment summary: PASS=7 FAIL=0 BLOCKED=0
+
+VERDICT: PARTIAL (A proven: fdstore preserves the group and queued events;
+         B not recoverable via public UAPI: the read-but-unanswered
+         permission stays pending after restart → crash continuity REDUCED)

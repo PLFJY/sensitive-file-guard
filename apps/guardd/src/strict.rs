@@ -19,6 +19,16 @@ use platform_linux::fanotify;
 
 use crate::enforce::{EnforcementConfig, EnforcementMode, InodeIndex};
 
+// Test-only fault injection: force the next learned-candidate handle
+// verification in THIS test thread to fail, proving the classification fails
+// closed instead of silently degrading to Unrelated (LFH5 review finding 4).
+// Thread-local so parallel tests never observe each other's injection.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static INJECT_HANDLE_VERIFY_FAILURE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
 pub struct BackendMetrics {
     pub mode: EnforcementMode,
     pub marked_filesystems: AtomicUsize,
@@ -34,6 +44,11 @@ pub struct BackendMetrics {
     /// LFH1: events on a pidfd-enabled group that arrived without a usable
     /// pidfd. On accepted kernels this is unexpected and fails closed.
     pub pidfd_missing_events: AtomicU64,
+    /// LFH5 review: the learned dynamic-object handle index reached its
+    /// bounded capacity. Fail-closed: existing learned identities are NEVER
+    /// evicted (an evicted protected identity must not silently become
+    /// Unrelated), new candidates are not learned, and the posture degrades.
+    pub handle_index_exhausted: std::sync::atomic::AtomicBool,
 }
 
 impl BackendMetrics {
@@ -50,6 +65,7 @@ impl BackendMetrics {
             strict_alias_matches: AtomicU64::new(0),
             pidfd_enabled: std::sync::atomic::AtomicBool::new(false),
             pidfd_missing_events: AtomicU64::new(0),
+            handle_index_exhausted: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -69,6 +85,7 @@ impl BackendMetrics {
             strict_alias_matches: self.strict_alias_matches.load(Ordering::Relaxed),
             pidfd_enabled: self.pidfd_enabled.load(Ordering::Relaxed),
             pidfd_missing_events: self.pidfd_missing_events.load(Ordering::Relaxed),
+            handle_index_exhausted: self.handle_index_exhausted.load(Ordering::Relaxed),
         }
     }
 }
@@ -84,6 +101,7 @@ pub struct BackendSnapshot {
     pub strict_alias_matches: u64,
     pub pidfd_enabled: bool,
     pub pidfd_missing_events: u64,
+    pub handle_index_exhausted: bool,
 }
 
 #[derive(Debug)]
@@ -128,6 +146,15 @@ pub struct StrictClassifier {
     /// Bounds the handle index so a pathological re-creation storm cannot grow
     /// it without limit.
     handle_index_capacity: usize,
+    /// LFH2 Step 3: NEVER-OPENED dynamic objects learned from the SEPARATE
+    /// FAN_CLASS_NOTIF|FAN_REPORT_FID topology group, keyed by the opaque
+    /// handle payload `(handle_type, handle_bytes)`. Unlike `handle_index`
+    /// (keyed by `(dev, ino)`), these objects were never resolved to an
+    /// inode — the topology event's fid IS their identity, so an open of the
+    /// same object anywhere is recognized purely by handle. Bounded with the
+    /// same fail-closed capacity semantics (never evict; degrade health).
+    topology_handles:
+        std::sync::RwLock<std::collections::HashMap<(i32, Vec<u8>), ProtectedResource>>,
     filesystem_paths: Vec<PathBuf>,
     metrics: std::sync::Arc<BackendMetrics>,
 }
@@ -189,6 +216,7 @@ impl StrictClassifier {
             ssh,
             inode_index,
             handle_index: std::sync::RwLock::new(std::collections::HashMap::new()),
+            topology_handles: std::sync::RwLock::new(std::collections::HashMap::new()),
             handle_index_capacity: 8192,
             filesystem_paths,
             metrics,
@@ -240,6 +268,12 @@ impl StrictClassifier {
         // profile). If this `(dev, ino)` matches learned dynamic objects,
         // compare the event fd's handle against them: equal handle => same
         // object => Protected; different handle => inode reuse => Unrelated.
+        //
+        // LFH2 Step 3: topology-learned NEVER-OPENED objects are matched by
+        // handle alone (the index is keyed by handle payload, so the event
+        // fd's handle is the identity). Checked first so a Step-3 object is
+        // recognized even when its inode was never indexed. The per-open
+        // handle computation only runs while the topology set is non-empty.
         if self
             .inode_index
             .read()
@@ -247,6 +281,29 @@ impl StrictClassifier {
             .get(&identity)
             .is_none()
         {
+            if self.topology_handles_nonempty() {
+                match platform_linux::object_handle::ObjectHandle::from_fd(fd) {
+                    Ok(event_handle) => {
+                        if let Some(resource) = self.match_topology_handle(&event_handle) {
+                            return StrictClassification::Protected(resource);
+                        }
+                        // No match: the object is not a topology-learned one.
+                        // (Deliberately silent — this runs on every non-classifying
+                        // open while the topology set is non-empty; logging here
+                        // would flood the journal on a busy system.)
+                    }
+                    Err(error) => {
+                        // Fail closed: an unverifiable handle while Step-3
+                        // objects are tracked must not silently allow.
+                        self.metrics
+                            .classifier_failures
+                            .fetch_add(1, Ordering::Relaxed);
+                        return StrictClassification::Error(format!(
+                            "topology handle verification failed: {error}"
+                        ));
+                    }
+                }
+            }
             if let Some(protected) = self.match_learned_handles(fd, identity) {
                 return protected;
             }
@@ -305,6 +362,13 @@ impl StrictClassifier {
     /// LFH2: learn the opaque handle of a dynamic protected object seen under
     /// its protected path. The `(dev, ino)` key maps to a small candidate list
     /// (a browser may recreate a resource over time); the index is bounded.
+    ///
+    /// LFH5 review (capacity): when the index is full, EXISTING learned
+    /// identities are never evicted — an evicted protected identity must not
+    /// silently become Unrelated because a cache reached capacity. Instead we
+    /// fail closed: stop learning new candidates and raise the
+    /// `handle_index_exhausted` health flag (posture degrades, operator
+    /// knows coverage of *new* dynamic objects is reduced).
     fn learn_handle(&self, fd: RawFd, identity: (u64, u64), resource: ProtectedResource) {
         let handle = match platform_linux::object_handle::ObjectHandle::from_fd(fd) {
             Ok(handle) => handle,
@@ -324,10 +388,18 @@ impl StrictClassifier {
             .write()
             .expect("handle index lock poisoned");
         if index.len() >= self.handle_index_capacity {
-            // Bounded: drop the oldest key rather than growing without limit.
-            if let Some(oldest) = index.keys().next().copied() {
-                index.remove(&oldest);
-            }
+            // Fail closed: never evict a learned protected identity. Flag the
+            // exhausted state so health reports the reduced coverage instead
+            // of silently forgetting objects.
+            self.metrics
+                .handle_index_exhausted
+                .store(true, Ordering::Relaxed);
+            tracing::warn!(
+                path = %resource.path.display(),
+                capacity = self.handle_index_capacity,
+                "dynamic object handle index full; refusing to learn new candidate (fail closed, health degraded)"
+            );
+            return;
         }
         let entry = index.entry(identity).or_default();
         if !entry.iter().any(|candidate| candidate.handle == handle) {
@@ -335,10 +407,198 @@ impl StrictClassifier {
         }
     }
 
+    /// LFH2 Step 3: learn a NEVER-OPENED dynamic object's handle from the
+    /// SEPARATE `FAN_CLASS_NOTIF | FAN_REPORT_FID` topology group — the event's
+    /// fid IS the object's identity (no inode resolution needed, so this never
+    /// depends on `open_by_handle_at`). Keyed by `(handle_type, handle_bytes)`
+    /// (opaque payload); an open of the same object anywhere is recognized
+    /// purely by handle, which also makes inode reuse a non-issue (a reused
+    /// inode has a different handle and does not match). Bounded, fail-closed
+    /// capacity: existing entries are never evicted and a full index degrades
+    /// health instead of forgetting a protected identity.
+    pub fn learn_topology_handle(
+        &self,
+        handle_type: i32,
+        handle_bytes: Vec<u8>,
+        resource: ProtectedResource,
+    ) {
+        let mut index = self
+            .topology_handles
+            .write()
+            .expect("topology handle index lock poisoned");
+        if index.len() >= self.handle_index_capacity {
+            self.metrics
+                .handle_index_exhausted
+                .store(true, Ordering::Relaxed);
+            tracing::warn!(
+                capacity = self.handle_index_capacity,
+                "topology handle index full; learn refused (fail closed, health degraded)"
+            );
+            return;
+        }
+        index.entry((handle_type, handle_bytes)).or_insert(resource);
+    }
+
+    /// True when any topology-learned handle exists (fast-path guard: the
+    /// per-open handle computation only runs when this set is non-empty).
+    pub fn topology_handles_nonempty(&self) -> bool {
+        !self
+            .topology_handles
+            .read()
+            .expect("topology handle index lock poisoned")
+            .is_empty()
+    }
+
+    /// Look up a topology-learned object by the event fd's handle.
+    pub fn match_topology_handle(
+        &self,
+        handle: &platform_linux::object_handle::ObjectHandle,
+    ) -> Option<ProtectedResource> {
+        self.topology_handles
+            .read()
+            .expect("topology handle index lock poisoned")
+            .get(&(handle.handle_type, handle.handle_bytes.clone()))
+            .cloned()
+    }
+
+    /// The profile roots the LFH2 Step 3 topology group marks recursively for
+    /// `FAN_MOVE` events (strict mode only; conservative stays REDUCED for the
+    /// never-opened dynamic-object story).
+    pub fn topology_roots(&self) -> Vec<std::path::PathBuf> {
+        self.browsers.iter().map(|b| b.root.clone()).collect()
+    }
+
+    /// LFH2 Step 3 (pre-existing objects): snapshot every PRE-EXISTING
+    /// dynamic file under each browser root into the learned-handle index.
+    ///
+    /// A never-opened dynamic object renamed OUT of a protected tree is only
+    /// recognized if its `(dev, ino) -> handle` is already learned. Populating
+    /// the index at startup (via O_PATH opens + `name_to_handle_at`, neither of
+    /// which is gated by the permission marks) gives those objects their
+    /// identity WITHOUT needing any fanotify topology event or
+    /// `open_by_handle_at`. This is what makes the Step 3 acceptance
+    /// ("pre-existing / never-seen object renamed outside before any
+    /// protected-path open → unknown reader → PREVENTED") deterministic.
+    ///
+    /// Only files under dynamic trees are snapshot (the stable concrete files
+    /// are already pinned by inode). Bounded, fail-closed capacity shared with
+    /// `learn_handle`. Returns the number of objects learned.
+    pub fn snapshot_dynamic_handles(&self) -> usize {
+        let mut learned = 0usize;
+        for namespace in &self.browsers {
+            let mut stack = vec![namespace.root.clone()];
+            while let Some(dir) = stack.pop() {
+                let entries = match std::fs::read_dir(&dir) {
+                    Ok(entries) => entries,
+                    Err(_) => continue,
+                };
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let Ok(ft) = entry.file_type() else {
+                        continue;
+                    };
+                    if ft.is_dir() {
+                        stack.push(path);
+                        continue;
+                    }
+                    if !ft.is_file() || self.identity_index_is_stable(&path) {
+                        continue;
+                    }
+                    let c_path = match std::ffi::CString::new(path.to_string_lossy().as_bytes()) {
+                        Ok(c) => c,
+                        Err(_) => continue,
+                    };
+                    // SAFETY: O_PATH open of our own enrolled tree; not gated
+                    // by the permission marks (O_PATH opens never fire
+                    // FAN_OPEN_PERM). c_path outlives the call.
+                    let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+                    if fd < 0 {
+                        continue;
+                    }
+                    let handle = platform_linux::object_handle::ObjectHandle::from_fd(fd);
+                    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+                    let stat_ok = unsafe { libc::fstat(fd, &mut st) } == 0;
+                    unsafe { libc::close(fd) };
+                    if let (Ok(handle), true) = (handle, stat_ok) {
+                        let identity = (st.st_dev, st.st_ino);
+                        let resource = self
+                            .classify_path(&path)
+                            .unwrap_or_else(|| self.fallback_dynamic_resource());
+                        if self.learn_handle_value(identity, handle, resource) {
+                            learned += 1;
+                        }
+                    }
+                }
+            }
+        }
+        learned
+    }
+
+    /// Insert a `(dev, ino) -> handle` candidate with the shared bounded,
+    /// fail-closed capacity rules. Returns true when the candidate was added.
+    fn learn_handle_value(
+        &self,
+        identity: (u64, u64),
+        handle: platform_linux::object_handle::ObjectHandle,
+        resource: ProtectedResource,
+    ) -> bool {
+        let mut index = self
+            .handle_index
+            .write()
+            .expect("handle index lock poisoned");
+        if index.len() >= self.handle_index_capacity {
+            self.metrics
+                .handle_index_exhausted
+                .store(true, Ordering::Relaxed);
+            tracing::warn!(
+                ?identity,
+                capacity = self.handle_index_capacity,
+                "dynamic object handle index full; learn refused (fail closed, health degraded)"
+            );
+            return false;
+        }
+        let entry = index.entry(identity).or_default();
+        if !entry.iter().any(|candidate| candidate.handle == handle) {
+            entry.push(HandleCandidate { handle, resource });
+            true
+        } else {
+            false
+        }
+    }
+
+    /// A conservative fallback resource for topology-learned dynamic objects.
+    /// The topology event does not identify WHICH protected tree fired, so the
+    /// learned candidate is attributed to the first browser with a dynamic
+    /// (web-storage) kind. For single-browser configurations (the acceptance
+    /// and typical deployments) this is exact; multi-browser misattribution is
+    /// conservative (an unknown reader is denied regardless of kind, and a
+    /// cross-browser reader would need a lease that no topology event grants).
+    pub fn fallback_dynamic_resource(&self) -> ProtectedResource {
+        let browser = self
+            .browsers
+            .first()
+            .map(|b| (b.browser.clone(), b.owner_uid))
+            .unwrap_or_else(|| (BrowserId("(none)".into()), 0));
+        ProtectedResource {
+            id: ProtectedResourceId("topology-learned-dynamic".into()),
+            kind: ProtectedResourceKind::WebStorage,
+            owner_uid: browser.1,
+            browser: Some(browser.0),
+            profile: Some(ProfileId("(dynamic)".into())),
+            path: std::path::PathBuf::from("<topology-learned>"),
+        }
+    }
+
     /// LFH2: compare the event fd's handle against learned candidates for this
     /// `(dev, ino)`. Returns `Some(Protected)` on an exact handle match, or
     /// `Some(Unrelated)` when the inode was reused (handles differ), and `None`
     /// when this inode was never learned (fast path continues).
+    ///
+    /// LFH5 review (fail-closed verification): if `(dev, ino)` hits learned
+    /// protected candidates but the event fd's handle CANNOT be computed, we
+    /// must NOT silently fall through to Unrelated — the object may be the
+    /// learned protected one. That case is classified as `Error` (fail closed:
+    /// classifier failure counter + health degradation + DENY upstream).
     ///
     /// A stale candidate whose handle no longer matches is dropped so a
     /// recycled inode cannot false-positive on the stale mapping. One inode
@@ -356,7 +616,31 @@ impl StrictClassifier {
                 .expect("handle index lock poisoned");
             index.get(&identity).cloned()
         }?;
-        let event_handle = platform_linux::object_handle::ObjectHandle::from_fd(fd).ok()?;
+        let event_handle = match platform_linux::object_handle::ObjectHandle::from_fd(fd) {
+            Ok(handle) => handle,
+            Err(error) => {
+                self.metrics
+                    .classifier_failures
+                    .fetch_add(1, Ordering::Relaxed);
+                tracing::error!(
+                    %error,
+                    ?identity,
+                    "learned protected candidate handle verification failed; denying (fail closed)"
+                );
+                return Some(StrictClassification::Error(format!(
+                    "learned protected handle verification failed: {error}"
+                )));
+            }
+        };
+        #[cfg(test)]
+        if INJECT_HANDLE_VERIFY_FAILURE.with(|flag| flag.replace(false)) {
+            self.metrics
+                .classifier_failures
+                .fetch_add(1, Ordering::Relaxed);
+            return Some(StrictClassification::Error(
+                "injected handle verification failure".into(),
+            ));
+        }
         if let Some(candidate) = candidates
             .into_iter()
             .find(|candidate| candidate.handle == event_handle)
@@ -929,5 +1213,178 @@ mod tests {
                 Some(handle)
             );
         }
+    }
+
+    #[test]
+    fn topology_learned_never_opened_object_is_protected_after_rename_out() {
+        // LFH2 Step 3: an object that was NEVER classified/opened under its
+        // protected path is learned via the SEPARATE topology group
+        // (`learn_topology_handle`, driven by FAN_MOVE+FID events: the fid's
+        // handle IS the identity — no inode resolution). After the object is
+        // renamed outside the tree, an open of the same object must classify
+        // Protected (unknown reader => denied) — the Step 3 acceptance.
+        let temp = fs_tempdir();
+        let root = temp.path().join("chromium");
+        let dynamic = root.join("Default/Local Storage/leveldb/000001.log");
+        std::fs::create_dir_all(dynamic.parent().unwrap()).unwrap();
+        std::fs::write(&dynamic, b"synthetic session").unwrap();
+
+        let (classifier, _) = new_classifier(&root);
+        // Learn the object's handle as the topology group would (the strict
+        // classifier has never classified this object in-tree).
+        let probe = std::fs::File::open(&dynamic).unwrap();
+        let handle =
+            platform_linux::object_handle::ObjectHandle::from_fd(probe.as_raw_fd()).unwrap();
+        drop(probe);
+        let resource = classifier.fallback_dynamic_resource();
+        classifier.learn_topology_handle(handle.handle_type, handle.handle_bytes.clone(), resource);
+
+        // Rename outside before any protected-path open (the Step 3 case).
+        let moved = temp.path().join("exfil-000001.log");
+        std::fs::rename(&dynamic, &moved).unwrap();
+        let moved_file = std::fs::File::open(&moved).unwrap();
+        assert!(
+            matches!(
+                classifier.classify_fd(moved_file.as_raw_fd()),
+                StrictClassification::Protected(_)
+            ),
+            "topology-learned never-opened object must stay Protected after rename-out"
+        );
+    }
+
+    #[test]
+    fn handle_verify_failure_on_learned_candidate_fails_closed() {
+        // LFH5 review (finding 4): (dev,ino) hits learned protected
+        // candidates but the event fd's handle verification fails. This must
+        // NOT silently fall through to Unrelated: classification is Error
+        // (fail closed), the classifier_failures counter increments (health
+        // degrades), and the learned candidate is retained for the next
+        // healthy check.
+        let temp = fs_tempdir();
+        let root = temp.path().join("chromium");
+        let dynamic = root.join("Default/Local Storage/leveldb/000001.log");
+        std::fs::create_dir_all(dynamic.parent().unwrap()).unwrap();
+        std::fs::write(&dynamic, b"synthetic session").unwrap();
+
+        let (classifier, _) = new_classifier(&root);
+        let file = std::fs::File::open(&dynamic).unwrap();
+        assert!(matches!(
+            classifier.classify_fd(file.as_raw_fd()),
+            StrictClassification::Protected(_)
+        ));
+        let identity = fanotify::fd_identity(file.as_raw_fd()).unwrap();
+        drop(file);
+
+        // Rename the object outside the protected tree so classification must
+        // fall back to the learned-handle path.
+        let moved = temp.path().join("exfil-000001.log");
+        std::fs::rename(&dynamic, &moved).unwrap();
+        let moved_file = std::fs::File::open(&moved).unwrap();
+
+        // Healthy verification: exact handle match => Protected.
+        assert!(matches!(
+            classifier.classify_fd(moved_file.as_raw_fd()),
+            StrictClassification::Protected(_)
+        ));
+
+        // Injected verification failure: fail closed, never Unrelated.
+        INJECT_HANDLE_VERIFY_FAILURE.with(|flag| flag.set(true));
+        let failures_before = classifier
+            .metrics
+            .classifier_failures
+            .load(Ordering::Relaxed);
+        assert!(matches!(
+            classifier.classify_fd(moved_file.as_raw_fd()),
+            StrictClassification::Error(_)
+        ));
+        assert_eq!(
+            classifier
+                .metrics
+                .classifier_failures
+                .load(Ordering::Relaxed),
+            failures_before + 1
+        );
+        // The learned candidate must survive the failure (no silent drop).
+        assert!(classifier
+            .handle_index
+            .read()
+            .unwrap()
+            .contains_key(&identity));
+
+        // Next healthy verification still matches (the failure was isolated).
+        assert!(matches!(
+            classifier.classify_fd(moved_file.as_raw_fd()),
+            StrictClassification::Protected(_)
+        ));
+    }
+
+    #[test]
+    fn handle_index_capacity_pressure_never_evicts_learned_target() {
+        // LFH5 review (finding 5): the dynamic-object handle index is bounded;
+        // when it reaches capacity, EXISTING learned protected identities are
+        // NEVER evicted (keys().next() removal would silently forget a
+        // protected identity). New candidates are refused and the exhausted
+        // health flag is raised. The renamed-out target must stay readable-
+        // denied after >capacity pressure.
+        let temp = fs_tempdir();
+        let root = temp.path().join("chromium");
+        let leveldb = root.join("Default/Local Storage/leveldb");
+        std::fs::create_dir_all(&leveldb).unwrap();
+        let dynamic = leveldb.join("000001.log");
+        std::fs::write(&dynamic, b"synthetic session").unwrap();
+
+        let (classifier, _) = new_classifier(&root);
+        let capacity = classifier.handle_index_capacity;
+        assert!(capacity > 0);
+
+        // Learn the target under its protected path.
+        let target = std::fs::File::open(&dynamic).unwrap();
+        assert!(matches!(
+            classifier.classify_fd(target.as_raw_fd()),
+            StrictClassification::Protected(_)
+        ));
+        let target_identity = fanotify::fd_identity(target.as_raw_fd()).unwrap();
+        let target_handle =
+            platform_linux::object_handle::ObjectHandle::from_fd(target.as_raw_fd()).unwrap();
+        drop(target);
+
+        // Rename the target outside the protected tree (the exfiltration the
+        // learned-handle guarantee must keep denying).
+        let moved = temp.path().join("exfil-000001.log");
+        std::fs::rename(&dynamic, &moved).unwrap();
+
+        // Generate >capacity distinct dynamic protected candidates.
+        for i in 0..(capacity + 8) {
+            let p = leveldb.join(format!("{i:06}.log"));
+            std::fs::write(&p, b"synthetic pressure").unwrap();
+            let f = std::fs::File::open(&p).unwrap();
+            let _ = classifier.classify_fd(f.as_raw_fd());
+        }
+
+        // Fail closed: index stays bounded, exhausted flag raised, and the
+        // learned target is never evicted.
+        assert!(classifier
+            .metrics
+            .handle_index_exhausted
+            .load(Ordering::Relaxed));
+        {
+            let index = classifier.handle_index.read().unwrap();
+            assert_eq!(index.len(), capacity, "index must stay bounded");
+            let candidates = index
+                .get(&target_identity)
+                .expect("learned target must not be evicted by pressure");
+            assert!(
+                candidates.iter().any(|c| c.handle == target_handle),
+                "target handle must survive eviction pressure"
+            );
+        }
+
+        // The renamed-out target's open still classifies Protected (never a
+        // silent Unrelated caused by capacity).
+        let moved_file = std::fs::File::open(&moved).unwrap();
+        assert!(matches!(
+            classifier.classify_fd(moved_file.as_raw_fd()),
+            StrictClassification::Protected(_)
+        ));
     }
 }

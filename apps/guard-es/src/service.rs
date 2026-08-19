@@ -271,6 +271,7 @@ impl ControlHandler {
             protected_events: stats.protected_events,
             fanotify_overflows: None,
             classifier_failures: Some(stats.classifier_failures),
+            handle_index_full: None,
             strict_alias_scans: None,
             strict_alias_matches: None,
             topology_degraded: None,

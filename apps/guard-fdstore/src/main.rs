@@ -26,6 +26,10 @@ use std::os::unix::io::RawFd;
 
 use clap::Parser;
 
+/// LFH4 Experiment B test hook: fires at most once per process when
+/// CRASH_AFTER_READ_BEFORE_RESPONSE is set.
+static HOOK_FIRED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 #[derive(Parser, Debug)]
 #[command(
     name = "guard-fdstore",
@@ -196,6 +200,32 @@ fn event_loop(group: RawFd, tag: &str) -> anyhow::Result<()> {
             }
             let is_overflow = (meta.mask & FAN_Q_OVERFLOW) != 0;
             if meta.fd != FAN_NOFD && !is_overflow {
+                // LFH4 Experiment B: deterministic crash hook. When
+                // CRASH_AFTER_READ_BEFORE_RESPONSE is set, the helper writes a
+                // marker file (containing the event's pid) and SIGKILLs itself
+                // AFTER reading the permission event but BEFORE writing the
+                // response. The fdstore experiment then restarts the helper
+                // with the stored group and records the opener's exact
+                // outcome. Inert unless the env var is set (never in
+                // production).
+                if std::env::var_os("CRASH_AFTER_READ_BEFORE_RESPONSE").is_some()
+                    && !HOOK_FIRED.load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    HOOK_FIRED.store(true, std::sync::atomic::Ordering::SeqCst);
+                    if let Some(marker) = std::env::var_os("CRASH_AFTER_READ_MARKER") {
+                        let _ =
+                            std::fs::write(std::path::Path::new(&marker), format!("{}", meta.pid));
+                    }
+                    eprintln!(
+                        "[{tag}] LFH4 test hook: crash after read, before response (pid={})",
+                        meta.pid
+                    );
+                    // SAFETY: SIGKILL is terminal; the stored group fd (if any)
+                    // survives in the systemd fdstore while the process is gone.
+                    unsafe {
+                        libc::kill(std::process::id() as i32, libc::SIGKILL);
+                    }
+                }
                 let resp = libc::fanotify_response {
                     fd: meta.fd,
                     // FAN_DENY (0x02 since the modern UAPI; 0 was the legacy

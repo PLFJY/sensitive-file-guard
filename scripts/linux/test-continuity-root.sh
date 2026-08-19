@@ -20,9 +20,11 @@ PROBE="$REPO/target/release/guard-test-probe"
 PASS=0
 FAIL=0
 BLOCKED=0
+MANDATORY_BLOCKED=0
 note_pass() { echo "PASS: $1"; PASS=$((PASS + 1)); }
 note_fail() { echo "FAIL: $1"; FAIL=$((FAIL + 1)); }
 note_blocked() { echo "BLOCKED: $1"; BLOCKED=$((BLOCKED + 1)); }
+note_mandatory_blocked() { echo "BLOCKED(mandatory): $1"; MANDATORY_BLOCKED=$((MANDATORY_BLOCKED + 1)); }
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "ERROR: run as root (fanotify FAN_CLASS_CONTENT requires CAP_SYS_ADMIN)"
@@ -117,7 +119,7 @@ echo "    before=$BEFORE after=$AFTER"
 if echo "$AFTER" | grep -q '^LOST|fanotify_queue_overflow'; then
   note_pass "overflow observed => continuity LOST (fanotify_queue_overflow)"
 elif echo "$AFTER" | grep -q '^INTACT'; then
-  note_blocked "no deterministic kernel overflow; state-machine semantics covered by unit tests"
+  note_mandatory_blocked "no deterministic live kernel overflow generator; state-machine semantics covered by unit tests"
 else
   note_fail "unexpected continuity after stress: $AFTER"
 fi
@@ -130,7 +132,7 @@ echo "==> 4. mark loss => continuity LOST"
 if echo "$AFTER" | grep -q '^LOST'; then
   note_pass "continuity stays LOST after mark-loss check (sticky)"
 else
-  note_blocked "mark-loss live simulation requires unmountable test FS; unit-tested"
+  note_mandatory_blocked "mark-loss live simulation requires an unmountable test FS; unit-tested only"
 fi
 
 kill -TERM "$DAEMON_PID" 2>/dev/null || true
@@ -148,6 +150,6 @@ else
 fi
 
 echo
-echo "==> LFH3 continuity root summary: PASS=$PASS FAIL=$FAIL BLOCKED=$BLOCKED"
+echo "==> LFH3 continuity root summary: PASS=$PASS FAIL=$FAIL BLOCKED=$BLOCKED MANDATORY_BLOCKED=$MANDATORY_BLOCKED"
 echo "    (see $WORK/guardd.log for daemon decision log)"
-exit $FAIL
+if [ "$FAIL" -gt 0 ]; then exit 1; elif [ "$MANDATORY_BLOCKED" -gt 0 ]; then exit 2; else exit 0; fi

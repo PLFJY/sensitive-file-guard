@@ -1,72 +1,65 @@
 # Linux Harness State
 
 ## Goal
-`LINUX_FILE_SHIELD_FREEZE` — LFH0 → LFH7, then freeze Linux File Shield.
+`LINUX_FILE_SHIELD_FREEZE` — LFH0 → LFH7, then freeze Linux File Shield. **Freeze requires all
+12 external-security-review findings (F1–F12) closed, and no mandatory live gate BLOCKED counted
+as PASS (HARNESS §8).**
 
 ## Baseline
-- HEAD: 84a1bd133c78c41911d82dac5ffd1989a7722f5b
+- HEAD: 3cdf844 (freeze commit) — **rejected by external review; freeze NOT restored**
 - kernel: 7.1.8-arch1-3 (x86_64, Arch Linux), fs: / ext4
 - installed browsers: firefox only (chromium/google-chrome/zen NOT installed)
-- privileged environment: `sfg-test-capsule` (systemd-nspawn) — nspawn default seccomp blocks `fanotify_init`/`fanotify_mark` (EPERM even with CAP_SYS_ADMIN; verified by syscall probe + systemd v261 `nspawn-seccomp.c` whitelist)
+- privileged environment: `sfg-test-capsule` (systemd-nspawn) — nspawn default seccomp blocks `fanotify_init`/`fanotify_mark` (EPERM even with CAP_SYS_ADMIN; verified by syscall probe + systemd v261 `nspawn-seccomp.c` whitelist). Live fanotify gates run on the REAL HOST with the user present for polkit auth.
 
 ## Current phase
-`COMPLETE` — all LFH0→LFH7 gates PASS: 20/20 privileged live scripts green on the real host (`evidence/live-host-20260819-122244/`), quality gates clean. Freeze declared: `reports/linux/linux-file-shield-freeze-final.md`
+`REVIEW CLOSURE — LIVE RERUN DONE` — the external security review rejected the 3cdf844 freeze with
+12 findings. All findings are closed in code/reports/live evidence (F1–F12; F7 verdict PARTIAL,
+F9 REDUCED, F10 strict rerun PASS, F11 Firefox-only acceptance). **IMPLEMENTATION FREEZE is NOT
+restored and GOAL is NOT COMPLETE**: mandatory live gates (kernel fanotify-queue overflow;
+mark-loss live simulation) are BLOCKED in this environment and per HARNESS §8 cannot be counted
+as PASS.
 
-## Completed gates
-- [x] LFH0 — all gates; `reports/linux/lfh0-baseline.md` + evidence written
-- [x] LFH1 A: FAN_REPORT_PIDFD group (`new_content_with_pidfd`) + info-record parser (walks by info_type, malformed → `MalformedInfoRecord` fail-closed, no fixed record order)
-- [x] LFH1 A: daemon prefers pidfd group; legacy fallback reports truthfully (pidfd_enabled=false → REDUCED(legacy_process_identity))
-- [x] LFH1 A: event pidfd validated against event pid (`pidfd_matches` via `/proc/self/fdinfo/<pidfd>` Pid:); mismatch/missing → Deny + `pidfd_failure_audit_record` BEFORE any confirmation enqueue
-- [x] LFH1 A: pidfd closed exactly once after decision (normal + fail-closed paths)
-- [x] LFH1 A: `pidfd_enabled` + `pidfd_missing_events` surfaced in StatusInfo.linux_health + guardctl status
-- [x] LFH1 B: `resolve()` now opens `/proc/<pid>/exe` once, `fstat`s the ACTUAL executed object for dev/ino/owner/mode; readlink kept only as display/registry clue
-- [x] LFH1 B: `EnrollmentStore::verify_fd` hashes the executed-object fd, tolerates `(deleted)` suffix, never re-opens the pathname
-- [x] LFH1 B tests: executed-image survives pathname replacement; survives unlink; new process at replaced path does not inherit enrollment
-- [x] LFH1 C: PID-reuse cache invalidation test (starttime mismatch forces fresh resolve, old identity never transfers)
-- [x] LFH1 root script: `scripts/linux/test-pidfd-root.sh` (deterministic; run as root on a fanotify-capable host)
-- [ ] LFH1 live pidfd acceptance — BLOCKED: nspawn seccomp blocks fanotify; pkexec now prohibited by policy
+## Completed gates (review closure)
+- [x] F1 exit codes 0/1/2: `run-all-root-gates.sh` + `rerun-review-batch.sh` aggregate separately; `test-continuity-root.sh`/`test-bypass-root.sh` exit 2 on mandatory BLOCKED (continuity verified rc=2)
+- [x] F2 real isolated test fs: `test-object-identity-root.sh` auto loop-backed ext4 / explicit TEST_FS_ROOT (root mount/tmpfs → exit 2); live 8/8 PASS
+- [x] F3 LFH2 Step 3: startup snapshot of pre-existing dynamic handles + topology learner (`topology_learner.rs`, FAN_MOVE MOVED_TO-only fids → `topology_handles`, fail-closed from_fd); live 8/8 PASS incl. snapshot log + renamed-in denied
+- [x] F4 handle-verify fail-closed: `match_learned_handles` from_fd failure → `StrictClassification::Error`; injection hook + unit test
+- [x] F5 handle_index capacity fail-closed: no eviction of learned targets, `handle_index_exhausted` + `handle_index_full` status; unit test 8192+ files
+- [x] F6 ObjectHandle alignment: `AlignedBuffer` repr(C,align(8)) + `read_unaligned`; unit tests
+- [x] F7 LFH4 Experiment B implemented: crash hook guardd+guard-fdstore; live marker + opener STILL BLOCKED after restart → NOT recoverable via public UAPI → **PARTIAL**, crash continuity REDUCED
+- [x] F8 fdstore experimental wording: production `guardd.service` `Type=simple`, fail-open documented, no integration claimed
+- [x] F9 LFH3 vocabulary: overflow DETECTED → continuity LOST + revoked; overall REDUCED; live overflow gate BLOCKED
+- [x] F10 topology-race strict-mode support: `ENFORCEMENT_MODE=strict-filesystem` rerun scheduled
+- [x] F11 Chromium wording: accepted browser set = **Firefox only**; Chromium-family NOT ACCEPTED (NOT INSTALLED ≠ FAIL, but NOT ACCEPTED either)
+- [x] F12 quality gates per change batch (fmt/clippy/test/diff --check); final live rerun pending
 
-## Completed gates (this session)
-- LFH0 baseline: config explicit mode, health split, overflow wording, capability inventory, benchmark, privileged suite (host, pre-capsule)
-- LFH1: FAN_REPORT_PIDFD group + info-record parsing, pidfd validation/close, actual-executed-image identity (fd), enrollment verify_fd, PID-reuse fail-closed — **LIVE PASS** (test-pidfd-root 5/5)
-- LFH2: opaque object handles (name_to_handle_at via O_PATH magic link), (dev,ino)->candidate index, rename-away recognition, inode-reuse rejection — **LIVE PASS** (test-object-identity-root); Step 3 gap NOT ACCEPTED
-- LFH3: sticky ProtectionContinuity, lose_continuity revokes all leases/bindings/cache, pending deny_all, overflow+mark-loss wiring, status reports historical LOST — **LIVE PASS** (test-continuity-root)
-- LFH4: guard-fdstore helper (store/claim fanotify group via fdstore), CRASH_AFTER_READ_BEFORE_RESPONSE test hook, experiment-fdstore-root.sh — **LIVE ACCEPTED** (fdstore preserved group; queued event answered after restart; marks enforce)
-- LFH5: EXACT READER INSTANCE authority (no whole-tree grants) + continuity-generation-bound leases; `stale_lease_generation`; both bind sites exact opener; runtime generation bump — **LIVE PASS** via ssh-broker (29/29, incl. ALLOW_BY_LEASE audit evidence) + ssh-load + browser/ssh enforcement scripts
-- LFH6: real Firefox disposable-profile compat (offline test PASS + live root script 8/8: probes denied, no unexpected DENY, continuity INTACT, 0 overflow/classifier); Chromium NOT INSTALLED → cross-family NOT ACCEPTED; benchmark PASS (perf gate)
-- LFH7: freeze review — checklist walked with live evidence; **IMPLEMENTATION FREEZE** declared; quality gates clean
-
-### Live-run fixes (real-host, previously-unexercised code)
-- `enforce.rs`/`ipc.rs`: SSH AllowByLease audited in release builds (accountability evidence).
-- `guard-fdstore`: fanotify_mark flags bug; cmsg ordering UB + unconnected sendmsg; legacy FAN_DENY=0 → `libc::FAN_DENY` (0x02).
-- Root scripts: IPC protocol 2→5; stale pre-LFH0 SSH assertions → fail-closed model; `enforcement_active` readiness; `setpriv` probe pids; fixtures pre-guardd; `/etc/guardd` mkdir; fdstore base unit + probe-2 timing.
+## Live evidence
+| Harness | Result | Evidence path | Notes |
+|---|---|---|---|
+| review batch 2 (final) | PASS=4 (fdstore-rerun, bypass, object-identity, topology-race strict), BLOCKED=1 (continuity) | evidence/live-host-review-batch-20260819-231529/ | fdstore experiment PASS=7 FAIL=0 `VERDICT: PARTIAL`; topology-race strict 10000/10000 denied; object-identity 8/8 incl. Step 3 |
+| review batch 1 | PASS=2 (bypass, object-identity), FAIL=1 (fdstore probe-2 attribution — script bug, fixed), BLOCKED=1 (continuity) | evidence/live-host-review-batch-20260819-222651/ | superseded by batch 2 |
+| pre-review full run | 20/20 PASS | evidence/live-host-20260819-122244/ | **STALE** — superseded by review requirements (fdstore ACCEPTED wording, Step 3 gap, exit codes) |
+| LFH0 host suite | all PASS | evidence/lfh0-privileged-suite.txt | historical host fanotify |
+| LFH0 benchmark | PASS, 0 overflow | evidence/lfh0-benchmark.txt | perf baseline |
 
 ## Open blockers
 | Severity | Item | Evidence | Next action |
 |---|---|---|---|
-| none | all mandatory File Shield live gates PASS on the real host (20/20) | evidence/live-host-20260819-122244/ | — |
-| INFO | Only Firefox installed; LFH6 cross-family needs a Chromium executable | command -v chromium/google-chrome empty | NOT INSTALLED (not FAIL); cross-family NOT ACCEPTED |
-| INFO | LFH2 never-opened-before rename-in gap | needs second FAN_CLASS_NOTIF+FID topology group | deferred by design; NOT ACCEPTED |
-
-## Privileged/live evidence
-| Harness | Result | Evidence path | Notes |
-|---|---|---|---|
-| FULL GATE RUN (20 scripts) | **ALL PASS (20/20)** | evidence/live-host-20260819-122244/ | real host, sudo; includes pidfd 5/5, fdstore ACCEPTED, ssh-broker 29/29, native-browser 8/8, benchmark |
-| LFH0 host suite (pre-capsule policy) | all PASS on host | evidence/lfh0-privileged-suite.txt | historical host fanotify |
-| LFH0 benchmark (host) | PASS, 0 overflow | evidence/lfh0-benchmark.txt | perf baseline |
+| MANDATORY BLOCKED | live kernel fanotify-queue-overflow gate — no deterministic generator | `test-continuity-root.sh` BLOCKED rc=2 (both batches) | per HARNESS §8 this prevents GOAL COMPLETE in this environment; script honest, state machine unit-covered |
+| MANDATORY BLOCKED | mark-loss live simulation requires unmountable test FS | script `note_mandatory_blocked` | documented; not producible here |
+| INFO | only Firefox installed | `command -v chromium/google-chrome` empty | Chromium-family NOT ACCEPTED (F11) |
 
 ## Security posture snapshot
-- File Shield: **ACTIVE (formal)** — strict-filesystem on the real host; all 20 live gates PASS
-- Continuity: overflow → LOST + full revoke + generation bump implemented and live-verified
-- Authority: EXACT READER INSTANCE (no whole-tree leases) + generation-bound leases; SSH loads audited (ALLOW_BY_LEASE)
-- Process Shield: UNSUPPORTED (inventory only)
-- Identity: pidfd validation + actual-executed-image (fd) live-verified
-- Overall: **ACTIVE on accepted strict-filesystem capability set; REDUCED with exact reason for legacy/unsupported**
-
-## Residual NOT ACCEPTED
-- LFH2 rename-in gap (deferred topology group; NOT ACCEPTED, not a blocker)
-- LFH6 cross-family browser acceptance (no Chromium executable; NOT INSTALLED = not FAIL)
-- Flatpak/Snap/network FS (no live acceptance; not claimed)
+- File Shield: **ACTIVE (strict-filesystem)** on the isolated loop test fs; daemon warns if fs-mark targets the root mount (root-mount marking caused the earlier system-wide lockup — tests now never mark /)
+- Continuity: overflow DETECTED → continuity LOST + full revoke + generation bump (code+unit + live revocation path); live overflow-generation gate BLOCKED → crash continuity REDUCED
+- Crash continuity: **REDUCED** — fdstore PARTIAL (Experiment B not recoverable via public UAPI); experimental only
+- Identity: pidfd validation + actual-executed-image (fd) live-verified; object identity incl. Step 3 rename-in closed (snapshot + topology) live 8/8
+- Accepted browsers: **Firefox only**; Chromium-family NOT ACCEPTED
+- Overall: **ACTIVE on accepted capability set; REDUCED with exact reason (crash continuity, legacy/unsupported); NOT ACCEPTED (Chromium-family, Flatpak/Snap/network FS); BLOCKED mandatory live gates prevent FREEZE/COMPLETE**
 
 ## Next exact action
-None — `LINUX_FILE_SHIELD_FREEZE` complete: all phases done, 20/20 live gates PASS, freeze declared in `reports/linux/linux-file-shield-freeze-final.md`.
+None pending on the code/report side: final live batch done (PASS=4 FAIL=0 BLOCKED=1; fdstore
+`VERDICT: PARTIAL`, topology-race strict 10000/10000 denied, object-identity 8/8 incl. Step 3).
+Freeze stays NOT RESTORED and GOAL stays NOT COMPLETE while the mandatory live
+overflow/mark-loss gates remain BLOCKED in this environment (HARNESS §8). Next: commit the
+review-closure work (all 12 findings closed).

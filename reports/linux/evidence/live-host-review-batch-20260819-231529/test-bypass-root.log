@@ -1,0 +1,46 @@
+==> Starting guardd enforcement
+guardd active (pid=79453)
+==> Test 1: renamed exe not trusted
+PASS: renamed exe reads cookies: denied
+==> Test 2: symlink bypass
+PASS: symlink reads cookies: denied
+==> Test 3: hardlink bypass
+PASS: hardlink reads cookies: denied
+==> Test 4: relative path traversal
+PASS: relative .. reads cookies: denied
+==> Test 5: rename after protection
+PASS: renamed protected cookie inode: denied
+PASS: cookie inode still denied after rename-back: denied
+==> Test 6: WAL/SHM sidecar
+PASS: WAL sidecar denied: denied
+PASS: SHM sidecar denied: denied
+==> Test 7: child process access
+PASS: child process denied
+==> Test 8: burst load (100 rapid opens)
+PASS: burst load: 100/100 opens denied
+PASS: guardd survived burst load
+==> Test 9: daemon restart
+guardd restarted (pid=79580)
+PASS: cookies denied after restart: denied
+PASS: SSH key read denied for unknown probe after restart
+==> Test 10: spaces + unicode path
+PASS: unicode path cookies denied: denied
+==> Test 11: mmap after denied open
+PASS: mmap after denied open: denied
+==> Test 12: open-before-mark race (documented limitation)
+BLOCKED: open-before-mark：fanotify 的已知限制（详见 docs/安全模型.md）
+==> Test 13: inherited fd (documented limitation)
+BLOCKED: inherited fd：fanotify 的已知限制（详见 docs/安全模型.md）
+==> Test 14: FAN_Q_OVERFLOW behavior
+PASS: FAN_Q_OVERFLOW handling exists (code path verified, no crash under burst)
+==> Test 15: latency benchmark
+    samples=50 avg=2.12ms p50=2.14ms p95=2.95ms
+PASS: latency benchmark measured
+==> Test 16: no secret contents in log
+PASS: no secret contents in daemon log
+==> Test 17: clean shutdown
+PASS: guardd exited on SIGTERM
+
+==> Phase 13 root bypass summary: PASS=18 FAIL=0 BLOCKED=2
+    （BLOCKED 项是 fanotify 已知限制，详见 docs/安全模型.md）
+    (see /tmp/guard-bypass-Qwlvri/guardd.log for daemon decision log)

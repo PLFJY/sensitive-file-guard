@@ -27,6 +27,33 @@ pub struct ObjectHandle {
     pub handle_bytes: Vec<u8>,
 }
 
+/// Max payload bytes for a `file_handle` (the kernel's `MAX_HANDLE_SZ`).
+const MAX_HANDLE_SZ: usize = 128;
+
+/// Buffer aligned for `libc::file_handle`. A plain `Vec<u8>` (alignment 1)
+/// must not be cast to `*mut libc::file_handle` (alignment >= 4) and
+/// dereferenced — that is UB. This repr(C, align(8)) wrapper guarantees the
+/// header lands on a valid alignment while keeping the flexible-array layout
+/// (header followed by payload bytes) intact.
+#[repr(C, align(8))]
+struct AlignedBuffer([u8; std::mem::size_of::<libc::file_handle>() + MAX_HANDLE_SZ]);
+
+impl AlignedBuffer {
+    fn zeroed() -> Self {
+        AlignedBuffer([0u8; std::mem::size_of::<libc::file_handle>() + MAX_HANDLE_SZ])
+    }
+
+    /// Pointer to the `libc::file_handle` header (8-aligned by construction).
+    fn handle_ptr(&mut self) -> *mut libc::file_handle {
+        self.0.as_mut_ptr() as *mut libc::file_handle
+    }
+
+    /// The payload slice following the header (`handle_bytes` bytes).
+    fn payload(&self, handle_bytes: usize) -> &[u8] {
+        &self.0[std::mem::size_of::<libc::file_handle>()..][..handle_bytes]
+    }
+}
+
 impl ObjectHandle {
     /// Capture the handle of the object behind `fd`.
     ///
@@ -62,13 +89,18 @@ impl ObjectHandle {
     }
 
     /// `name_to_handle_at(AT_EMPTY_PATH)` on an `O_PATH` fd.
+    ///
+    /// The kernel's documented two-call pattern: the first call may return
+    /// `EOVERFLOW` with the required size in `handle_bytes`; we retry with an
+    /// adequate buffer. Both calls use the same 8-aligned `AlignedBuffer`, so
+    /// the header dereference is never unaligned. A zero-length flexible
+    /// array is never used: the buffer always carries `sizeof(file_handle) +
+    /// MAX_HANDLE_SZ` bytes.
     fn from_path_fd(path_fd: RawFd) -> io::Result<Self> {
-        let header = std::mem::size_of::<libc::file_handle>();
-        let mut buf: Vec<u8> = vec![0; header + 128];
-        let handle_ptr = buf.as_mut_ptr() as *mut libc::file_handle;
-        // SAFETY: buf covers header + 128 payload bytes (MAX_HANDLE_SZ).
+        let mut buf = AlignedBuffer::zeroed();
+        // SAFETY: buf is 8-aligned and covers header + MAX_HANDLE_SZ payload.
         unsafe {
-            (*handle_ptr).handle_bytes = 128;
+            (*buf.handle_ptr()).handle_bytes = MAX_HANDLE_SZ as libc::c_uint;
         }
         let mut mount_id: libc::c_int = 0;
         // SAFETY: valid writable pointers; AT_EMPTY_PATH + empty name resolves
@@ -77,37 +109,32 @@ impl ObjectHandle {
             libc::name_to_handle_at(
                 path_fd,
                 c"".as_ptr(),
-                handle_ptr,
+                buf.handle_ptr(),
                 &mut mount_id,
                 libc::AT_EMPTY_PATH,
             )
         };
         if rc >= 0 {
-            // SAFETY: kernel returned success; header + payload are in bounds.
-            return Ok(Self::from_sized_buffer(&buf, mount_id));
+            return Ok(Self::from_sized_buffer(buf, mount_id));
         }
         let err = io::Error::last_os_error();
         if err.raw_os_error() != Some(libc::EOVERFLOW) {
             return Err(err);
         }
         // SAFETY: kernel reported the required size into the header.
-        let needed = unsafe { (*handle_ptr).handle_bytes } as usize;
-        if needed == 0 || needed > 128 {
+        let needed = unsafe { (*buf.handle_ptr()).handle_bytes } as usize;
+        if needed == 0 || needed > MAX_HANDLE_SZ {
             return Err(io::Error::from_raw_os_error(libc::EOVERFLOW));
         }
-        let total = header + needed;
-        let mut sized: Vec<u8> = vec![0; total];
-        let sized_ptr = sized.as_mut_ptr() as *mut libc::file_handle;
-        // SAFETY: `sized` covers header + `needed` payload bytes.
-        unsafe {
-            (*sized_ptr).handle_bytes = needed as libc::c_uint;
-        }
         // SAFETY: retry with an adequate buffer; kernel writes <= needed bytes.
+        unsafe {
+            (*buf.handle_ptr()).handle_bytes = needed as libc::c_uint;
+        }
         let rc2 = unsafe {
             libc::name_to_handle_at(
                 path_fd,
                 c"".as_ptr(),
-                sized_ptr,
+                buf.handle_ptr(),
                 &mut mount_id,
                 libc::AT_EMPTY_PATH,
             )
@@ -115,26 +142,22 @@ impl ObjectHandle {
         if rc2 < 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok(Self::from_sized_buffer(&sized, mount_id))
+        Ok(Self::from_sized_buffer(buf, mount_id))
     }
 
-    /// Build an `ObjectHandle` from a buffer holding a `libc::file_handle`
-    /// header followed by its payload (never a zero-length flexible array).
-    fn from_sized_buffer(buf: &[u8], mount_id: libc::c_int) -> Self {
-        // SAFETY: buf is sized for at least the header; read initialized fields.
-        let handle: libc::file_handle = unsafe { std::ptr::read(buf.as_ptr() as *const _) };
+    /// Build an `ObjectHandle` from an `AlignedBuffer` holding a
+    /// `libc::file_handle` header followed by its payload.
+    fn from_sized_buffer(buf: AlignedBuffer, mount_id: libc::c_int) -> Self {
+        // SAFETY: buf is 8-aligned and sized for the header; read the fields
+        // with read_unaligned anyway so a slice-based copy can never be UB.
+        let handle: libc::file_handle =
+            unsafe { std::ptr::read_unaligned(buf.0.as_ptr() as *const _) };
         let bytes = handle.handle_bytes as usize;
-        // SAFETY: buf.len() >= sizeof(file_handle) + bytes by construction.
-        let payload = unsafe {
-            std::slice::from_raw_parts(
-                buf.as_ptr().add(std::mem::size_of::<libc::file_handle>()),
-                bytes,
-            )
-        };
+        let payload = buf.payload(bytes).to_vec();
         Self {
             mount_id,
             handle_type: handle.handle_type,
-            handle_bytes: payload.to_vec(),
+            handle_bytes: payload,
         }
     }
 
@@ -231,5 +254,31 @@ mod tests {
     #[test]
     fn negative_fd_fails() {
         assert!(ObjectHandle::from_fd(-1).is_err());
+    }
+
+    #[test]
+    fn handle_buffer_is_aligned_for_file_handle() {
+        // The buffer is cast to `*mut libc::file_handle` and dereferenced;
+        // it must be aligned for that struct (align >= 4). A Vec<u8> would
+        // only guarantee alignment 1 — the exact UB this regression guards.
+        let mut buf = AlignedBuffer::zeroed();
+        let ptr = buf.handle_ptr();
+        assert_eq!(
+            ptr as usize % std::mem::align_of::<libc::file_handle>(),
+            0,
+            "file_handle header must be aligned"
+        );
+        assert_eq!(ptr as usize % 8, 0, "AlignedBuffer must be 8-aligned");
+        assert_eq!(
+            std::mem::align_of::<AlignedBuffer>(),
+            8,
+            "AlignedBuffer alignment is part of its contract"
+        );
+        // Payload follows the header without padding (flexible-array layout).
+        assert_eq!(
+            buf.payload(MAX_HANDLE_SZ).len(),
+            MAX_HANDLE_SZ,
+            "payload window must cover MAX_HANDLE_SZ bytes after the header"
+        );
     }
 }

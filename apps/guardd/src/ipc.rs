@@ -261,6 +261,10 @@ fn handle_status(state: &IpcState, creds: PeerCreds) -> Response {
         || engine.unclassified > 0
         || engine.topology_degraded
         || backend.classifier_failures > 0
+        // LFH5 review: a full dynamic-object handle index means new dynamic
+        // objects are no longer learned; that is a fail-closed degradation,
+        // not a silent loss of existing protections.
+        || backend.handle_index_exhausted
         || !filesystem_marks_healthy
     {
         "DEGRADED".to_owned()
@@ -284,6 +288,7 @@ fn handle_status(state: &IpcState, creds: PeerCreds) -> Response {
         protected_events: backend.protected_events,
         fanotify_overflows: Some(backend.fanotify_overflows),
         classifier_failures: Some(backend.classifier_failures),
+        handle_index_full: Some(backend.handle_index_exhausted),
         strict_alias_scans: Some(backend.strict_alias_scans),
         strict_alias_matches: Some(backend.strict_alias_matches),
         topology_degraded: Some(engine.topology_degraded),

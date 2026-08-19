@@ -1,0 +1,22 @@
+pre-flight: unmounting leftover /tmp/fdn-mnt
+=== [experiment-fdstore-root] 23:15:29 START ===
+=== [experiment-fdstore-root] FAIL rc=1 ===
+VERDICT: REJECTED (fail-open or no recovery observed)
+KEPT diagnostics at: /tmp/guard-fdstore-Cuonnz (rc=none)
+=== [test-continuity-root] 23:15:37 START ===
+=== [test-continuity-root] BLOCKED rc=2 ===
+==> LFH3 continuity root summary: PASS=3 FAIL=0 BLOCKED=0 MANDATORY_BLOCKED=2
+    (see /tmp/guard-continuity-l0A9t3/guardd.log for daemon decision log)
+=== [test-bypass-root] 23:15:40 START ===
+=== [test-bypass-root] PASS ===
+    （BLOCKED 项是 fanotify 已知限制，详见 docs/安全模型.md）
+    (see /tmp/guard-bypass-Qwlvri/guardd.log for daemon decision log)
+=== [test-object-identity-root] 23:16:41 START ===
+=== [test-object-identity-root] PASS ===
+==> LFH2 object-identity root summary: PASS=8 FAIL=0 BLOCKED=0
+    (see /tmp/guard-objectid-mnt-mifSk1/guardd.log for daemon decision log)
+=== [test-topology-race-stress-root] 23:16:46 START ===
+=== [test-topology-race-stress-root] PASS ===
+PASS: empirical topology-race measurement completed and final inode converged
+NOTE: strict PASS requires zero successful unauthorized reads.
+=== REVIEW BATCH SUMMARY: PASS=3 FAIL=1 BLOCKED=1 ===

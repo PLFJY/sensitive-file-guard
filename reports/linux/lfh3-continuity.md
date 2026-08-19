@@ -43,7 +43,7 @@ Separate "now healthy" from "no verifiable gap since start". A fanotify queue ov
 
 ## Adversarial findings
 1. Sticky semantics: without the engine-owned state, a status computed purely from current counters would "recover" to ACTIVE and erase the loss — the state machine fixes this.
-2. Overflow does not imply "all dropped events denied" — the kernel dropped them unseen; wording + state both say LOST.
+2. Overflow does not imply "all dropped events denied" — the kernel dropped them unseen; the daemon DETECTS it via `FAN_Q_OVERFLOW`, records continuity as LOST, and revokes all authority. Wording + state both say LOST.
 
 ## Compatibility findings
 - Clean `systemctl stop`/restart lifecycle is distinct from crash/overflow; LFH4 decides whether planned restart counts as loss.
@@ -55,16 +55,16 @@ Separate "now healthy" from "no verifiable gap since start". A fanotify queue ov
 
 | Claim | Verdict | Evidence |
 |---|---|---|
-| overflow => continuity LOST + all authority revoked | PREVENTED (code) + unit | lose_continuity + deny_all tests |
+| overflow DETECTED (FAN_Q_OVERFLOW) => continuity LOST + all authority revoked | PREVENTED (code) + unit | lose_continuity + deny_all tests |
 | continuity is sticky (recovery never erases loss) | PREVENTED (unit) | continuity_starts_intact_and_loses_sticky |
 | pending confirmations denied on loss | PREVENTED (unit) | deny_all tests |
 | status can show current ACTIVE + historical LOST | PREVENTED (code) | engine.continuity read in handle_status |
-| live overflow gate | NOT RUN (BLOCKED) | no deterministic host overflow generator; nspawn seccomp documented in LFH0 |
-| live continuity/revocation path | LIVE VERIFIED | `scripts/linux/test-continuity-root.sh` PASS on real host (PASS=3 FAIL=0; fanotify-dependent checks BLOCKED=2 documented); evidence/live-host-*/test-continuity-root.log |
+| live overflow gate | BLOCKED (NOT RUN) | no deterministic host overflow generator (mandatory gate could not be produced; see HARNESS §8 — must not be counted as PASS); nspawn seccomp documented in LFH0 |
+| live continuity/revocation path | LIVE VERIFIED (gate rc=2: mandatory live gates BLOCKED, never PASS) | `scripts/linux/test-continuity-root.sh` on real host: non-fanotify continuity/revocation checks PASS, then `note_mandatory_blocked` (no deterministic live kernel overflow generator; mark-loss requires unmountable test FS) → exit 2; evidence/live-host-review-batch-*/test-continuity-root.log |
 
 ## Residual limitations
 - `FilesystemLifecycleLoss`/`UnrecoverableClassifierFailure` reserved, not yet constructed.
 - Live overflow (kernel queue pressure) still lacks a deterministic host generator.
 
 ## Final phase verdict
-`PASS (unit + code) + LIVE CONTINUITY/REVOCATION GATE PASS (real host); overflow-generation gate NOT RUN`
+`OVERALL: REDUCED — overflow DETECTED (FAN_Q_OVERFLOW) → continuity LOST + all authority REVOKED, PREVENTED by code + unit tests; live continuity/revocation gate PASSED on the real host; the mandatory live overflow-generation gate is BLOCKED (no deterministic generator in this environment) → crash continuity stays REDUCED, not restored.`

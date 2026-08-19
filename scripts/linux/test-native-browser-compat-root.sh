@@ -71,7 +71,7 @@ detect_browser() { # id family elf
     BROWSERS+=("$id|$family|$elf")
     echo "detected: $id ($family) at $elf"
   else
-    note_blocked "$id NOT INSTALLED (not a failure)"
+    echo "INFO: $id NOT INSTALLED (not a failure)"
     NOT_INSTALLED=$((NOT_INSTALLED + 1))
   fi
 }
@@ -326,6 +326,6 @@ for entry in "${BROWSERS[@]}"; do
 done
 
 echo
-echo "==> LFH6 native browser compat summary: PASS=$PASS FAIL=$FAIL BLOCKED=$BLOCKED NOT_INSTALLED=$NOT_INSTALLED"
+echo "==> LFH6 native browser compat summary: PASS=$PASS FAIL=$FAIL NOT_INSTALLED=$NOT_INSTALLED"
 echo "    logs: $WORK"
-exit $FAIL
+if [ "$FAIL" -gt 0 ]; then exit 1; else exit 0; fi
