@@ -1,0 +1,10 @@
+rc=1
+==> Starting guardd (strict-filesystem, isolated loop fs)
+==> 1. fast attack (rename-in -> immediate rename-out -> immediate open, 10k)
+    NOTE: kernel 7.1 move events carry only the PARENT DIR fid + name
+    (proven by C probes); the moved file's identity is NOT in the event,
+    so resolution races the immediate rename-out. This section MEASURES
+    the kernel-limited recovery rate; the enforceable gate is section 2.
+{"iterations":10000,"successful_unauthorized_reads":118,"denied_reads":9882,"other_errors":0}
+==> 2. SETTLED move-in -> later rename-out -> open (the enforceable guarantee)
+FAIL: learner never learned the settled moved object (20s)

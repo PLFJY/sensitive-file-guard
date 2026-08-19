@@ -1,0 +1,35 @@
+isolated loop-backed ext4: /dev/loop1 at /tmp/guard-continuity-mnt-ey0p4h
+==> Test A: deterministic live kernel fanotify-queue overflow (R3)
+    saved max_queued_events=16384
+    restored max_queued_events=16384 (group limit fixed at init: 64)
+==> A.1 continuity starts INTACT
+PASS: continuity INTACT at startup
+==> A.2 unknown probe denied while INTACT
+PASS: unknown probe denied
+==> A.3 SIGSTOP daemon, launch 80 concurrent opens on the loop fs (limit 64)
+==> A.4 poll for continuity LOST(fanotify_queue_overflow)
+PASS: overflow observed => continuity LOST (fanotify_queue_overflow)
+PASS: fanotify_overflows counter incremented (1)
+==> A.5 dropped events are NOT claimed denied (truthfulness wording)
+PASS: daemon wording: dropped events NOT denied by Guard
+PASS: guardd exited on SIGTERM
+==> Test B: REAL kernel mark loss via FAN_MARK_REMOVE on the live group (R4)
+PASS: B: continuity INTACT at startup
+==> B.1 duplicate the exact permission-group fd and remove the fs mark
+    fsmark: pid=114189 fanotify_fd=7 action=remove result=ok sdev_before=1 sdev_after=0
+PASS: kernel fdinfo filesystem-mark count dropped (before->after via FAN_MARK_REMOVE on the exact live group)
+==> B.2 status detects the mark loss => continuity LOST(required_filesystem_mark_lost)
+PASS: required mark loss => continuity LOST (required_filesystem_mark_lost)
+==> B.3 audit trail records the revocation
+  audit: ('required_filesystem_mark_lost', 'required filesystem mark lost; all leases and pending confirmations revoked')
+PASS: audit DB records required_filesystem_mark_lost (revocation evidence)
+==> B.4 restore the mark; continuity stays LOCKED/sticky
+    fsmark: pid=114189 fanotify_fd=7 action=restore result=ok sdev_before=0 sdev_after=1
+PASS: kernel filesystem mark restored (FAN_MARK_ADD on the exact live group)
+PASS: continuity STAYS LOST after mark restore (sticky, never erased)
+==> B.5 unknown probe denied again after the mark is restored
+PASS: B.5: enforcement resumed after mark restore (gating back)
+PASS: guardd exited on SIGTERM
+
+==> LFH3 continuity root summary: PASS=14 FAIL=0 BLOCKED=0 MANDATORY_BLOCKED=0
+    (see /tmp/guard-continuity-mnt-ey0p4h/guardd.log for daemon decision log)

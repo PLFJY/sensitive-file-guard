@@ -363,6 +363,11 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
         };
         match topology_group {
             Some(topology_group) => {
+                // R1: attach the topology group to the classifier so the
+                // permission hot path can synchronously drain causally-prior
+                // topology events before an ambiguous outside-path open may be
+                // allowed (same mutex as the background learner below).
+                classifier.attach_topology_group(Arc::clone(&topology_group));
                 match topology_learner::TopologyLearner::new(
                     cfg.enforcement_mode,
                     classifier,
@@ -1029,7 +1034,7 @@ fn unix_secs() -> u64 {
 /// LFH3: audit record for a continuity-loss event. Contains only the reason
 /// and metadata, never any secret bytes.
 #[cfg(target_os = "linux")]
-fn engine_continuity_audit(event_code: &str, detail: &str) -> guard_audit::AuditRecord {
+pub(crate) fn engine_continuity_audit(event_code: &str, detail: &str) -> guard_audit::AuditRecord {
     use guard_core::resource::{ProtectedResource, ProtectedResourceId, ProtectedResourceKind};
     let resource = ProtectedResource {
         id: ProtectedResourceId("continuity".into()),

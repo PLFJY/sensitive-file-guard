@@ -1,0 +1,16 @@
+=== [test-continuity-root] START ===
+=== [test-continuity-root] FAIL rc=1 ===
+
+==> LFH3 continuity root summary: PASS=12 FAIL=2 BLOCKED=0 MANDATORY_BLOCKED=0
+    (see /tmp/guard-continuity-mnt-yLxbs6/guardd.log for daemon decision log)
+=== [test-object-identity-root] START ===
+=== [test-object-identity-root] PASS ===
+
+==> LFH2 object-identity root summary: PASS=8 FAIL=0 BLOCKED=0
+    (see /tmp/guard-objectid-mnt-6W1Hk8/guardd.log for daemon decision log)
+=== [test-step3-zero-settle-root] START ===
+=== [test-step3-zero-settle-root] FAIL rc=1 ===
+==> 1. zero-settle rename-in -> immediate rename-out -> immediate open (10k)
+  10000 iterations: recovered=342 denied=9658 other=0
+FAIL: main: at least one unauthorized read succeeded
+=== R1R3R4 RERUN: PASS=1 FAIL=2 BLOCKED=0 ===

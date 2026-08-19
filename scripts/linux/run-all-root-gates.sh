@@ -18,6 +18,7 @@ mkdir -p "$OUT"
 declare -a SCRIPTS=(
   "scripts/linux/test-pidfd-root.sh"                       # LFH1
   "scripts/linux/test-object-identity-root.sh"             # LFH2
+  "scripts/linux/test-step3-zero-settle-root.sh"            # LFH2 R1 zero-settle
   "scripts/linux/test-continuity-root.sh"                  # LFH3
   "scripts/linux/experiment-fdstore-root.sh"               # LFH4
   "scripts/test-browser-enforcement-root.sh"

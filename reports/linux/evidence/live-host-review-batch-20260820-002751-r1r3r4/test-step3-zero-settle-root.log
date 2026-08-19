@@ -1,0 +1,5 @@
+isolated loop-backed ext4: /dev/loop1 at /tmp/guard-step3-mnt-hbIfnx
+==> Starting guardd (strict-filesystem, isolated loop fs)
+==> 1. zero-settle rename-in -> immediate rename-out -> immediate open (10k)
+  10000 iterations: recovered=342 denied=9658 other=0
+FAIL: main: at least one unauthorized read succeeded

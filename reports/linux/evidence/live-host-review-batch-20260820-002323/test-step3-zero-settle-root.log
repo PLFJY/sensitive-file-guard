@@ -1,0 +1,9 @@
+isolated loop-backed ext4: /dev/loop1 at /tmp/guard-step3-mnt-2x8v9e
+==> Starting guardd (strict-filesystem, isolated loop fs)
+guardd did not log the pre-existing snapshot
+[2m2026-08-19T16:24:42.952084Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m fanotify group created with FAN_REPORT_PIDFD
+[2m2026-08-19T16:24:42.952137Z[0m [33m WARN[0m [2mguardd[0m[2m:[0m LFH2 Step 3 topology group creation failed; never-opened dynamic rename guarantee REDUCED [3merr[0m[2m=[0mInvalid argument (os error 22)
+guardd: enforcement ACTIVE — mode=strict-filesystem browsers=1 protected_files=0 marked_files=0 marked_tree_dirs=0 marked_filesystems=1 browser_exes=0 (fanotify fd=7)
+guardd: IPC socket: /tmp/guard-step3-mnt-2x8v9e/guardd.sock
+[2m2026-08-19T16:24:42.952191Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m enforcement active [3mbrowsers[0m[2m=[0m1 [3mmode[0m[2m=[0m"strict-filesystem" [3mprotected_files[0m[2m=[0m0 [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0 [3mmarked_filesystems[0m[2m=[0m1 [3mipc_socket[0m[2m=[0mSome("/tmp/guard-step3-mnt-2x8v9e/guardd.sock")
+[2m2026-08-19T16:24:42.952251Z[0m [32m INFO[0m [2mguardd::ipc[0m[2m:[0m IPC server listening [3mpath[0m[2m=[0m/tmp/guard-step3-mnt-2x8v9e/guardd.sock

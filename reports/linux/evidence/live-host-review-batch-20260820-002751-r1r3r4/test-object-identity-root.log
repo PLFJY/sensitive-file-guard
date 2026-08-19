@@ -1,0 +1,18 @@
+isolated loop-backed ext4: /dev/loop1 at /tmp/guard-objectid-mnt-6W1Hk8 (never touches the root fs)
+==> Starting guardd (strict-filesystem) on /tmp/guard-objectid-mnt-6W1Hk8
+PASS: guardd enforcing (strict-filesystem)
+==> 1. dynamic object under protected path => protected + attribution
+PASS: 1. protected path: probe denied with Guard attribution (pid=113422)
+==> 2. rename dynamic object OUTSIDE the profile => still denied (handle identity)
+PASS: 2. renamed-out dynamic object: probe denied with Guard attribution (pid=113425)
+==> 3. (LFH2 Step 3) NEVER-OPENED dynamic object renamed out => denied
+PASS: 3. startup snapshot learned pre-existing dynamic objects
+PASS: 3. never-opened renamed-out object: probe denied with Guard attribution (pid=113536)
+==> 4. inode reuse / stale mapping => no false positive (replaced moved-out name)
+PASS: 4. unrelated file at the replaced moved-out name opens normally
+==> 5. audit/daemon log contains no fixture bytes
+PASS: no fixture bytes in daemon log
+PASS: guardd exited on SIGTERM
+
+==> LFH2 object-identity root summary: PASS=8 FAIL=0 BLOCKED=0
+    (see /tmp/guard-objectid-mnt-6W1Hk8/guardd.log for daemon decision log)

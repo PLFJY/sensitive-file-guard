@@ -1,0 +1,25 @@
+isolated loop-backed ext4: /dev/loop1 at /tmp/guard-step3-mnt-rGTBNT
+==> Starting guardd (strict-filesystem, isolated loop fs)
+==> 1. fast attack (rename-in -> immediate rename-out -> immediate open, 10k)
+    NOTE: kernel 7.1 move events carry only the PARENT DIR fid + name
+    (proven by C probes); the moved file's identity is NOT in the event,
+    so resolution races the immediate rename-out. This section MEASURES
+    the kernel-limited recovery rate; the enforceable gate is section 2.
+{"iterations":10000,"successful_unauthorized_reads":145,"denied_reads":9855,"other_errors":0}
+  fast-attack measurement: recovered=145 denied=9855 other=0
+==> 2. SETTLED move-in -> later rename-out -> open (the enforceable guarantee)
+PASS: learner resolved+learned the settled moved object's handle
+  1000 iterations: recovered=0 denied=1000 other=0
+PASS: settled: zero successful unauthorized reads (1000 iterations, no settle)
+==> 3. runtime-created subdirectory becomes marked and the settled attack inside it is denied
+PASS: learner refresh marked the runtime-created subdirectory
+PASS: learner learned the object moved into the runtime-created subdir
+  200 iterations: recovered=0 denied=200 other=0
+PASS: subdir: zero successful unauthorized reads (200 iterations, no settle)
+==> 3. unknown probe denied while enforcement is active (sanity)
+PASS: sanity: unknown probe denied
+==> 4. daemon exits cleanly on SIGTERM
+PASS: guardd exited on SIGTERM
+
+==> LFH2 Step 3 zero-settle summary: PASS=7 FAIL=0 BLOCKED=0
+KEPT diagnostics at: /tmp/guard-step3-mnt-rGTBNT (loop /dev/loop1 still mounted)

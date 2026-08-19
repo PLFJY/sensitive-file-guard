@@ -1,0 +1,6 @@
+rc=1
+==> 1. zero-settle rename-in -> immediate rename-out -> immediate open (10k)
+  10000 iterations: recovered=897 denied=9103 other=0
+FAIL: main: at least one unauthorized read succeeded
+{"iterations":10000,"successful_unauthorized_reads":897,"denied_reads":9103,"other_errors":0}
+KEPT diagnostics at: /tmp/guard-step3-mnt-VccoyI (loop /dev/loop1 still mounted)

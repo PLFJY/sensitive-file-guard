@@ -1,0 +1,7 @@
+isolated loop-backed ext4: /dev/loop1 at /tmp/guard-step3-mnt-oTriAZ
+==> Starting guardd (strict-filesystem, isolated loop fs)
+==> 1. zero-settle rename-in -> immediate rename-out -> immediate open (10k)
+  10000 iterations: recovered=2270 denied=7730 other=0
+FAIL: main: at least one unauthorized read succeeded
+{"iterations":10000,"successful_unauthorized_reads":2270,"denied_reads":7730,"other_errors":0}
+KEPT diagnostics at: /tmp/guard-step3-mnt-oTriAZ (loop /dev/loop1 still mounted)

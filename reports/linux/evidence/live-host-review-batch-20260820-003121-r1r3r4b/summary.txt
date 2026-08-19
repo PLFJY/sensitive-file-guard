@@ -1,0 +1,13 @@
+=== [test-continuity-root] START ===
+=== [test-continuity-root] PASS ===
+PASS: guardd exited on SIGTERM
+
+==> LFH3 continuity root summary: PASS=14 FAIL=0 BLOCKED=0 MANDATORY_BLOCKED=0
+    (see /tmp/guard-continuity-mnt-ey0p4h/guardd.log for daemon decision log)
+=== [test-step3-zero-settle-root] START ===
+=== [test-step3-zero-settle-root] FAIL rc=1 ===
+  10000 iterations: recovered=2270 denied=7730 other=0
+FAIL: main: at least one unauthorized read succeeded
+{"iterations":10000,"successful_unauthorized_reads":2270,"denied_reads":7730,"other_errors":0}
+KEPT diagnostics at: /tmp/guard-step3-mnt-oTriAZ (loop /dev/loop1 still mounted)
+=== RERUN-B: PASS=1 FAIL=1 BLOCKED=0 ===

@@ -142,6 +142,44 @@ fn main() -> ExitCode {
             Path::new(&args[3]),
             Path::new(&args[4]),
         ),
+        #[cfg(target_os = "linux")]
+        Some("rename-out-race") if args.len() == 6 => {
+            let iterations = match args[5].parse::<u64>() {
+                Ok(value) if value > 0 => value,
+                _ => {
+                    eprintln!("guard-test-probe: ITERATIONS must be a positive integer");
+                    return ExitCode::from(2);
+                }
+            };
+            do_rename_out_race(
+                Path::new(&args[2]),
+                Path::new(&args[3]),
+                Path::new(&args[4]),
+                iterations,
+            )
+        }
+        #[cfg(target_os = "linux")]
+        Some("fsmark-remove") if args.len() == 4 => do_fsmark(
+            args[2].parse::<i32>().ok(),
+            None,
+            Path::new(&args[3]),
+            false,
+        ),
+        #[cfg(target_os = "linux")]
+        Some("fsmark-restore") if args.len() == 5 => {
+            // Explicit fd (the remove call printed it); the scan cannot find
+            // the group once its marks are gone.
+            do_fsmark(
+                args[2].parse::<i32>().ok(),
+                args[3].parse::<i32>().ok(),
+                Path::new(&args[4]),
+                true,
+            )
+        }
+        #[cfg(target_os = "linux")]
+        Some("fsmark-restore") if args.len() == 4 => {
+            do_fsmark(args[2].parse::<i32>().ok(), None, Path::new(&args[3]), true)
+        }
         _ => {
             print_usage();
             ExitCode::from(2)
@@ -170,6 +208,9 @@ fn print_usage() {
            promote-rename STAGED TARGET EXTERNAL
            deny-rename-retry TARGET EXTERNAL
            transit-rename STAGED TARGET EXTERNAL
+           rename-out-race TARGET OUTSIDE_DIR TEMP ITERATIONS (linux)
+           fsmark-remove PID PATH (linux)
+           fsmark-restore PID PATH (linux)
            shield-target READY_FILE [SECONDS] [PROTECTED_FILE]
            probe-task TARGET_PID control|read
            probe-memory TARGET_PID"
@@ -872,6 +913,229 @@ fn do_transit_rename(staged: &Path, target: &Path, external: &Path) -> ExitCode 
 
 fn is_access_denial(error: &std::io::Error) -> bool {
     matches!(error.raw_os_error(), Some(code) if code == libc::EACCES || code == libc::EPERM)
+}
+
+/// R1 zero-settle adversarial stress (LFH2 Step 3): the exact attacker path
+/// `unprotected temp → rename into protected sensitive name → immediately
+/// rename out → immediate unknown open`, with NO settle between the renames
+/// and the open. The temp object lives OUTSIDE the protected tree and is
+/// created by the harness BEFORE guardd starts (its creation is not gated);
+/// each iteration reuses the same inode: staging → protected name → outside
+/// name → immediate open attempt → back to staging. Successful opens are
+/// counted but their bytes are never read or printed. The harness asserts
+/// `successful_unauthorized_reads == 0` in strict mode.
+#[cfg(target_os = "linux")]
+fn do_rename_out_race(target: &Path, outside_dir: &Path, temp: &Path, iterations: u64) -> ExitCode {
+    let mut recovered = 0_u64;
+    let mut denied = 0_u64;
+    let mut other_errors = 0_u64;
+    for iteration in 0..iterations {
+        let outside = outside_dir.join(format!(".sdf-race-out-{iteration}"));
+        if let Err(error) = std::fs::rename(temp, target) {
+            return report_failure("rename-in to protected name", target, &error);
+        }
+        if let Err(error) = std::fs::rename(target, &outside) {
+            return report_failure("rename-out to outside name", &outside, &error);
+        }
+        match std::fs::read(&outside) {
+            Ok(_bytes) => recovered += 1,
+            Err(error) if is_access_denial(&error) => denied += 1,
+            Err(_) => other_errors += 1,
+        }
+        if let Err(error) = std::fs::rename(&outside, temp) {
+            return report_failure("return object to staging", temp, &error);
+        }
+    }
+    println!(
+        "{{\"iterations\":{iterations},\"successful_unauthorized_reads\":{recovered},\"denied_reads\":{denied},\"other_errors\":{other_errors}}}"
+    );
+    if other_errors == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+/// R4 live mark-loss helper: find the target process's fanotify PERMISSION
+/// group (the fd whose fdinfo carries `fanotify sdev:` filesystem marks),
+/// duplicate the exact group fd via `pidfd_open` + `pidfd_getfd`, and then
+/// `FAN_MARK_REMOVE | FAN_MARK_FILESYSTEM` (remove) or
+/// `FAN_MARK_ADD | FAN_MARK_FILESYSTEM` (restore) the filesystem mark for
+/// PATH — a REAL kernel mark mutation on the live group, not a state
+/// injection. Prints the fdinfo `fanotify sdev:` count before/after so the
+/// harness can verify the kernel actually dropped/restored the mark.
+#[cfg(target_os = "linux")]
+fn do_fsmark(pid: Option<i32>, known_fd: Option<i32>, path: &Path, restore: bool) -> ExitCode {
+    // SYS_pidfd_open = 434, SYS_pidfd_getfd = 438 (x86_64 and aarch64).
+    const SYS_PIDFD_OPEN: libc::c_long = 434;
+    const SYS_PIDFD_GETFD: libc::c_long = 438;
+
+    let Some(pid) = pid else {
+        eprintln!("guard-test-probe: fsmark PID must be an integer");
+        return ExitCode::from(2);
+    };
+    if pid <= 0 {
+        eprintln!("guard-test-probe: fsmark PID must be positive");
+        return ExitCode::from(2);
+    }
+
+    // The permission group fd: passed explicitly when known (the remove call
+    // prints it; after marks are removed the scan cannot find the group).
+    // Otherwise scan: FAN_CLASS_CONTENT bit in the `fanotify flags:` line
+    // (the topology group is FAN_CLASS_NOTIF and never matches), with the
+    // `fanotify sdev:` line as fallback.
+    let fanotify_fd = match known_fd {
+        Some(fd) if fd > 0 => fd,
+        _ => {
+            let mut found: Option<i32> = None;
+            let proc_fd = PathBuf::from(format!("/proc/{pid}/fd"));
+            for entry in std::fs::read_dir(&proc_fd).ok().into_iter().flatten() {
+                let Ok(entry) = entry else { continue };
+                let Ok(fd) = entry.file_name().to_string_lossy().parse::<i32>() else {
+                    continue;
+                };
+                let Ok(fdinfo) = std::fs::read_to_string(format!("/proc/{pid}/fdinfo/{fd}")) else {
+                    continue;
+                };
+                let flags = fdinfo
+                    .lines()
+                    .find(|line| line.starts_with("fanotify flags:"))
+                    .and_then(|line| {
+                        let value = line.split_once(':').map(|(_, v)| v.trim()).unwrap_or("");
+                        u32::from_str_radix(value.trim_start_matches("0x"), 16).ok()
+                    })
+                    .unwrap_or(0);
+                // FAN_CLASS_CONTENT = 0x4.
+                if flags & 0x4 != 0 || fdinfo.contains("fanotify sdev:") {
+                    found = Some(fd);
+                    break;
+                }
+            }
+            match found {
+                Some(fd) => fd,
+                None => {
+                    eprintln!(
+                        "guard-test-probe: no fanotify permission-group fd found for pid {pid} \
+                         (is the target the strict-mode guardd?)"
+                    );
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+    };
+    let sdev_before = count_sdev_lines(pid, fanotify_fd);
+
+    // SAFETY: pidfd_open/getfd are raw syscalls with the documented UAPI
+    // signatures; results are checked before use.
+    let pidfd = unsafe { libc::syscall(SYS_PIDFD_OPEN, pid as libc::c_int, 0) };
+    if pidfd < 0 {
+        eprintln!(
+            "guard-test-probe: pidfd_open({pid}) failed: {}",
+            std::io::Error::last_os_error()
+        );
+        return ExitCode::FAILURE;
+    }
+    let dup = unsafe { libc::syscall(SYS_PIDFD_GETFD, pidfd, fanotify_fd, 0) };
+    if dup < 0 {
+        let error = std::io::Error::last_os_error();
+        unsafe { libc::close(pidfd as libc::c_int) };
+        eprintln!(
+            "guard-test-probe: pidfd_getfd({pid}, fd {fanotify_fd}) failed: {error} \
+             (ptrace policy? check /proc/sys/kernel/yama/ptrace_scope)"
+        );
+        return ExitCode::FAILURE;
+    }
+
+    let c = match std::ffi::CString::new(path.to_string_lossy().as_bytes()) {
+        Ok(c) => c,
+        Err(_) => {
+            unsafe { libc::close(dup as libc::c_int) };
+            unsafe { libc::close(pidfd as libc::c_int) };
+            eprintln!("guard-test-probe: invalid path for fsmark");
+            return ExitCode::from(2);
+        }
+    };
+    let action = if restore {
+        libc::FAN_MARK_ADD
+    } else {
+        libc::FAN_MARK_REMOVE
+    };
+    // RESTORE must use the real permission mask (FAN_OPEN_PERM): a mask-0
+    // FAN_MARK_ADD would add a mask-0 mark that never gates opens. REMOVE
+    // tries mask 0 first (remove the fs-scope mark), falling back to the
+    // permission mask on EINVAL.
+    let mut rc = if restore {
+        unsafe {
+            libc::fanotify_mark(
+                dup as libc::c_int,
+                (action | libc::FAN_MARK_FILESYSTEM) as libc::c_uint,
+                libc::FAN_OPEN_PERM,
+                libc::AT_FDCWD,
+                c.as_ptr(),
+            )
+        }
+    } else {
+        unsafe {
+            libc::fanotify_mark(
+                dup as libc::c_int,
+                (action | libc::FAN_MARK_FILESYSTEM) as libc::c_uint,
+                0,
+                libc::AT_FDCWD,
+                c.as_ptr(),
+            )
+        }
+    };
+    if rc < 0 && !restore {
+        rc = unsafe {
+            libc::fanotify_mark(
+                dup as libc::c_int,
+                (action | libc::FAN_MARK_FILESYSTEM) as libc::c_uint,
+                libc::FAN_OPEN_PERM,
+                libc::AT_FDCWD,
+                c.as_ptr(),
+            )
+        };
+    }
+    let op_result = if rc < 0 {
+        format!("failed: {}", std::io::Error::last_os_error())
+    } else {
+        "ok".to_owned()
+    };
+    let sdev_after = count_sdev_lines(pid, fanotify_fd);
+    unsafe { libc::close(dup as libc::c_int) };
+    unsafe { libc::close(pidfd as libc::c_int) };
+    println!(
+        "fsmark: pid={pid} fanotify_fd={fanotify_fd} action={} result={op_result} sdev_before={sdev_before} sdev_after={sdev_after}",
+        if restore { "restore" } else { "remove" }
+    );
+    if rc < 0 {
+        return ExitCode::FAILURE;
+    }
+    let changed = if restore {
+        sdev_after > sdev_before
+    } else {
+        sdev_after < sdev_before
+    };
+    if changed {
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("guard-test-probe: fdinfo filesystem-mark count did not change as expected");
+        ExitCode::FAILURE
+    }
+}
+
+/// Count `fanotify sdev:` (filesystem-scope mark) lines in the target's
+/// fdinfo for `fd`. Reads the target's fdinfo directly (same ptrace access
+/// as the fd scan); returns 0 on any read error.
+#[cfg(target_os = "linux")]
+fn count_sdev_lines(pid: i32, fd: i32) -> usize {
+    std::fs::read_to_string(format!("/proc/{pid}/fdinfo/{fd}"))
+        .map(|info| {
+            info.lines()
+                .filter(|line| line.contains("fanotify sdev:"))
+                .count()
+        })
+        .unwrap_or(0)
 }
 
 fn percentile(sorted: &[u64], percentile: usize) -> u64 {

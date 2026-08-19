@@ -13,13 +13,13 @@ PASS=0; FAIL=0; BLOCKED=0
 # --- pre-flight: drop leftover loop mounts from interrupted runs ---
 # (a killed pkexec batch can leave a debug loop ext4 mounted; a fresh batch
 # must start clean so losetup -f picks a free device)
-for m in /tmp/guard-objectid-mnt-* /tmp/fdn-mnt /tmp/objid-debug-*/mnt; do
+for m in /tmp/guard-objectid-mnt-* /tmp/fdn-mnt /tmp/objid-debug-*/mnt /tmp/guard-continuity-mnt-* /tmp/guard-step3-mnt-*; do
   if mountpoint -q "$m" 2>/dev/null; then
     echo "pre-flight: unmounting leftover $m" | tee -a "$OUT/summary.txt"
     umount "$m" 2>/dev/null || true
   fi
 done
-for img in /tmp/guard-objectid-img-*.img /tmp/objid-debug-*/img.img; do
+for img in /tmp/guard-objectid-img-*.img /tmp/objid-debug-*/img.img /tmp/guard-continuity-img-*.img /tmp/guard-step3-img-*.img; do
   [ -e "$img" ] || continue
   dev="$(losetup -j "$img" -O NAME -n 2>/dev/null | head -1 || true)"
   if [ -n "$dev" ]; then
@@ -34,6 +34,7 @@ for s in \
   "scripts/linux/test-continuity-root.sh" \
   "scripts/test-bypass-root.sh" \
   "scripts/linux/test-object-identity-root.sh" \
+  "scripts/linux/test-step3-zero-settle-root.sh" \
   "scripts/test-topology-race-stress-root.sh"
 do
   name="$(basename "$s" .sh)"

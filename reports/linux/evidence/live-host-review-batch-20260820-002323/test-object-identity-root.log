@@ -1,0 +1,10 @@
+isolated loop-backed ext4: /dev/loop1 at /tmp/guard-objectid-mnt-GrSfLj (never touches the root fs)
+==> Starting guardd (strict-filesystem) on /tmp/guard-objectid-mnt-GrSfLj
+PASS: guardd enforcing (strict-filesystem)
+==> 1. dynamic object under protected path => protected + attribution
+PASS: 1. protected path: probe denied with Guard attribution (pid=111316)
+==> 2. rename dynamic object OUTSIDE the profile => still denied (handle identity)
+PASS: 2. renamed-out dynamic object: probe denied with Guard attribution (pid=111319)
+==> 3. (LFH2 Step 3) NEVER-OPENED dynamic object renamed out => denied
+FAIL: 3. startup snapshot did not run (see guardd.log)
+FAIL: 3. never-opened renamed-out object: probe READ the fixture (deny missed)

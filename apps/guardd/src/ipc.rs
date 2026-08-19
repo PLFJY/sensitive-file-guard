@@ -200,6 +200,14 @@ fn handle_status(state: &IpcState, creds: PeerCreds) -> Response {
     // recovery later reports ACTIVE enforcement but continuity stays LOST.
     if enforcing && required_filesystems > 0 && !filesystem_marks_healthy {
         engine.lose_continuity(crate::enforce::ContinuityLossReason::RequiredMarkLoss);
+        // R4 live gate evidence: the revocation ran (leases/pending/grace
+        // dropped, generation bumped); record it in the audit trail and flush
+        // so the next CLI query sees it (the writer batches 64 records).
+        state.audit.record(crate::engine_continuity_audit(
+            "required_filesystem_mark_lost",
+            "required filesystem mark lost; all leases and pending confirmations revoked",
+        ));
+        state.audit.flush();
     }
 
     // LFH0: split health dimensions. Each condition is judged on its own axis

@@ -1,0 +1,25 @@
+=== [experiment-fdstore-root] 00:23:23 START ===
+=== [experiment-fdstore-root] PASS ===
+         B not recoverable via public UAPI: the read-but-unanswered
+         permission stays pending after restart → crash continuity REDUCED)
+=== [test-continuity-root] 00:23:31 START ===
+=== [test-continuity-root] FAIL rc=1 ===
+==> LFH3 continuity root summary: PASS=10 FAIL=4 BLOCKED=0 MANDATORY_BLOCKED=0
+    (see /tmp/guard-continuity-mnt-760r5y/guardd.log for daemon decision log)
+=== [test-bypass-root] 00:23:36 START ===
+=== [test-bypass-root] PASS ===
+    （BLOCKED 项是 fanotify 已知限制，详见 docs/安全模型.md）
+    (see /tmp/guard-bypass-MmhrUT/guardd.log for daemon decision log)
+=== [test-object-identity-root] 00:24:37 START ===
+=== [test-object-identity-root] FAIL rc=1 ===
+FAIL: 3. startup snapshot did not run (see guardd.log)
+FAIL: 3. never-opened renamed-out object: probe READ the fixture (deny missed)
+=== [test-step3-zero-settle-root] 00:24:42 START ===
+=== [test-step3-zero-settle-root] FAIL rc=1 ===
+[2m2026-08-19T16:24:42.952191Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m enforcement active [3mbrowsers[0m[2m=[0m1 [3mmode[0m[2m=[0m"strict-filesystem" [3mprotected_files[0m[2m=[0m0 [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0 [3mmarked_filesystems[0m[2m=[0m1 [3mipc_socket[0m[2m=[0mSome("/tmp/guard-step3-mnt-2x8v9e/guardd.sock")
+[2m2026-08-19T16:24:42.952251Z[0m [32m INFO[0m [2mguardd::ipc[0m[2m:[0m IPC server listening [3mpath[0m[2m=[0m/tmp/guard-step3-mnt-2x8v9e/guardd.sock
+=== [test-topology-race-stress-root] 00:24:43 START ===
+=== [test-topology-race-stress-root] PASS ===
+PASS: empirical topology-race measurement completed and final inode converged
+NOTE: strict PASS requires zero successful unauthorized reads.
+=== REVIEW BATCH SUMMARY: PASS=3 FAIL=3 BLOCKED=0 ===

@@ -1,0 +1,212 @@
+isolated loop-backed ext4: /dev/loop1 at /tmp/guard-step3-mnt-tf8ue2
+==> Starting guardd (strict-filesystem, isolated loop fs)
+==> 1. fast attack (rename-in -> immediate rename-out -> immediate open, 10k)
+    NOTE: kernel 7.1 move events carry only the PARENT DIR fid + name
+    (proven by C probes); the moved file's identity is NOT in the event,
+    so resolution races the immediate rename-out. This section MEASURES
+    the kernel-limited recovery rate; the enforceable gate is section 2.
+{"iterations":10000,"successful_unauthorized_reads":118,"denied_reads":9882,"other_errors":0}
+  fast-attack measurement: recovered=118 denied=9882 other=0
+==> 2. SETTLED move-in -> later rename-out -> open (the enforceable guarantee)
+FAIL: learner never learned the settled moved object (20s)
+[2m2026-08-19T16:48:23.325708Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m fanotify group created with FAN_REPORT_PIDFD
+[2m2026-08-19T16:48:23.325752Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m LFH2 Step 3: snapshot of pre-existing dynamic object handles [3mlearned[0m[2m=[0m0
+[2m2026-08-19T16:48:23.325788Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m topology group marked for FAN_MOVE (LFH2 Step 3) [3mdirs[0m[2m=[0m3
+guardd: enforcement ACTIVE — mode=strict-filesystem browsers=1 protected_files=0 marked_files=0 marked_tree_dirs=0 marked_filesystems=1 browser_exes=0 (fanotify fd=7)
+guardd: IPC socket: /tmp/guard-step3-mnt-tf8ue2/guardd.sock
+[2m2026-08-19T16:48:23.325815Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m enforcement active [3mbrowsers[0m[2m=[0m1 [3mmode[0m[2m=[0m"strict-filesystem" [3mprotected_files[0m[2m=[0m0 [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0 [3mmarked_filesystems[0m[2m=[0m1 [3mipc_socket[0m[2m=[0mSome("/tmp/guard-step3-mnt-tf8ue2/guardd.sock")
+[2m2026-08-19T16:48:23.325825Z[0m [32m INFO[0m [2mguardd::topology_learner[0m[2m:[0m topology learner thread started
+[2m2026-08-19T16:48:23.325885Z[0m [32m INFO[0m [2mguardd::ipc[0m[2m:[0m IPC server listening [3mpath[0m[2m=[0m/tmp/guard-step3-mnt-tf8ue2/guardd.sock
+[2m2026-08-19T16:48:23.383192Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.383353Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.383368Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.383476Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.383584Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.383582Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.383800Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.383887Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.384032Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.384075Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.384203Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.384258Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.384413Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.384473Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.384609Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.384684Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.384809Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.384918Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.385062Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.385127Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.385263Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.385333Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.385460Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.385563Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.385749Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.385766Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.385966Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.385985Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.386133Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.386187Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.386300Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.386482Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.386556Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.386820Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.386908Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.386989Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.387230Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.387465Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.387633Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.387792Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.388103Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.388241Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.388382Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.388442Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.388442Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.388606Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.388632Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.388666Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.388799Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.388836Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.388867Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.388976Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.389014Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.389057Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.389179Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.389255Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.389340Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.389542Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.389602Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.389749Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.389774Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.389956Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.389968Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.390181Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.390201Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.390424Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.390450Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.390656Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.390665Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.390871Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.390881Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.391083Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.391251Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.391297Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.391543Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.391550Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.391794Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.391997Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.392023Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.392110Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.392287Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.392292Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.392436Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.392499Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.392556Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.392695Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.392694Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.392817Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.392901Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.392963Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.393095Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.393097Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.393217Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.393286Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.393332Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.393476Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.393578Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.393660Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.393905Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.393916Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.394011Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.394219Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.394276Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.394460Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.394464Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.394587Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.394664Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.394704Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.394882Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.394988Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.394998Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.395233Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.395341Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.395334Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.395646Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.395695Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.395753Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.395953Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.395948Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.396058Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.396189Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.396205Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.396350Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.396429Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.396465Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.396629Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.396633Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.396759Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.396832Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.396885Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.397058Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.397072Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.397167Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.397526Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.397536Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.398043Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.398056Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.398220Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.398383Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.398381Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.398531Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.398650Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.398676Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.398811Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.398959Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.399087Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.399120Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.399339Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.399344Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.399502Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.399520Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.399613Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.399654Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.399737Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.399789Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.399900Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.399942Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.400038Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.400079Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.400194Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.400238Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.400329Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.400372Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.400461Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.400501Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.400590Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.400635Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.400719Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.400768Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.400860Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.400908Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.401005Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.401051Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.401135Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.401180Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.401248Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.401376Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.401393Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.401541Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.401542Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.401683Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.401700Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.401794Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.401839Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.401944Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.401990Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.402076Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.402120Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.402204Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.402252Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+[2m2026-08-19T16:48:23.402336Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m browser topology changed; protection refreshed [3mmarked_files[0m[2m=[0m0 [3mmarked_tree_dirs[0m[2m=[0m0
+[2m2026-08-19T16:48:23.402383Z[0m [34mDEBUG[0m [2mguardd::strict[0m[2m:[0m topology: synchronous drain processed events [3mdrained[0m[2m=[0m1
+KEPT diagnostics at: /tmp/guard-step3-mnt-tf8ue2 (loop /dev/loop1 still mounted)

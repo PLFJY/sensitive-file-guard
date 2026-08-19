@@ -40,13 +40,27 @@ const FAN_REPORT_FID: u32 = 0x0000_0200;
 const FAN_EVENT_INFO_TYPE_PIDFD: u8 = 4;
 
 /// `FAN_EVENT_INFO_TYPE_FID` (Linux UAPI): the info record that carries the
-/// object's fsid + opaque file handle.
+/// object's fsid + opaque file handle. NOTE (measured on kernel 7.1): for
+/// move events the fid is the PARENT/marked DIRECTORY's handle — never the
+/// moved file's — so the topology learner pairs it with the DFID_NAME record
+/// (below) to resolve the moved file's identity.
 const FAN_EVENT_INFO_TYPE_FID: u8 = 1;
+/// `FAN_EVENT_INFO_TYPE_DFID_NAME` (Linux UAPI): like FID but also carries
+/// the object's name (null-terminated, padded to 8). The handle is still the
+/// parent directory's handle; the name lets us resolve the moved file while
+/// it remains at `parent/name`.
+const FAN_EVENT_INFO_TYPE_DFID_NAME: u8 = 2;
+/// `FAN_REPORT_DFID_NAME` (Linux UAPI) = `FAN_REPORT_DIR_FID (0x400) |
+/// FAN_REPORT_NAME (0x800)` = 0xC00. (0x400 alone is DIR_FID — dir fid with
+/// NO name; passing it silently degrades the records to type DFID without a
+/// name, which the learner cannot resolve.)
+const FAN_REPORT_DFID_NAME: u32 = 0x0000_0400 | 0x0000_0800;
 
 /// `FAN_MOVE` = `FAN_MOVED_FROM | FAN_MOVED_TO` (Linux UAPI): move/rename
-/// notification events. With `FAN_REPORT_FID` each carries the moved file's
-/// handle, which is exactly what the LFH2 Step 3 topology learner needs to
-/// label a NEVER-OPENED dynamic object that left a protected tree.
+/// notification events. NOTE (measured on kernel 7.1): the events carry the
+/// marked directory's fid + the moved object's name (DFID_NAME); the moved
+/// FILE's own handle is NOT in the event, so the learner resolves
+/// `parent/name` to learn the file's handle while it remains there.
 pub const FAN_MOVE_EVENTS: u64 = 0x0000_0040 | 0x0000_0080;
 
 /// Kernel UAPI version of `fanotify_event_metadata.vers`.
@@ -187,9 +201,21 @@ impl FanotifyGroup {
     /// events (object fids on move/rename); it never gates opens, so it must
     /// not be combined with the `FAN_CLASS_CONTENT` permission group
     /// (`FAN_CLASS_CONTENT | FAN_REPORT_FID` is UAPI-forbidden: EINVAL).
+    ///
+    /// The fd is `FAN_NONBLOCK` (NOT `O_NONBLOCK` — that is not a fanotify_init
+    /// flag and returns EINVAL) so the permission hot path can synchronously
+    /// drain the queue (R1 cross-group ordering) without ever blocking: a
+    /// drain reads until `EAGAIN`, and `pending()` reports queue readiness
+    /// with a zero-timeout poll.
     pub fn new_topology() -> io::Result<Self> {
-        // SAFETY: fanotify_init allocates a kernel fd; FAN_REPORT_FID is UAPI.
-        let fd = unsafe { fanotify_init(FAN_CLOEXEC | FAN_REPORT_FID, 0) };
+        // SAFETY: fanotify_init allocates a kernel fd; FAN_REPORT_FID and
+        // FAN_REPORT_DFID_NAME are UAPI.
+        let fd = unsafe {
+            fanotify_init(
+                FAN_CLOEXEC | FAN_REPORT_FID | FAN_REPORT_DFID_NAME | libc::FAN_NONBLOCK,
+                0,
+            )
+        };
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -197,6 +223,24 @@ impl FanotifyGroup {
             fd,
             pidfd_enabled: false,
         })
+    }
+
+    /// Zero-timeout readiness probe: true when the group currently has queued
+    /// events. Cheap enough for the permission hot path to call before a
+    /// synchronous drain (R1: only drain when the queue actually holds
+    /// causally-prior topology events).
+    pub fn pending(&self) -> io::Result<bool> {
+        // SAFETY: self.fd is a valid pollable fd.
+        let mut pfd = libc::pollfd {
+            fd: self.fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let rc = unsafe { libc::poll(&mut pfd, 1, 0) };
+        if rc < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(rc > 0)
     }
 
     /// Mark `path` so move/rename events of its (direct) children are reported
@@ -475,13 +519,19 @@ fn parse_pidfd_info(info: &[u8]) -> Result<Option<RawFd>, FanotifyError> {
 
 /// The opaque filesystem identifier carried by a `FAN_EVENT_INFO_TYPE_FID`
 /// info record (LFH2 Step 3 topology group): the fsid plus the `file_handle`
-/// that `open_by_handle_at(2)` accepts verbatim.
+/// that `open_by_handle_at(2)` accepts verbatim. For move events the handle
+/// is the PARENT directory's handle; with `FAN_REPORT_DFID_NAME` the record
+/// also carries the moved object's name so the learner can resolve
+/// `parent/name` to the moved file's identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FidObject {
     /// `__kernel_fsid_t` (two `u32`s) identifying the filesystem.
     pub fsid: [u32; 2],
     pub handle_type: i32,
     pub handle_bytes: Vec<u8>,
+    /// The object's name from a `FAN_EVENT_INFO_TYPE_DFID_NAME` record
+    /// (null-terminated name, padding stripped). `None` for plain FID records.
+    pub name: Option<Vec<u8>>,
 }
 
 /// A parsed notification event from the `FAN_CLASS_NOTIF | FAN_REPORT_FID`
@@ -547,7 +597,7 @@ fn parse_fid_info(info: &[u8]) -> Result<Option<FidObject>, FanotifyError> {
         if len < HDR || off + len > info.len() {
             return Err(FanotifyError::MalformedInfoRecord);
         }
-        if info_type == FAN_EVENT_INFO_TYPE_FID {
+        if info_type == FAN_EVENT_INFO_TYPE_FID || info_type == FAN_EVENT_INFO_TYPE_DFID_NAME {
             if len < HDR + FSID + 8 {
                 // fsid + a file_handle header (handle_bytes u32, handle_type i32).
                 return Err(FanotifyError::MalformedInfoRecord);
@@ -571,10 +621,25 @@ fn parse_fid_info(info: &[u8]) -> Result<Option<FidObject>, FanotifyError> {
             // SAFETY: bounds checked above.
             let payload =
                 unsafe { std::slice::from_raw_parts(info.as_ptr().add(payload_off), handle_bytes) };
+            // DFID_NAME: the record's remaining bytes (after the payload)
+            // hold the object's name, null-terminated and padded to 8.
+            let name = if info_type == FAN_EVENT_INFO_TYPE_DFID_NAME {
+                let name_start = payload_off + handle_bytes;
+                let name_bytes = &info[name_start..off + len];
+                let name = name_bytes
+                    .iter()
+                    .position(|byte| *byte == 0)
+                    .map(|zero| name_bytes[..zero].to_vec())
+                    .unwrap_or_else(|| name_bytes.to_vec());
+                Some(name)
+            } else {
+                None
+            };
             return Ok(Some(FidObject {
                 fsid: [fsid0, fsid1],
                 handle_type,
                 handle_bytes: payload.to_vec(),
+                name,
             }));
         }
         off += len;
@@ -893,6 +958,52 @@ mod tests {
         let fid = events[0].fid.as_ref().expect("fid present");
         assert_eq!(fid.fsid, [7, 8]);
         assert_eq!(fid.handle_bytes, vec![0xAA]);
+        assert_eq!(fid.name, None);
+    }
+
+    #[test]
+    fn parses_dfid_name_record_with_parent_handle_and_name() {
+        // Kernel 7.1 move events carry the PARENT directory's handle plus the
+        // moved object's name (DFID_NAME, type=2): hdr + fsid + file_handle +
+        // name (null-terminated, padded to 8).
+        let meta_len = hdr_size();
+        let name = b"Cookies";
+        let name_padded = 8usize; // (4+8+8+8) + 8 = 36
+        let payload: [u8; 8] = [0x0f, 0, 0, 0, 0x6b, 0x19, 0xf9, 0x70];
+        let info_len = 4 + 8 + 8 + payload.len() + name_padded;
+        let total = meta_len + info_len;
+        let mut buf = vec![0u8; total];
+        let meta = fanotify_event_metadata {
+            event_len: total as u32,
+            vers: 3,
+            reserved: 0,
+            metadata_len: meta_len as u16,
+            mask: FAN_MOVE_EVENTS,
+            fd: FAN_NOFD,
+            pid: -1,
+        };
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                &meta as *const _ as *const u8,
+                std::mem::size_of::<fanotify_event_metadata>(),
+            )
+        };
+        buf[..bytes.len()].copy_from_slice(bytes);
+        let info_off = meta_len;
+        buf[info_off] = FAN_EVENT_INFO_TYPE_DFID_NAME;
+        buf[info_off + 2..info_off + 4].copy_from_slice(&(info_len as u16).to_le_bytes());
+        buf[info_off + 4..info_off + 8].copy_from_slice(&1u32.to_le_bytes());
+        buf[info_off + 8..info_off + 12].copy_from_slice(&2u32.to_le_bytes());
+        buf[info_off + 12..info_off + 16].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+        buf[info_off + 16..info_off + 20].copy_from_slice(&1i32.to_le_bytes());
+        buf[info_off + 20..info_off + 28].copy_from_slice(&payload);
+        buf[info_off + 28..info_off + 28 + name.len()].copy_from_slice(name);
+
+        let events = parse_fid_events(&buf).unwrap();
+        let fid = events[0].fid.as_ref().expect("fid present");
+        assert_eq!(fid.handle_bytes, payload);
+        assert_eq!(fid.handle_type, 1);
+        assert_eq!(fid.name.as_deref(), Some(&b"Cookies"[..]));
     }
 
     #[test]
