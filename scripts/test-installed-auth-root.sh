@@ -13,15 +13,36 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_USER="$SUDO_USER"
 TEST_UID="$(id -u "$TEST_USER")"
 TEST_GID="$(id -g "$TEST_USER")"
-WORK="$(mktemp -d -t guard-installed-auth-XXXXXX)"
-# AGENTS.md LIVE-TEST SAFETY rule 3: NEVER FAN_MARK_FILESYSTEM the root
-# mount (a root-fs mark gates every open on the machine -> total lockup; this
-# happened twice). Hard-assert the fixture filesystem is not the root mount.
-if [ "$(stat -c %d "$WORK")" = "$(stat -c %d /)" ]; then
-  echo "BLOCKED: fixture dir $WORK is on the ROOT filesystem (st_dev $(stat -c %d /));"
-  echo "        strict mode would gate every open on the whole machine (AGENTS.md)."
-  exit 2
-fi
+# AGENTS.md LIVE-TEST SAFETY: strict-filesystem marks the fixture's
+# filesystem. Fixtures MUST be on an ISOLATED loop-backed ext4 (root-fs mark
+# -> total lockup; tmpfs mark wedges /tmp when the daemon stalls). TEST_FS_ROOT
+# may override with a non-root non-tmpfs filesystem.
+LOOP_IMG=""; LOOP_DEV=""; LOOP_MNT=""; WORK=""
+select_test_fs() {
+  if [ -n "${TEST_FS_ROOT:-}" ]; then
+    if [ "$(stat -c %d "$TEST_FS_ROOT")" = "$(stat -c %d /)" ]; then
+      echo "BLOCKED: TEST_FS_ROOT=$TEST_FS_ROOT is on the ROOT filesystem; strict mode"
+      echo "        would gate every open on the whole machine (AGENTS.md)."
+      exit 2
+    fi
+    if [ "$(stat -f -c %T "$TEST_FS_ROOT")" = "tmpfs" ]; then
+      echo "BLOCKED: TEST_FS_ROOT=$TEST_FS_ROOT is tmpfs (AGENTS.md rule 4)."
+      exit 2
+    fi
+    WORK="$(mktemp -d "$TEST_FS_ROOT/guard-XXXXXX")"
+    return
+  fi
+  LOOP_IMG="$(mktemp /tmp/guard-img-XXXXXX.img)"
+  truncate -s 128M "$LOOP_IMG"
+  LOOP_DEV="$(losetup -f)"
+  losetup "$LOOP_DEV" "$LOOP_IMG"
+  mkfs.ext4 -q -F "$LOOP_DEV"
+  LOOP_MNT="$(mktemp -d /tmp/guard-mnt-XXXXXX)"
+  mount "$LOOP_DEV" "$LOOP_MNT"
+  WORK="$LOOP_MNT"
+  echo "isolated loop-backed ext4: $LOOP_DEV at $LOOP_MNT (never touches root/tmpfs)"
+}
+select_test_fs
 KEEP_WORK="${KEEP_WORK:-0}"
 # Use the distribution rules directory for the ephemeral rule: this Arch host
 # loads it at daemon startup, while its /etc rules directory did not produce an
@@ -70,7 +91,12 @@ cleanup() {
   rmdir /etc/guardd 2>/dev/null || true
   if [ -f /var/lib/guardd/audit.db ]; then unlink /var/lib/guardd/audit.db || true; fi
   rmdir /var/lib/guardd 2>/dev/null || true
-  if [ "$KEEP_WORK" = 1 ]; then
+  if [ -n "$LOOP_DEV" ]; then
+    umount "$LOOP_DEV" 2>/dev/null || true
+    losetup -d "$LOOP_DEV" 2>/dev/null || true
+    rm -f "$LOOP_IMG" 2>/dev/null || true
+    rmdir "$LOOP_MNT" 2>/dev/null || true
+  elif [ "$KEEP_WORK" = 1 ]; then
     echo "Synthetic installed-auth artifacts retained at: $WORK"
   else
     rm -rf -- "$WORK"
