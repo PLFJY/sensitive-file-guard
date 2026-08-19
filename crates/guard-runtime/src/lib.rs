@@ -44,15 +44,33 @@ pub struct SshPendingDetails {
 
 /// Shared policy/lease state. Backends supply verified identities and clocks;
 /// all lease transitions are kept here so they cannot drift by platform.
+///
+/// LFH5: `current_generation` mirrors the protection-continuity generation of
+/// the enforcement engine. Leases are stamped with the generation they were
+/// minted under and only authorize while `current_generation` still equals it;
+/// `bump_generation` (called on continuity loss) therefore kills every
+/// pre-existing lease even if revocation of some lease failed.
 #[derive(Default)]
 pub struct AuthorizationRuntime {
     leases: LeaseSet,
     next_lease_id: u64,
+    current_generation: u64,
 }
 
 impl AuthorizationRuntime {
     pub fn evaluate(&self, event: &AccessEvent, now: u64) -> Decision {
-        evaluate(event, &self.leases, now)
+        evaluate(event, &self.leases, now, self.current_generation)
+    }
+
+    /// LFH5: the protection-continuity generation new leases are stamped with.
+    pub fn current_generation(&self) -> u64 {
+        self.current_generation
+    }
+
+    /// LFH5: advance the generation after a protection-continuity loss. Every
+    /// lease minted before the bump stops authorizing immediately.
+    pub fn bump_generation(&mut self) {
+        self.current_generation = self.current_generation.saturating_add(1);
     }
 
     pub fn leases(&self) -> &LeaseSet {
@@ -102,6 +120,7 @@ impl AuthorizationRuntime {
             },
             expires_at,
             revoked: false,
+            generation: self.current_generation,
         });
         Ok((id, expires_at))
     }
@@ -131,6 +150,7 @@ impl AuthorizationRuntime {
             root: pending.target_root.clone(),
             expires_at,
             revoked: false,
+            generation: self.current_generation,
         });
         Ok((id, expires_at))
     }
@@ -429,6 +449,18 @@ impl PendingMigrationStore {
             .collect()
     }
 
+    /// LFH3: deny every pending migration confirmation and clear all
+    /// suppression/grace state. Called when protection continuity is lost so
+    /// no in-flight confirmation can authorize anything.
+    pub fn deny_all(&mut self) {
+        let requests: Vec<_> = self.requests.drain().map(|(_, request)| request).collect();
+        for request in requests {
+            request.resolve(false);
+        }
+        self.blocked.clear();
+        self.recent_approvals.clear();
+    }
+
     pub fn record_recent_approval(&mut self, details: &MigrationPendingDetails, now: u64) {
         self.cleanup(now);
         let key = RecentApprovalKey::from_details(details);
@@ -714,6 +746,16 @@ impl PendingSshReadStore {
             .filter_map(|id| self.requests.remove(&id))
             .collect()
     }
+
+    /// LFH3: deny every pending SSH read confirmation and clear suppression
+    /// state. Called when protection continuity is lost.
+    pub fn deny_all(&mut self) {
+        let requests: Vec<_> = self.requests.drain().map(|(_, request)| request).collect();
+        for request in requests {
+            request.resolve(false);
+        }
+        self.blocked.clear();
+    }
 }
 
 #[cfg(test)]
@@ -913,6 +955,69 @@ mod tests {
     }
 
     #[test]
+    fn generation_bump_kills_preloss_leases() {
+        // LFH5: approve_migration/approve_ssh_read stamp the current
+        // protection-continuity generation; after bump_generation (continuity
+        // loss) every pre-loss lease stops authorizing immediately, even one
+        // that escaped explicit revocation (defense in depth).
+        let details = browser_details();
+        let browser = process(Some("browser-b"));
+        let event = AccessEvent {
+            resource: details.resource.clone(),
+            process: browser.clone(),
+            operation: guard_core::policy::AccessOperation::Read,
+        };
+        let mut runtime = AuthorizationRuntime::default();
+        let (lease, _) = runtime
+            .approve_migration(&details, &browser, true, 101, 600)
+            .unwrap();
+        assert!(matches!(runtime.evaluate(&event, 102), Decision::AllowByLease(id) if id == lease));
+        assert_eq!(runtime.leases().migration[0].generation, 0);
+
+        let ssh = ssh_details();
+        let reader = process(None);
+        let ssh_event = AccessEvent {
+            resource: ssh.resource.clone(),
+            process: reader.clone(),
+            operation: guard_core::policy::AccessOperation::Read,
+        };
+        let (ssh_lease, _) = runtime.approve_ssh_read(&ssh, &reader, 101, 600).unwrap();
+        assert!(
+            matches!(runtime.evaluate(&ssh_event, 102), Decision::AllowByLease(id) if id == ssh_lease)
+        );
+        assert_eq!(runtime.leases().ssh_read[0].generation, 0);
+
+        // Continuity loss advances the generation.
+        runtime.bump_generation();
+        assert_eq!(runtime.current_generation(), 1);
+
+        // Pre-loss migration lease: dead by generation (distinct deny reason).
+        assert!(matches!(
+            runtime.evaluate(&event, 103),
+            Decision::Deny(guard_core::policy::DenyReason::StaleLeaseGeneration)
+        ));
+        // Pre-loss SSH-read lease: no longer authorizes.
+        assert!(matches!(
+            runtime.evaluate(&ssh_event, 103),
+            Decision::RequireSshKeyConfirmation
+        ));
+    }
+
+    #[test]
+    fn approve_migration_rejects_when_target_root_exited() {
+        // LFH5: "target exits before approval" — the pending target root must
+        // still be the live exact instance at approval time; otherwise the
+        // approval fails closed and no lease is created.
+        let details = browser_details();
+        let mut runtime = AuthorizationRuntime::default();
+        let current = process(Some("browser-b"));
+        assert!(runtime
+            .approve_migration(&details, &current, false, 101, 600)
+            .is_err());
+        assert!(runtime.leases().migration.is_empty());
+    }
+
+    #[test]
     fn browser_block_and_timeout_fail_closed() {
         let details = browser_details();
         let (permission, blocked) = fake_permission();
@@ -1036,5 +1141,39 @@ mod tests {
         };
         request.resolve(false);
         assert_eq!(*late.lock().unwrap(), Terminal::Denied);
+    }
+
+    #[test]
+    fn migration_deny_all_rejects_every_pending_and_clears_grace() {
+        let details = browser_details();
+        let (permission, terminal) = fake_permission();
+        let mut pending = PendingMigrationStore::default();
+        assert!(matches!(
+            pending.enqueue(details.clone(), permission, 10),
+            MigrationEnqueueResult::Created(_)
+        ));
+        pending.record_recent_approval(&details, 10);
+        assert!(pending.is_recently_approved(&details, 20));
+
+        pending.deny_all();
+
+        assert_eq!(*terminal.lock().unwrap(), Terminal::Denied);
+        assert!(pending.requests.is_empty());
+        assert!(!pending.is_recently_approved(&details, 20));
+        assert!(pending.blocked.is_empty());
+    }
+
+    #[test]
+    fn ssh_deny_all_rejects_every_pending() {
+        let details = ssh_details();
+        let (permission, terminal) = fake_permission();
+        let mut pending = PendingSshReadStore::default();
+        assert!(matches!(
+            pending.enqueue(details.clone(), permission, 10),
+            SshEnqueueResult::Created(_)
+        ));
+        pending.deny_all();
+        assert_eq!(*terminal.lock().unwrap(), Terminal::Denied);
+        assert!(pending.requests.is_empty());
     }
 }

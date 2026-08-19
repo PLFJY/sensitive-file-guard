@@ -465,6 +465,7 @@ fn deny_reason_str(r: DenyReason) -> &'static str {
         DenyReason::WrongUid => "wrong_uid",
         DenyReason::IdentityMismatch => "identity_mismatch",
         DenyReason::OneShotLeaseUsed => "one_shot_lease_used",
+        DenyReason::StaleLeaseGeneration => "stale_lease_generation",
         DenyReason::ProcessIntegrityCompromised => "process_integrity_compromised",
     }
 }
@@ -480,6 +481,7 @@ fn parse_deny_reason(s: String) -> DenyReason {
         "wrong_uid" => DenyReason::WrongUid,
         "identity_mismatch" => DenyReason::IdentityMismatch,
         "one_shot_lease_used" => DenyReason::OneShotLeaseUsed,
+        "stale_lease_generation" => DenyReason::StaleLeaseGeneration,
         "process_integrity_compromised" => DenyReason::ProcessIntegrityCompromised,
         _ => DenyReason::UnknownProcess,
     }

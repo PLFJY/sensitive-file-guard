@@ -143,6 +143,12 @@ pub fn classify_trust(
 /// only as context for trust classification). Browser classification
 /// (`browser` field) is left to Phase 05's registry; the resolver returns
 /// `browser: None` here.
+///
+/// Identity comes from the **actual executed image**: `/proc/<pid>/exe` is
+/// opened once and that fd is `fstat`-ed and handed to enrollment verification,
+/// so `exe_dev`/`exe_ino`/owner/mode describe the object the process is really
+/// running — even after the pathname was replaced or unlinked. The readlink
+/// result is kept only as a display/registry clue.
 pub fn resolve(
     pid: i32,
     current_uid: u32,
@@ -150,8 +156,9 @@ pub fn resolve(
 ) -> Result<ProcessIdentity, ResolveError> {
     let (start_time, ppid) = read_stat(pid)?;
     let exe = read_exe(pid)?;
-    let (exe_dev, exe_ino, exe_mode, exe_owner_uid) = stat_exe(&exe)?;
-    let enrolled = enrollment.verify(&exe);
+    let image = executed_image_fd(pid)?;
+    let (exe_dev, exe_ino, exe_mode, exe_owner_uid) = fstat_executed_image(&image)?;
+    let enrolled = enrollment.verify_fd(&image, &exe);
     let trust_tier = classify_trust(exe_owner_uid, exe_mode, current_uid, enrolled);
     let (uid, gid) = read_uid_gid(pid)?;
     let cmdline = read_cmdline(pid);
@@ -178,6 +185,24 @@ pub fn resolve(
         // is Normal so the existing fanotify behavior is preserved.
         integrity: ProcessIntegrity::Normal,
     })
+}
+
+/// Open the actual executed image of `pid` (`/proc/<pid>/exe`) and return the
+/// fd. The fd describes the object the process is running, immune to pathname
+/// replacement or unlinking after exec.
+fn executed_image_fd(pid: i32) -> Result<std::fs::File, ResolveError> {
+    std::fs::File::open(format!("/proc/{pid}/exe"))
+        .map_err(|err| ResolveError::ExeRead { pid, err })
+}
+
+/// `fstat` an executed-image fd for `(dev, ino, mode, owner_uid)`.
+fn fstat_executed_image(fd: &std::fs::File) -> Result<(u64, u64, u32, u32), ResolveError> {
+    use std::os::unix::fs::MetadataExt;
+    let md = fd.metadata().map_err(|err| ResolveError::ExeStat {
+        exe: PathBuf::from("/proc/<pid>/exe"),
+        err,
+    })?;
+    Ok((md.dev(), md.ino(), md.mode(), md.uid()))
 }
 
 /// Read just the process start time (`/proc/<pid>/stat` `starttime`).
@@ -419,15 +444,6 @@ fn read_stat_details(pid: i32) -> Result<ProcStatDetails, ResolveError> {
 
 fn read_exe(pid: i32) -> Result<PathBuf, ResolveError> {
     fs::read_link(format!("/proc/{pid}/exe")).map_err(|err| ResolveError::ExeRead { pid, err })
-}
-
-fn stat_exe(exe: &Path) -> Result<(u64, u64, u32, u32), ResolveError> {
-    use std::os::unix::fs::MetadataExt;
-    let md = fs::metadata(exe).map_err(|err| ResolveError::ExeStat {
-        exe: exe.to_path_buf(),
-        err,
-    })?;
-    Ok((md.dev(), md.ino(), md.mode(), md.uid()))
 }
 
 fn read_uid_gid(pid: i32) -> Result<(u32, u32), ResolveError> {
@@ -787,7 +803,7 @@ mod tests {
             operation: AccessOperation::Open,
         };
         assert_eq!(
-            evaluate(&evt, &LeaseSet::default(), 1_000_000),
+            evaluate(&evt, &LeaseSet::default(), 1_000_000, 0),
             Decision::Deny(DenyReason::NotTrustedIdentity)
         );
     }
@@ -814,5 +830,190 @@ mod tests {
         // the walker must stop gracefully (no panic).
         let ancestors = collect_ancestors(2_000_000);
         assert!(ancestors.len() <= MAX_ANCESTOR_DEPTH);
+    }
+
+    // --- LFH1: actual executed image identity ---
+
+    /// Spawn `exe` (a sleep-style binary) and return the child plus its
+    /// resolved identity BEFORE any pathname tampering.
+    ///
+    /// Waits (bounded) until the child has actually exec'd `exe`: a fixed
+    /// sleep is not enough under heavy parallel test load — the child may
+    /// still be running the test binary's image, so `/proc/PID/exe` would not
+    /// yet name `exe` and the resolved identity would be the test binary's.
+    // The returned `Child` is owned by the caller's `KillOnDrop` guard, which
+    // kills and `wait()`s it in `Drop`; the function cannot wait here without
+    // blocking on the 30s sleep.
+    #[allow(clippy::zombie_processes)]
+    fn spawn_and_resolve(exe: &Path, enrollment: &mut EnrollmentStore) -> (Child, ProcessIdentity) {
+        let child = Command::new(exe).arg("30").spawn().expect("spawn");
+        let pid = child.id() as i32;
+        let (dev, ino) = {
+            use std::os::unix::fs::MetadataExt;
+            let md = std::fs::metadata(exe).expect("stat spawned exe");
+            (md.dev(), md.ino())
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Ok(identity) = resolve(pid, 1000, enrollment) {
+                if identity.stable.exe_dev == dev && identity.stable.exe_ino == ino {
+                    return (child, identity);
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child {pid} did not exec {} within 10s",
+                exe.display()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn executed_image_survives_pathname_replacement() {
+        // LFH1 B: process starts running A; pathname A is replaced by a new
+        // inode B. The resolver must keep identifying the ACTUAL executed image
+        // (A's dev/ino/owner), not the new file now at the same pathname.
+        let dir = tempdir().unwrap();
+        let a = dir.path().join("enrolled-a");
+        std::fs::copy(find_sleep(), &a).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&a, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut enrollment = EnrollmentStore::new();
+        // Enroll A as user-writable so the executed object's hash matters.
+        enrollment.enroll(&a).unwrap();
+
+        let (child, identity_a) = spawn_and_resolve(&a, &mut enrollment);
+        let pid = child.id() as i32;
+        let _guard = KillOnDrop(Some(child));
+
+        // Replace the pathname with a different inode while A is running.
+        let b = dir.path().join("b");
+        std::fs::copy(find_sleep(), &b).unwrap();
+        std::fs::set_permissions(&b, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::rename(&b, &a).unwrap();
+
+        let identity_after = resolve(pid, 1000, &mut enrollment).expect("resolve after replace");
+        // The executed image identity is unchanged even though the pathname
+        // now names a different inode.
+        assert_eq!(
+            identity_after.stable.exe_dev, identity_a.stable.exe_dev,
+            "executed image dev must not change after pathname replacement"
+        );
+        assert_eq!(
+            identity_after.stable.exe_ino, identity_a.stable.exe_ino,
+            "executed image ino must not change after pathname replacement"
+        );
+        // The executed object is still the enrolled A (verify_fd hashes the fd,
+        // not the replaced pathname).
+        assert_eq!(identity_after.trust_tier, identity_a.trust_tier);
+        assert_eq!(
+            identity_after.trust_tier,
+            TrustTier::EnrolledUserWritable,
+            "replacement must not revoke the executed object's enrollment"
+        );
+    }
+
+    #[test]
+    fn executed_image_survives_unlink_with_deleted_suffix() {
+        // LFH1 B: process running, pathname unlinked; /proc/PID/exe readlink
+        // shows "... (deleted)". The fd identity must still resolve (no
+        // canonicalize/suffix failure => no erroneous allow or deny).
+        let dir = tempdir().unwrap();
+        let exe = dir.path().join("victim");
+        std::fs::copy(find_sleep(), &exe).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut enrollment = EnrollmentStore::new();
+
+        let (child, identity_before) = spawn_and_resolve(&exe, &mut enrollment);
+        let pid = child.id() as i32;
+        let _guard = KillOnDrop(Some(child));
+
+        std::fs::remove_file(&exe).unwrap();
+        let readlink =
+            std::fs::read_link(format!("/proc/{pid}/exe")).expect("readlink after unlink");
+        assert!(
+            readlink.to_string_lossy().contains("(deleted)"),
+            "deleted executable must readlink with the (deleted) suffix, got {readlink:?}"
+        );
+
+        let identity_after = resolve(pid, 1000, &mut enrollment).expect("resolve after unlink");
+        assert_eq!(
+            identity_after.stable.exe_dev, identity_before.stable.exe_dev,
+            "deleted executed image keeps its dev"
+        );
+        assert_eq!(
+            identity_after.stable.exe_ino, identity_before.stable.exe_ino,
+            "deleted executed image keeps its ino"
+        );
+        // The readlink display path may carry the suffix; the stable identity
+        // must not fail closed because of it.
+        assert_eq!(
+            identity_after.stable.start_time,
+            identity_before.stable.start_time
+        );
+    }
+
+    #[test]
+    fn new_process_at_replaced_path_does_not_inherit_old_enrollment() {
+        // LFH1 B step 5: a NEW process starting the replaced pathname (now B)
+        // must NOT inherit A's trust.
+        let dir = tempdir().unwrap();
+        let a = dir.path().join("enrolled");
+        std::fs::copy(find_sleep(), &a).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&a, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut enrollment = EnrollmentStore::new();
+        enrollment.enroll(&a).unwrap();
+
+        // A runs and is replaced by B (different bytes) while A is alive.
+        let (child, _) = spawn_and_resolve(&a, &mut enrollment);
+        let _guard = KillOnDrop(Some(child));
+
+        // A NEW process starts the replaced pathname. Its executed image is B,
+        // which has DIFFERENT bytes than enrolled A -> Unknown, even though the
+        // pathname matches the enrollment key.
+        let b = dir.path().join("b");
+        let b_bytes = {
+            let mut bytes = std::fs::read(find_sleep()).unwrap();
+            bytes.push(0x7f); // trailing junk: same family, different hash
+            bytes
+        };
+        std::fs::write(&b, b_bytes).unwrap();
+        std::fs::set_permissions(&b, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::rename(&b, &a).unwrap();
+
+        let child2 = Command::new(&a)
+            .arg("30")
+            .spawn()
+            .expect("spawn replaced path");
+        let pid2 = child2.id() as i32;
+        let _guard2 = KillOnDrop(Some(child2));
+        // Wait (bounded) for the exec to complete so the resolved identity is
+        // B's executed image, not the test binary's pre-exec image.
+        let (dev2, ino2) = {
+            use std::os::unix::fs::MetadataExt;
+            let md = std::fs::metadata(&a).expect("stat replaced path");
+            (md.dev(), md.ino())
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let identity_new = loop {
+            if let Ok(id) = resolve(pid2, 1000, &mut enrollment) {
+                if id.stable.exe_dev == dev2 && id.stable.exe_ino == ino2 {
+                    break id;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child {pid2} did not exec the replaced path within 10s"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert_eq!(
+            identity_new.trust_tier,
+            TrustTier::Unknown,
+            "new process at a replaced path must not inherit old enrollment"
+        );
     }
 }

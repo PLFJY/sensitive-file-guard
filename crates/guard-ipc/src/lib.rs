@@ -405,6 +405,11 @@ pub struct StatusInfo {
     pub topology_degraded: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mac_health: Option<Box<MacHealthInfo>>,
+    /// Split Linux health dimensions (LFH0). Each dimension carries its own
+    /// verdict so a dropped audit event is never conflated with lost fanotify
+    /// mark continuity. `None` means the backend did not populate Linux health.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linux_health: Option<Box<LinuxHealthInfo>>,
     pub protected_files: usize,
     #[serde(default)]
     pub ssh_protected_keys: usize,
@@ -468,6 +473,37 @@ pub struct MacHealthInfo {
     pub shield_cs_invalidated_observed: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process_shield: Option<Box<ProcessShieldInfo>>,
+}
+
+/// Split Linux health dimensions (LFH0). Each dimension is judged separately:
+/// a dropped audit event, a classifier failure, and a fanotify mark/overflow
+/// problem are distinct conditions that must not be conflated.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinuxHealthInfo {
+    /// File Shield enforcement: `"ACTIVE"`, `"REDUCED"`, or `"NOT_ENFORCING"`.
+    pub file_shield: String,
+    /// Protection continuity since daemon start: `"INTACT"` or `"LOST"`.
+    /// A fanotify queue overflow or required-mark loss sets LOST; the daemon
+    /// never claims "all dropped events were denied" (the kernel does not
+    /// guarantee that).
+    pub continuity: String,
+    /// Exact reason for a lost continuity, e.g. `"fanotify_queue_overflow"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuity_reason: Option<String>,
+    /// Audit pipeline health: `"HEALTHY"` or `"DEGRADED"` (events dropped).
+    pub audit: String,
+    /// Process Shield capability inventory on this host: `"UNSUPPORTED"` for
+    /// the Linux File Shield freeze (inventory only, not enforced).
+    pub process_shield: String,
+    /// LFH1: whether the fanotify group was created with FAN_REPORT_PIDFD.
+    /// `true` => events carry kernel-pinned pidfds; `false` => legacy
+    /// PID+starttime identity (REDUCED(legacy_process_identity)).
+    #[serde(default)]
+    pub pidfd_enabled: bool,
+    /// LFH1: count of events on a pidfd-enabled group that lacked a usable
+    /// pidfd. Any nonzero value means protected candidates failed closed.
+    #[serde(default)]
+    pub pidfd_missing_events: u64,
 }
 
 /// Separate Process Shield status (MPS8). Truthful per-capability state, never
@@ -935,6 +971,7 @@ mod tests {
             strict_alias_matches: Some(2),
             topology_degraded: Some(false),
             mac_health: None,
+            linux_health: None,
             protected_files: 6,
             protected_trees: 2,
             browsers: 1,

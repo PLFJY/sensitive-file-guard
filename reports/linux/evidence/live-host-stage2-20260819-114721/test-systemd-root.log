@@ -1,0 +1,37 @@
+==> Checking unprivileged pre-built release binaries
+==> Test 1: install service
+    1. Create reviewed strict config: sudo guardctl setup --home /home/USER
+    2. Optionally choose an existing key: guardctl ssh suggest
+    3. Start: sudo systemctl enable --now guardd
+    4. Verify: guardctl status
+    5. Desktop notifications (as your user): systemctl --user daemon-reload && systemctl --user enable --now guard-notify
+PASS: service installed but not enabled before configuration review
+==> Test 2: start service, verify status
+PASS: service is active
+PASS: guardctl status shows ACTIVE
+==> Test 3: browser denied; SSH read fail-closed
+PASS: cookies denied
+PASS: SSH key read denied (fail-closed)
+==> Test 4: stop service (fail-open)
+PASS: cookies readable after stop (fail-open confirmed)
+==> Test 5: restart, marks reconstructed
+PASS: cookies denied after restart (marks reconstructed)
+==> Test 6: crash + auto-restart
+    killed guardd (pid=592269), waiting for restart...
+PASS: systemd restarted guardd after crash
+PASS: cookies denied after crash-restart
+==> Test 7: stale socket recovery
+    stale socket created at /run/guardd/guardd.sock
+PASS: stale socket recovered, IPC responds
+==> Test 8: guardctl status states
+PASS: status shows ACTIVE when running
+PASS: guardctl cannot connect to stopped daemon (expected)
+==> Test 9: no secret contents in journal
+PASS: no secret contents in journald
+
+==> Phase 14 systemd test summary: PASS=13 FAIL=0 BLOCKED=0
+    (see journalctl -u guardd for daemon logs)
+==> Uninstalling guardd service
+    Removed: /etc/systemd/system/guardd.service, /usr/local/lib/systemd/user/guard-notify.service, /usr/share/polkit-1/actions/org.guardd.policy, /usr/local/share/guardd/guardd-config.example.json, /usr/local/bin/guardd, /usr/local/bin/guardctl, /usr/local/bin/guard-notify (and any obsolete terminal UI binary)
+    Preserved: /etc/guardd (edit to remove), /var/lib/guardd (audit DB)
+==> Uninstall complete

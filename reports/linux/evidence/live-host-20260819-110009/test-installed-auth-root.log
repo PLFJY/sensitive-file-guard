@@ -1,0 +1,2 @@
+==> Installing real systemd/polkit configuration
+install: cannot create regular file '/etc/guardd/config.json': No such file or directory

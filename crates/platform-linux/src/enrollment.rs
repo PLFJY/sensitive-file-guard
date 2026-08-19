@@ -119,6 +119,41 @@ impl EnrollmentStore {
         }
     }
 
+    /// Verify an **actual executed image** by its open fd (LFH1). The hash and
+    /// file identity come from the object the process is really running, never
+    /// from re-opening the pathname (which an attacker may have replaced).
+    ///
+    /// `display_path` is the readlink of `/proc/PID/exe` (may carry a
+    /// `" (deleted)"` suffix when the original path was unlinked). The lookup
+    /// key is the canonical enrollment path; the suffix is stripped for the
+    /// lookup so a deleted-but-still-running enrolled binary keeps verifying
+    /// against its executed object.
+    pub fn verify_fd(&mut self, fd: &File, display_path: &Path) -> bool {
+        let lookup = strip_deleted_suffix(display_path);
+        let Some(record) = self.by_path.get(&lookup).cloned() else {
+            return false;
+        };
+        let Ok(current_identity) = fd_identity(fd) else {
+            return false;
+        };
+        if current_identity == record.identity {
+            return true;
+        }
+        // Executed-object identity changed: rehash from the fd itself.
+        let Ok(current_sha) = hash_fd(fd) else {
+            return false;
+        };
+        if current_sha == record.sha256 {
+            if let Some(r) = self.by_path.get_mut(&lookup) {
+                r.identity = current_identity;
+            }
+            true
+        } else {
+            self.by_path.remove(&lookup);
+            false
+        }
+    }
+
     pub fn records(&self) -> impl Iterator<Item = &EnrollmentRecord> {
         self.by_path.values()
     }
@@ -134,6 +169,17 @@ fn canonicalize(exe: &Path) -> Result<PathBuf, EnrollError> {
     }
 }
 
+/// The kernel renders a running-but-unlinked executable as `"... (deleted)"`
+/// in `/proc/<pid>/exe`; strip that suffix for enrollment lookup while keeping
+/// the executed-object fd as the source of truth.
+fn strip_deleted_suffix(path: &Path) -> PathBuf {
+    const SUFFIX: &str = " (deleted)";
+    let s = path.to_string_lossy();
+    s.strip_suffix(SUFFIX)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
 fn stat_identity(path: &Path) -> io::Result<FileIdentity> {
     use std::os::unix::fs::MetadataExt;
     let md = std::fs::metadata(path)?;
@@ -145,8 +191,36 @@ fn stat_identity(path: &Path) -> io::Result<FileIdentity> {
     })
 }
 
+/// File identity of an already-open executed image (LFH1). Uses `fstat` on the
+/// fd the kernel gave us for `/proc/<pid>/exe`, so the identity belongs to the
+/// object the process is actually running — not to whatever now sits at the
+/// pathname.
+fn fd_identity(fd: &File) -> io::Result<FileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    let md = fd.metadata()?;
+    Ok(FileIdentity {
+        dev: md.dev(),
+        ino: md.ino(),
+        size: md.len(),
+        mtime_ns: md.mtime(),
+    })
+}
+
 fn hash_file(path: &Path) -> io::Result<Sha256Digest> {
     let mut f = File::open(path)?;
+    hash_read(&mut f)
+}
+
+/// SHA-256 of an open executed image, read from the fd (LFH1). Rewinds first
+/// so a caller can hash the same fd repeatedly.
+fn hash_fd(fd: &File) -> io::Result<Sha256Digest> {
+    use std::io::Seek;
+    let mut f = fd.try_clone()?;
+    f.seek(std::io::SeekFrom::Start(0))?;
+    hash_read(&mut f)
+}
+
+fn hash_read(f: &mut File) -> io::Result<Sha256Digest> {
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
     loop {
@@ -238,5 +312,72 @@ mod tests {
             libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), 0);
         }
         assert!(store.verify(&exe), "metadata-only change must stay valid");
+    }
+
+    #[test]
+    fn verify_fd_accepts_actual_executed_object() {
+        let dir = tempdir().unwrap();
+        let exe = write_exe(dir.path(), "mybrowser", b"executed bytes");
+        let mut store = EnrollmentStore::new();
+        store.enroll(&exe).unwrap();
+        let fd = File::open(&exe).unwrap();
+        assert!(store.verify_fd(&fd, &exe));
+    }
+
+    #[test]
+    fn verify_fd_hashes_the_fd_not_the_pathname() {
+        // LFH1: the pathname is replaced by a different inode; the fd still
+        // refers to the enrolled executed object, so trust must survive.
+        let dir = tempdir().unwrap();
+        let exe = write_exe(dir.path(), "mybrowser", b"trusted bytes");
+        let mut store = EnrollmentStore::new();
+        store.enroll(&exe).unwrap();
+
+        // Hold the executed object open, then rename a NEW inode over the
+        // pathname (a real pathname replacement, not an in-place truncate).
+        let fd = File::open(&exe).unwrap();
+        let attacker = write_exe(dir.path(), "attacker", b"attacker bytes");
+        std::fs::rename(&attacker, &exe).unwrap();
+        assert!(
+            store.verify_fd(&fd, &exe),
+            "fd of the original object must still verify"
+        );
+        assert!(
+            !store.verify(&exe),
+            "pathname now names the attacker's file; path-based verify must fail"
+        );
+    }
+
+    #[test]
+    fn verify_fd_tolerates_deleted_suffix_for_lookup() {
+        // `/proc/PID/exe` renders a deleted executable as "... (deleted)".
+        let dir = tempdir().unwrap();
+        let exe = write_exe(dir.path(), "mybrowser", b"still running");
+        let mut store = EnrollmentStore::new();
+        store.enroll(&exe).unwrap();
+        let fd = File::open(&exe).unwrap();
+        // Delete the pathname: the fd stays valid.
+        std::fs::remove_file(&exe).unwrap();
+        let deleted_display = PathBuf::from(format!("{} (deleted)", exe.display()));
+        assert!(store.verify_fd(&fd, &deleted_display));
+    }
+
+    #[test]
+    fn verify_fd_changed_bytes_invalidate() {
+        let dir = tempdir().unwrap();
+        let exe = write_exe(dir.path(), "mybrowser", b"original-bytes-here");
+        let mut store = EnrollmentStore::new();
+        store.enroll(&exe).unwrap();
+        // Modify contents through an fd (in-place truncate keeps the inode but
+        // changes size + bytes).
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&exe)
+            .unwrap();
+        f.write_all(b"tampered").unwrap();
+        drop(f);
+        let fd = File::open(&exe).unwrap();
+        assert!(!store.verify_fd(&fd, &exe), "changed bytes must invalidate");
     }
 }

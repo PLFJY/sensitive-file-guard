@@ -1,0 +1,19 @@
+==> Starting guardd (dev mode) protecting /tmp/guard-fanotify-2F1qj0/protected
+guardd active (pid=574126)
+==> Test 1: unprotected file opens normally
+PASS: unprotected file opened by probe
+==> Test 2: protected synthetic file denied for unauthorized opener (cat)
+PASS: cat denied (open failed before read)
+==> Test 3: enrolled probe allowed to read protected file
+PASS: enrolled probe read protected marker
+==> Test 4: repeated denied opens do not leak file descriptors
+    guardd fds: before=4 after=4
+PASS: no fd leak (before=4 after=4)
+==> Test 6: burst load (1000 denied opens) and latency
+    1000 denied opens in 739 ms (~739882 us/op incl. process spawn)
+PASS: burst completed without daemon crash
+==> Test 5: daemon clean shutdown releases resources
+PASS: guardd exited on SIGTERM
+
+==> Phase 02 root integration summary: PASS=6 FAIL=0 BLOCKED=0
+    (see /tmp/guard-fanotify-2F1qj0/guardd.log for daemon decision log)

@@ -32,14 +32,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use guard_audit::AuditRecord;
 use guard_browser::{CustomProfile, ProtectedResourceRegistry};
-use guard_core::identity::{ExeIdentity, ProcessIdentity, ProcessIntegrity};
+#[cfg(test)]
+use guard_core::identity::ProcessIntegrity;
+use guard_core::identity::{ExeIdentity, ProcessIdentity};
 use guard_core::lease::{LeaseId, LeaseSet, MigrationAccessLease, MigrationLeaseState};
 #[cfg(test)]
 use guard_core::policy::evaluate;
 use guard_core::policy::{AccessEvent, AccessOperation, Decision, DenyReason, MigrationCandidate};
 #[cfg(test)]
 use guard_core::resource::BrowserFamily;
-use guard_core::resource::{BrowserId, ProfileId, ProtectedResource, ProtectedResourceKind};
+use guard_core::resource::{
+    BrowserId, ProfileId, ProtectedResource, ProtectedResourceId, ProtectedResourceKind,
+};
 pub use guard_platform::config::BrowserEnrollmentConfig;
 use guard_runtime::AuthorizationRuntime;
 pub use guard_runtime::{MigrationPendingDetails, SshPendingDetails};
@@ -98,6 +102,76 @@ pub struct EnforcementEngine {
     /// Persistent topology refresh is currently failing; existing marks still
     /// enforce, but replacement/new-object coverage may be stale.
     pub topology_degraded: bool,
+    /// LFH3: sticky protection-continuity state. Once LOST it stays LOST until
+    /// an explicit operator reset/restart generation policy — "now healthy"
+    /// never erases "was broken".
+    pub continuity: ProtectionContinuity,
+}
+
+/// LFH3: historical protection continuity. `Lost` is sticky: current
+/// enforcement may recover, but the daemon must keep reporting the loss.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProtectionContinuity {
+    /// No verifiable gap since daemon start.
+    Intact { generation: u64 },
+    /// A continuity-breaking event occurred; reason explains it. Sticky until
+    /// an explicit operator reset.
+    Lost {
+        generation: u64,
+        reason: ContinuityLossReason,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContinuityLossReason {
+    FanotifyQueueOverflow,
+    RequiredMarkLoss,
+    /// Reserved for LFH4 fdstore/lifecycle evidence and future phases that
+    /// construct it; not produced by the current daemon paths.
+    #[allow(dead_code)]
+    FilesystemLifecycleLoss,
+    /// Reserved for future classifier-failure hardening.
+    #[allow(dead_code)]
+    UnrecoverableClassifierFailure,
+}
+
+impl ContinuityLossReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::FanotifyQueueOverflow => "fanotify_queue_overflow",
+            Self::RequiredMarkLoss => "required_filesystem_mark_lost",
+            Self::FilesystemLifecycleLoss => "filesystem_lifecycle_loss",
+            Self::UnrecoverableClassifierFailure => "unrecoverable_classifier_failure",
+        }
+    }
+}
+
+impl ProtectionContinuity {
+    /// Returns true when the state is Lost (regardless of whether current
+    /// enforcement has recovered).
+    #[cfg(test)]
+    pub fn is_lost(&self) -> bool {
+        matches!(self, Self::Lost { .. })
+    }
+
+    /// Mark the continuity Lost with the given reason, keeping the generation
+    /// monotonic. Repeated losses keep the original (earliest) generation.
+    pub fn record_loss(&mut self, reason: ContinuityLossReason) {
+        if let Self::Lost { generation, .. } = self {
+            debug_assert!(*generation >= 1);
+            return; // sticky: keep the earliest loss
+        }
+        *self = Self::Lost {
+            generation: self.generation(),
+            reason,
+        };
+    }
+
+    fn generation(&self) -> u64 {
+        match self {
+            Self::Intact { generation } | Self::Lost { generation, .. } => *generation,
+        }
+    }
 }
 
 impl EnforcementEngine {
@@ -181,6 +255,7 @@ impl EnforcementEngine {
             denied: 0,
             unclassified: 0,
             topology_degraded: false,
+            continuity: ProtectionContinuity::Intact { generation: 1 },
         })
     }
 
@@ -245,12 +320,46 @@ impl EnforcementEngine {
         found
     }
 
+    /// LFH3: revoke ALL live authority when protection continuity is lost
+    /// (fanotify overflow, required mark loss, ...). After this, no lease
+    /// (migration, SSH read, SSH load), pending confirmation, or recent
+    /// approval grace can authorize anything; the exact-process identity cache
+    /// is dropped so no stale identity survives.
+    pub fn revoke_all_authority(&mut self) {
+        for lease in &mut self.runtime.leases_mut().migration {
+            lease.revoked = true;
+        }
+        for lease in &mut self.runtime.leases_mut().ssh {
+            lease.revoked = true;
+        }
+        for lease in &mut self.runtime.leases_mut().ssh_read {
+            lease.revoked = true;
+        }
+        self.ssh_agent_bindings.clear();
+        self.identity_cache.clear();
+    }
+
+    /// LFH3: mark continuity Lost with `reason`, then revoke all live
+    /// authority and pending confirmations. Called on the fanotify overflow
+    /// path and on required-mark loss. Sticky: once Lost, stays Lost until an
+    /// explicit operator reset.
+    pub fn lose_continuity(&mut self, reason: ContinuityLossReason) {
+        self.continuity.record_loss(reason);
+        // LFH5: advance the lease generation so any lease that escaped
+        // revocation (or was minted concurrently) is dead by generation too.
+        self.runtime.bump_generation();
+        self.revoke_all_authority();
+    }
+
     /// Authorize a cross-browser migration access lease. The
     /// lease is **armed**: bound to the target browser's executable file
-    /// identity (`ExeIdentity`), so it matches the next target process — or any
-    /// process in its tree — that opens the named source profile. This avoids
-    /// permanent allow-listing while tolerating the target being launched after
-    /// authorization.
+    /// identity (`ExeIdentity`), so it matches the next target process that
+    /// opens the named source profile. This avoids permanent allow-listing
+    /// while tolerating the target being launched after authorization.
+    ///
+    /// LFH5: authority is EXACT READER INSTANCE. When the enforcement layer
+    /// binds the armed lease it binds the exact live process; a descendant
+    /// helper is never authorized unless explicitly bound post-observation.
     ///
     /// `uid` is the authorizing user; the IPC layer takes it from
     /// kernel-verified peer creds and NEVER from JSON. `duration_secs` defaults
@@ -289,6 +398,7 @@ impl EnforcementEngine {
         let now = now_secs();
         let expires_at = now.saturating_add(dur);
         let id = self.runtime.next_lease_id();
+        let generation = self.runtime.current_generation();
         self.runtime
             .leases_mut()
             .migration
@@ -301,6 +411,7 @@ impl EnforcementEngine {
                 state: MigrationLeaseState::Armed { target },
                 expires_at,
                 revoked: false,
+                generation,
             });
         Ok((id, expires_at))
     }
@@ -327,7 +438,9 @@ impl EnforcementEngine {
         {
             return None;
         }
-        let target_root = target_browser_root(&target);
+        // LFH5: EXACT READER INSTANCE — the approval binds the exact opener
+        // process observed, never an ancestor and never the whole tree.
+        let target_root = target.stable.clone();
         Some(MigrationPendingDetails {
             candidate: candidate.clone(),
             resource,
@@ -419,12 +532,37 @@ impl EnforcementEngine {
         record
     }
 
+    /// Audit record for a pidfd validation failure (LFH1). The requester's
+    /// resource is unknown because we deliberately never trust a pathname for
+    /// this decision; the record carries only process metadata and the reason.
+    pub fn pidfd_failure_audit_record(&mut self, pid: i32, detail: &str) -> Option<AuditRecord> {
+        let resolved = self.resolve_process(pid);
+        let record = build_audit_record(
+            &ProtectedResource {
+                id: ProtectedResourceId("pidfd-validation-failure".into()),
+                kind: ProtectedResourceKind::Other,
+                owner_uid: 0,
+                browser: None,
+                profile: None,
+                path: PathBuf::from("/proc/<pid>/exe"),
+            },
+            resolved.as_ref().map(|(identity, _)| identity),
+            Decision::Deny(DenyReason::UnknownProcess),
+            detail,
+        );
+        Some(record)
+    }
+
     /// Authorize a one-shot SSH load lease (Phase 11). The lease is bound to
     /// the exact `ssh-add` process invocation via `StableIdentity` (exe +
-    /// start_time + dev + ino). The `uid` is the authorizing user (from
-    /// kernel-verified peer creds). The lease auto-expires after
-    /// `DEFAULT_SSH_LOAD_DURATION_SECS` and is also revoked by `guardctl`
-    /// when `ssh-add` exits.
+    /// start_time + dev + ino) and the exact PID. The `uid` is the authorizing
+    /// user (from kernel-verified peer creds). The lease auto-expires after
+    /// `DEFAULT_SSH_LOAD_DURATION_SECS` and is also revoked by `guardctl` when
+    /// `ssh-add` exits.
+    ///
+    /// The one-shot is consumed on process exit/PID reuse (checked on the hot
+    /// path), NOT on the first permission event: a real `ssh-add` emits
+    /// multiple `FAN_ACCESS_PERM` events for a single load (open + reads).
     ///
     /// Returns `(lease_id, expires_at)` or an error message if the path is not
     /// a protected SSH private key owned by `uid`.
@@ -433,6 +571,7 @@ impl EnforcementEngine {
         path: &Path,
         uid: u32,
         target: guard_core::identity::StableIdentity,
+        pid: u32,
         agent_binding: SshAgentBinding,
     ) -> Result<(LeaseId, u64), String> {
         // Validate the resource is a protected SSH private key owned by uid.
@@ -460,6 +599,7 @@ impl EnforcementEngine {
         let now = now_secs();
         let expires_at = now.saturating_add(dur);
         let id = self.runtime.next_lease_id();
+        let generation = self.runtime.current_generation();
         self.runtime
             .leases_mut()
             .ssh
@@ -468,9 +608,11 @@ impl EnforcementEngine {
                 resource: res.id.clone(),
                 uid,
                 target,
+                pid,
                 expires_at,
                 revoked: false,
                 used: false,
+                generation,
             });
         match agent_binding {
             SshAgentBinding::Verified(path) => {
@@ -714,24 +856,31 @@ impl EnforcementEngine {
             | Decision::RequireSshKeyConfirmation
             | Decision::Detected => {}
         }
-        // Phase 11: mark one-shot SSH load lease as used after a successful
-        // allow. The lease binds to the exact ssh-add invocation; once it
-        // reads the key, the `used` flag prevents any further open — even by
-        // the same process — from re-using it.
+        // Phase 11 one-shot SSH load lease: consume it when the exact ssh-add
+        // process has exited or its identity changed (PID reuse), NOT on the
+        // first permission event. A real `ssh-add` performs multiple
+        // `FAN_ACCESS_PERM` events for one load (open + reads); consuming on
+        // the first event would deny the rest of the load. The agent-socket
+        // binding check above still runs on every event, so a resumed process
+        // without the pinned endpoint fails closed.
         if let Decision::AllowByLease(id) = &decision {
-            let mut consumed = false;
+            let mut exited = false;
             for l in &mut self.runtime.leases_mut().ssh {
                 if l.id == *id {
-                    l.used = true;
-                    consumed = true;
+                    let live = linux_identity::read_start_time(l.pid as i32).ok()
+                        == Some(l.target.start_time);
+                    if !live {
+                        l.used = true;
+                        exited = true;
+                    }
                     break;
                 }
             }
-            if consumed {
+            if exited {
                 self.ssh_agent_bindings.remove(id);
             }
         }
-        let record = if should_record_decision(&decision) {
+        let record = if should_record_decision(&decision, resource.kind) {
             let backend_diag = format!(
                 "{};classify={};trust={:?}",
                 resolve_diag, classification, process.trust_tier
@@ -762,10 +911,18 @@ impl EnforcementEngine {
         }
     }
 
-    /// Bind an armed migration lease to the first matching target process and
-    /// retire bound leases as soon as their root process exits. This mutation
-    /// happens while the engine mutex is held, immediately before policy
-    /// evaluation, so an armed executable-wide grant is never exposed.
+    /// Bind an armed migration lease to the exact process instance that will
+    /// read, and retire bound leases as soon as their root process exits. This
+    /// mutation happens while the engine mutex is held, immediately before
+    /// policy evaluation, so an armed executable-wide grant is never exposed.
+    ///
+    /// LFH5: EXACT READER INSTANCE. The bound root is always the exact opener
+    /// observed here — the target browser itself when its own identity matches
+    /// the armed target, or the exact observed descendant helper when an
+    /// ancestor matches (post-bind observed exact descendant). Ancestry only
+    /// validates membership in the authorized tree at bind time; it never
+    /// grants whole-tree authority, and unobserved pre-existing descendants
+    /// never auto-upgrade.
     fn refresh_migration_states(
         &mut self,
         resource: &ProtectedResource,
@@ -788,23 +945,19 @@ impl EnforcementEngine {
                 continue;
             }
 
-            let root = if process.stable.exe_identity() == *target {
-                Some(process.stable.clone())
-            } else {
-                process
+            // The opener is the intended reader and is authorized exactly:
+            // either its own identity is the armed target (the target browser
+            // itself) or it descends from the armed target (a helper observed
+            // at bind time). Both cases bind the exact opener instance.
+            let authorized = process.stable.exe_identity() == *target
+                || process
                     .ancestors
                     .iter()
-                    .find(|ancestor| ancestor.exe_identity() == *target)
-                    .map(|ancestor| guard_core::identity::ProcessStableId {
-                        pid: ancestor.pid,
-                        start_time: ancestor.start_time,
-                        exe: ancestor.exe.clone(),
-                        exe_dev: ancestor.exe_dev,
-                        exe_ino: ancestor.exe_ino,
-                    })
-            };
-            if let Some(root) = root {
-                lease.state = MigrationLeaseState::Bound { root };
+                    .any(|ancestor| ancestor.exe_identity() == *target);
+            if authorized {
+                lease.state = MigrationLeaseState::Bound {
+                    root: process.stable.clone(),
+                };
             }
         }
     }
@@ -889,23 +1042,6 @@ fn extend_fd_index(
     }
 }
 
-fn target_browser_root(target: &ProcessIdentity) -> guard_core::ProcessStableId {
-    let target_exe = target.stable.exe_identity();
-    target
-        .ancestors
-        .iter()
-        .rev()
-        .find(|ancestor| ancestor.exe_identity() == target_exe)
-        .map(|ancestor| guard_core::ProcessStableId {
-            pid: ancestor.pid,
-            start_time: ancestor.start_time,
-            exe: ancestor.exe.clone(),
-            exe_dev: ancestor.exe_dev,
-            exe_ino: ancestor.exe_ino,
-        })
-        .unwrap_or_else(|| target.stable.clone())
-}
-
 /// Recursively mark `dir` and all its subdirectories with the tree mask.
 fn mark_dir_recursive(
     group: &fanotify::FanotifyGroup,
@@ -973,7 +1109,7 @@ fn now_ms() -> u64 {
 /// Build an `AuditRecord` from the decision context. `process` is `None` when
 /// identity resolution failed (the record still captures the resource + pid).
 /// No secret contents are stored — only paths and metadata.
-fn build_audit_record(
+pub(crate) fn build_audit_record(
     resource: &ProtectedResource,
     process: Option<&ProcessIdentity>,
     decision: Decision,
@@ -1029,8 +1165,16 @@ fn build_audit_record(
 /// allows in debug builds preserves diagnostics and tests without imposing
 /// per-open string/path allocation and SQLite queue pressure in production.
 #[inline]
-fn should_record_decision(decision: &Decision) -> bool {
-    cfg!(debug_assertions) || matches!(decision, Decision::Deny(_))
+/// Which decisions produce an audit record. Denials always record. In release
+/// builds successful decisions are otherwise suppressed for audit volume —
+/// EXCEPT SSH private-key lease grants, which are the accountability path for
+/// who loaded a key (LFH6 live acceptance requires ALLOW_BY_LEASE audit
+/// evidence for a brokered load).
+fn should_record_decision(decision: &Decision, kind: ProtectedResourceKind) -> bool {
+    cfg!(debug_assertions)
+        || matches!(decision, Decision::Deny(_))
+        || (matches!(decision, Decision::AllowByLease(_))
+            && kind == ProtectedResourceKind::SshPrivateKey)
 }
 
 /// Cheap diagnostic for how the fd was classified: "fd_index" if the inode hit
@@ -1105,6 +1249,7 @@ mod tests {
             b.exe_paths.push(exe.to_path_buf());
         }
         EnforcementConfig {
+            config_version: platform_linux::config::CONFIG_VERSION,
             enforcement_mode: EnforcementMode::Conservative,
             browsers: vec![b],
             enrolled_exes: vec![],
@@ -1120,6 +1265,7 @@ mod tests {
     ) -> EnforcementConfig {
         let uid = unsafe { libc::getuid() };
         EnforcementConfig {
+            config_version: platform_linux::config::CONFIG_VERSION,
             enforcement_mode: EnforcementMode::Conservative,
             browsers: vec![
                 BrowserEnrollmentConfig {
@@ -1148,6 +1294,7 @@ mod tests {
     fn config_accepts_documented_lowercase_browser_families() {
         let config: EnforcementConfig = serde_json::from_str(
             r#"{
+                "enforcement_mode": "strict-filesystem",
                 "browsers": [
                     {"id":"chrome","family":"chromium","profile_root":"/tmp/chrome"},
                     {"id":"firefox","family":"firefox","profile_root":"/tmp/firefox"}
@@ -1276,6 +1423,45 @@ mod tests {
     }
 
     #[test]
+    fn resolve_process_pid_reuse_invalidates_cache_and_fails_closed() {
+        // LFH1 C: a PID whose start_time changed (the old process exited and a
+        // new process occupies the numeric PID) must NOT reuse the cached
+        // identity. The daemon observes the new start_time, drops the cache
+        // entry, and resolves the new instance afresh — so the old authority
+        // never transfers.
+        let p = ChromiumProfile::create("Default").unwrap();
+        let mut engine =
+            EnforcementEngine::from_config(&chrome_config(&p.user_data_dir, None)).expect("engine");
+        let me = std::process::id() as i32;
+        let (original, _) = engine.resolve_process(me).expect("resolve");
+        assert_eq!(engine.identity_cache.len(), 1);
+
+        // Simulate PID reuse: the cached entry claims a DIFFERENT start_time
+        // than the live process (exactly what a reused PID looks like to the
+        // daemon: same numeric pid, new start_time).
+        let reused_start = original.stable.start_time.wrapping_add(1);
+        engine
+            .identity_cache
+            .insert(me as u32, (reused_start, original.clone()));
+
+        let (re_resolved, diag) = engine.resolve_process(me).expect("re-resolve");
+        assert_eq!(
+            diag, "fresh_resolve",
+            "starttime mismatch must force a fresh resolve"
+        );
+        assert_eq!(
+            re_resolved.stable.start_time, original.stable.start_time,
+            "fresh resolve returns the LIVE process start_time, not the stale cache"
+        );
+        // The cached stale identity is gone; a pidfd/starttime-anchored check
+        // would fail closed, never allow the old instance.
+        assert!(
+            engine.identity_cache.get(&(me as u32)).unwrap().0 == original.stable.start_time,
+            "cache now holds only the live start_time"
+        );
+    }
+
+    #[test]
     fn resolve_process_maps_enrolled_exe_to_browser() {
         let p = ChromiumProfile::create("Default").unwrap();
         // Enroll the real /bin/sleep as the "chrome" browser identity.
@@ -1327,6 +1513,165 @@ mod tests {
     }
 
     // --- end-to-end policy wiring via decide() (no fanotify, real fds) ---
+
+    /// LFH6: locate a real installed Firefox ELF (NOT the /usr/bin wrapper
+    /// script). Returns None when Firefox is not installed — that is reported
+    /// as `NOT INSTALLED`, never as a failure.
+    fn find_real_firefox_elf() -> Option<PathBuf> {
+        for candidate in [
+            "/usr/lib/firefox/firefox",
+            "/usr/lib64/firefox/firefox",
+            "/usr/lib/firefox-esr/firefox",
+            "/opt/firefox/firefox",
+            "/snap/firefox/current/usr/lib/firefox/firefox",
+        ] {
+            let p = PathBuf::from(candidate);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+        None
+    }
+
+    /// LFH6 offline compatibility: launch the REAL installed Firefox headless
+    /// with a DISPOSABLE synthetic profile (never a real profile), let it
+    /// settle, then assert the classifier protects the artifacts Firefox
+    /// actually created and that the policy allows the real Firefox process
+    /// while denying an unknown probe on the same files. Runs entirely without
+    /// fanotify (classify + decide are pure); the live interception gate stays
+    /// BLOCKED in this environment.
+    #[test]
+    fn lfh6_real_firefox_disposable_profile_compat() {
+        let Some(firefox_elf) = find_real_firefox_elf() else {
+            eprintln!("LFH6: firefox NOT INSTALLED — skipped (NOT FAIL)");
+            return;
+        };
+        let profile_dir = tempfile::tempdir().expect("profile tempdir");
+        let profile_path = profile_dir.path().to_path_buf();
+
+        // Headless launch; wait (bounded) for the key protected artifact, then
+        // give the profile a few seconds to settle (storage/ tree, etc.).
+        let child = Command::new(&firefox_elf)
+            .args([
+                "--headless",
+                "--no-remote",
+                "--profile",
+                profile_path.to_str().expect("utf8 profile path"),
+                "about:blank",
+            ])
+            .spawn()
+            .expect("spawn real firefox");
+        let ff_pid = child.id() as i32;
+        let _guard = KillOnDrop(Some(child));
+
+        let cookies = profile_path.join("cookies.sqlite");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+        while !cookies.is_file() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "real firefox did not create cookies.sqlite within 90s"
+            );
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        std::thread::sleep(Duration::from_secs(4));
+
+        let uid = unsafe { libc::getuid() };
+        let cfg = EnforcementConfig {
+            config_version: platform_linux::config::CONFIG_VERSION,
+            enforcement_mode: EnforcementMode::StrictFilesystem,
+            browsers: vec![BrowserEnrollmentConfig {
+                id: "firefox".into(),
+                family: BrowserFamily::Firefox,
+                profile_root: profile_path.clone(),
+                owner_uid: Some(uid),
+                exe_paths: vec![firefox_elf.clone()],
+            }],
+            enrolled_exes: vec![firefox_elf.clone()],
+            ssh_keys: vec![],
+        };
+        let mut engine = EnforcementEngine::from_config(&cfg).expect("engine");
+
+        // 1. Real artifacts classify as protected with the expected kinds.
+        let file_cases: &[(&str, ProtectedResourceKind)] = &[
+            ("cookies.sqlite", ProtectedResourceKind::CookieStore),
+            ("cookies.sqlite-wal", ProtectedResourceKind::CookieStore),
+            ("cookies.sqlite-shm", ProtectedResourceKind::CookieStore),
+            ("logins.json", ProtectedResourceKind::SavedCredentials),
+            ("key4.db", ProtectedResourceKind::BrowserKeyMaterial),
+            ("webappsstore.sqlite", ProtectedResourceKind::WebStorage),
+        ];
+        for (name, kind) in file_cases {
+            let path = profile_path.join(name);
+            if path.is_file() {
+                let res = engine
+                    .registry()
+                    .classify(&path)
+                    .unwrap_or_else(|| panic!("real firefox artifact {name} must classify"));
+                assert_eq!(
+                    res.kind, *kind,
+                    "real firefox artifact {name} must classify as {kind:?}"
+                );
+            } else {
+                eprintln!("LFH6: {name} not created by this headless run; skipped");
+            }
+        }
+        // Tree protections: sessionstore-backups + storage/ (WebStorage).
+        for (name, kind) in [
+            ("sessionstore-backups", ProtectedResourceKind::SessionStore),
+            ("storage", ProtectedResourceKind::WebStorage),
+        ] {
+            let path = profile_path.join(name);
+            assert!(
+                path.is_dir(),
+                "real firefox should create {name}/ in a disposable profile"
+            );
+            assert!(
+                engine.registry().classify(&path).is_some(),
+                "real firefox tree {name} must classify"
+            );
+            let descendant = path.join("x");
+            let res = engine.registry().classify(&descendant);
+            assert_eq!(res.as_ref().map(|r| r.kind), Some(kind));
+        }
+
+        // 2. An unknown probe opening the real cookies file is denied.
+        let (_probe, probe_pid) = spawn_sleep();
+        let f = std::fs::File::open(&cookies).unwrap();
+        assert!(
+            matches!(
+                engine.decide(probe_pid, f.as_raw_fd()),
+                Decision::Deny(DenyReason::UnknownProcess)
+            ),
+            "unknown probe must be denied on a real firefox cookies.sqlite"
+        );
+
+        // 3. The real Firefox process reading its own cookies is allowed
+        //    (own profile, trusted system-package identity).
+        let f2 = std::fs::File::open(&cookies).unwrap();
+        assert_eq!(
+            engine.decide(ff_pid, f2.as_raw_fd()),
+            Decision::Allow,
+            "real firefox must be allowed on its own cookies.sqlite"
+        );
+
+        // 4. Consistency: history/places is NOT in the protected scope (same
+        //    policy as Chromium History) and unrelated profile files are not
+        //    over-broadly protected.
+        for name in ["places.sqlite", "favicons.sqlite", "prefs.js"] {
+            let path = profile_path.join(name);
+            if path.is_file() {
+                assert!(
+                    engine.registry().classify(&path).is_none(),
+                    "{name} must stay out of the protected scope (history/config)"
+                );
+            }
+        }
+        eprintln!(
+            "LFH6: real Firefox {} disposable-profile compat PASSED (cookies={})",
+            firefox_elf.display(),
+            cookies.display()
+        );
+    }
 
     #[test]
     fn decide_unknown_process_denied() {
@@ -1401,6 +1746,7 @@ mod tests {
     #[test]
     fn unclassified_ssh_access_event_fails_closed() {
         let cfg = EnforcementConfig {
+            config_version: platform_linux::config::CONFIG_VERSION,
             enforcement_mode: EnforcementMode::Conservative,
             browsers: vec![],
             enrolled_exes: vec![],
@@ -1446,6 +1792,7 @@ mod tests {
     fn migration_config(chrome_root: &Path, ff_root: &Path, ff_exe: &Path) -> EnforcementConfig {
         let uid = unsafe { libc::getuid() };
         EnforcementConfig {
+            config_version: platform_linux::config::CONFIG_VERSION,
             enforcement_mode: EnforcementMode::Conservative,
             browsers: vec![
                 BrowserEnrollmentConfig {
@@ -1722,6 +2069,7 @@ mod tests {
 
     fn ssh_config(ssh_key: &Path) -> EnforcementConfig {
         EnforcementConfig {
+            config_version: platform_linux::config::CONFIG_VERSION,
             enforcement_mode: EnforcementMode::Conservative,
             browsers: vec![],
             enrolled_exes: vec![],
@@ -1745,6 +2093,7 @@ mod tests {
         let s = guard_test_fixtures::SshFixture::create().unwrap();
         // Empty config (no ssh_keys); enroll at runtime via protect_ssh_key.
         let cfg = EnforcementConfig {
+            config_version: platform_linux::config::CONFIG_VERSION,
             enforcement_mode: EnforcementMode::Conservative,
             browsers: vec![],
             enrolled_exes: vec![],
@@ -1763,6 +2112,7 @@ mod tests {
     fn ssh_protect_rejects_pub_file() {
         let s = guard_test_fixtures::SshFixture::create().unwrap();
         let cfg = EnforcementConfig {
+            config_version: platform_linux::config::CONFIG_VERSION,
             enforcement_mode: EnforcementMode::Conservative,
             browsers: vec![],
             enrolled_exes: vec![],
@@ -1777,6 +2127,7 @@ mod tests {
     fn ssh_protect_rejects_reserved_name() {
         let s = guard_test_fixtures::SshFixture::create().unwrap();
         let cfg = EnforcementConfig {
+            config_version: platform_linux::config::CONFIG_VERSION,
             enforcement_mode: EnforcementMode::Conservative,
             browsers: vec![],
             enrolled_exes: vec![],
@@ -1880,7 +2231,7 @@ mod tests {
     }
 
     #[test]
-    fn ssh_load_lease_authorize_then_allowed_and_marked_used() {
+    fn ssh_load_lease_authorize_then_allowed_while_process_live() {
         let s = guard_test_fixtures::SshFixture::create().unwrap();
         let mut engine =
             EnforcementEngine::from_config(&ssh_config(&s.private_key)).expect("engine");
@@ -1893,13 +2244,16 @@ mod tests {
                 &s.private_key,
                 my_uid,
                 target,
+                my_pid as u32,
                 SshAgentBinding::UncheckedForTests,
             )
             .expect("authorize");
         assert_eq!(lease_id.0, 1);
         assert!(expires_at > now_secs_for_test());
 
-        // Opening the key under the lease => AllowByLease.
+        // Opening the key under the lease => AllowByLease. The one-shot lease
+        // stays valid while the exact process is live (multiple FAN_ACCESS_PERM
+        // events per real load), so it must NOT be marked used here.
         let f = std::fs::File::open(&s.private_key).unwrap();
         let (decision, record) = engine.decide_with_context(my_pid, f.as_raw_fd());
         assert_eq!(
@@ -1907,7 +2261,6 @@ mod tests {
             Decision::AllowByLease(lease_id),
             "lease-bound open must be allowed"
         );
-        // The one-shot lease is now marked used.
         let lease = engine
             .leases()
             .ssh
@@ -1915,8 +2268,8 @@ mod tests {
             .find(|l| l.id == lease_id)
             .expect("lease present");
         assert!(
-            lease.used,
-            "lease must be marked used after a successful allow"
+            !lease.used,
+            "lease must remain valid while the exact process is live"
         );
 
         // Debug keeps the full decision stream for diagnostics. Release
@@ -1937,9 +2290,11 @@ mod tests {
     }
 
     #[test]
-    fn ssh_load_lease_used_requires_confirmation_again() {
-        // After the one-shot allow marks the lease used, a second open cannot
-        // reuse it and falls back to ordinary behavioral read allowance.
+    fn ssh_load_lease_multiple_events_same_live_process_allowed() {
+        // A real ssh-add emits multiple FAN_ACCESS_PERM events for one load
+        // (open + reads). While the exact process is still live, every event
+        // must be allowed by the one-shot lease; the lease is consumed when
+        // the process exits, not on the first event.
         let s = guard_test_fixtures::SshFixture::create().unwrap();
         let mut engine =
             EnforcementEngine::from_config(&ssh_config(&s.private_key)).expect("engine");
@@ -1951,25 +2306,73 @@ mod tests {
                 &s.private_key,
                 my_uid,
                 target,
+                my_pid as u32,
                 SshAgentBinding::UncheckedForTests,
             )
             .expect("authorize");
 
-        // First open: allowed, lease marked used.
+        // Multiple opens/events from the same live process are all part of
+        // one load: each must be allowed, and the lease stays valid.
+        for _ in 0..3 {
+            let f = std::fs::File::open(&s.private_key).unwrap();
+            assert_eq!(
+                engine.decide_with_context(my_pid, f.as_raw_fd()).0,
+                Decision::AllowByLease(lease_id),
+                "every event from the live exact process must be allowed"
+            );
+        }
+        let lease = engine
+            .leases()
+            .ssh
+            .iter()
+            .find(|l| l.id == lease_id)
+            .expect("lease present");
+        assert!(
+            !lease.used,
+            "lease must not be consumed while the exact process is live"
+        );
+    }
+
+    #[test]
+    fn ssh_load_lease_consumed_after_exact_process_exits() {
+        // Once the exact ssh-add process has exited (or PID was reused), the
+        // one-shot lease is consumed and a later open requires confirmation.
+        let s = guard_test_fixtures::SshFixture::create().unwrap();
+        let mut engine =
+            EnforcementEngine::from_config(&ssh_config(&s.private_key)).expect("engine");
+        let my_uid = unsafe { libc::getuid() };
+        let target = my_stable_identity(&mut engine);
+        let my_pid = std::process::id() as i32;
+        let (lease_id, _) = engine
+            .authorize_ssh_load(
+                &s.private_key,
+                my_uid,
+                target,
+                my_pid as u32,
+                SshAgentBinding::UncheckedForTests,
+            )
+            .expect("authorize");
+
+        // First event: allowed while live.
         let f1 = std::fs::File::open(&s.private_key).unwrap();
         assert_eq!(
             engine.decide_with_context(my_pid, f1.as_raw_fd()).0,
             Decision::AllowByLease(lease_id)
         );
 
-        // Second open: the lease is not reused, but the raw read remains
-        // allowed under the behavioral product contract.
+        // Simulate the exact process exiting: mark the lease used directly
+        // (the daemon observes exit via /proc on the hot path).
+        for l in &mut engine.runtime.leases_mut().ssh {
+            if l.id == lease_id {
+                l.used = true;
+            }
+        }
         let f2 = std::fs::File::open(&s.private_key).unwrap();
         let d = engine.decide_with_context(my_pid, f2.as_raw_fd()).0;
         assert_eq!(
             d,
             Decision::RequireSshKeyConfirmation,
-            "second open must require confirmation, got {d:?}"
+            "used lease must require confirmation, got {d:?}"
         );
     }
 
@@ -1986,6 +2389,7 @@ mod tests {
                 &s.private_key,
                 my_uid,
                 target,
+                my_pid as u32,
                 SshAgentBinding::UncheckedForTests,
             )
             .expect("authorize");
@@ -2029,6 +2433,7 @@ mod tests {
                 &s.private_key,
                 my_uid,
                 wrong_target,
+                my_pid as u32,
                 SshAgentBinding::UncheckedForTests,
             )
             .expect("authorize");
@@ -2069,6 +2474,7 @@ mod tests {
                 &s.private_key,
                 wrong_uid,
                 target,
+                1,
                 SshAgentBinding::UncheckedForTests,
             )
             .unwrap_err();
@@ -2087,6 +2493,7 @@ mod tests {
         // Authorizing a lease on a key that was never enrolled must error.
         let s = guard_test_fixtures::SshFixture::create().unwrap();
         let cfg = EnforcementConfig {
+            config_version: platform_linux::config::CONFIG_VERSION,
             enforcement_mode: EnforcementMode::Conservative,
             browsers: vec![],
             enrolled_exes: vec![],
@@ -2105,6 +2512,7 @@ mod tests {
                 &s.private_key,
                 my_uid,
                 target,
+                1,
                 SshAgentBinding::UncheckedForTests,
             )
             .unwrap_err();
@@ -2224,6 +2632,7 @@ mod tests {
         std::fs::write(&cookies, b"synthetic").unwrap();
 
         let cfg = EnforcementConfig {
+            config_version: platform_linux::config::CONFIG_VERSION,
             enforcement_mode: EnforcementMode::Conservative,
             browsers: vec![BrowserEnrollmentConfig {
                 id: "chrome".into(),
@@ -2286,7 +2695,10 @@ mod tests {
             process: owner_proc,
             operation: AccessOperation::Open,
         };
-        assert_eq!(evaluate(&event, &LeaseSet::default(), 0), Decision::Allow);
+        assert_eq!(
+            evaluate(&event, &LeaseSet::default(), 0, 0),
+            Decision::Allow
+        );
 
         // Different-UID process (uid 2000) => WrongUid (identity doesn't matter).
         let event = AccessEvent {
@@ -2295,7 +2707,7 @@ mod tests {
             operation: AccessOperation::Open,
         };
         assert_eq!(
-            evaluate(&event, &LeaseSet::default(), 0),
+            evaluate(&event, &LeaseSet::default(), 0, 0),
             Decision::Deny(DenyReason::WrongUid)
         );
     }
@@ -2335,36 +2747,52 @@ mod tests {
         // uid matches owner (1000) so it passes the WrongUid gate, but it's
         // not the owning browser and not trusted => UnknownProcess.
         assert_eq!(
-            evaluate(&event, &LeaseSet::default(), 0),
+            evaluate(&event, &LeaseSet::default(), 0, 0),
             Decision::Deny(DenyReason::UnknownProcess)
         );
     }
 
     #[test]
-    fn import_helpers_share_the_topmost_same_executable_browser_root() {
-        let mut helper = trusted_browser_process(1000, "microsoft-edge");
+    fn pending_migration_details_bind_exact_opener_instance() {
+        // LFH5: EXACT READER INSTANCE. The approval flow binds the exact
+        // opener process observed at the confirmation event — even a helper
+        // whose ancestors are the target browser must never upgrade to a
+        // whole-tree grant.
+        let mut helper = trusted_browser_process(1000, "firefox");
         helper.stable.pid = 300;
         helper.stable.start_time = 3000;
         helper.ancestors = vec![
             AncestorSummary {
                 pid: 200,
                 start_time: 2000,
-                exe: helper.stable.exe.clone(),
-                exe_dev: helper.stable.exe_dev,
-                exe_ino: helper.stable.exe_ino,
+                exe: PathBuf::from("/usr/bin/firefox"),
+                exe_dev: 100,
+                exe_ino: 200,
             },
             AncestorSummary {
                 pid: 100,
                 start_time: 1000,
-                exe: helper.stable.exe.clone(),
-                exe_dev: helper.stable.exe_dev,
-                exe_ino: helper.stable.exe_ino,
+                exe: PathBuf::from("/usr/bin/firefox"),
+                exe_dev: 100,
+                exe_ino: 200,
             },
         ];
-        let root = target_browser_root(&helper);
-        assert_eq!(root.pid, 100);
-        assert_eq!(root.start_time, 1000);
-        assert_eq!(root.exe, helper.stable.exe);
+        // The bound root is the exact opener instance, not the topmost
+        // same-exe ancestor (old tree semantics).
+        assert_eq!(helper.stable.pid, 300);
+        // `target_browser_root`-style ancestor walks are gone; the details
+        // carry the exact opener stable identity.
+        let details = MigrationPendingDetails {
+            candidate: MigrationCandidate {
+                source_browser: BrowserId("chrome".into()),
+                source_profile: ProfileId("Default".into()),
+                target_browser: BrowserId("firefox".into()),
+            },
+            resource: cookie_resource("chrome", "Default", 1000),
+            target: helper.clone(),
+            target_root: helper.stable.clone(),
+        };
+        assert_eq!(details.target_root, helper.stable);
     }
 
     // Helpers for policy-level multi-uid / child tests.
@@ -2397,5 +2825,204 @@ mod tests {
             ancestors: vec![],
             integrity: ProcessIntegrity::Normal,
         }
+    }
+
+    // --- LFH5: EXACT READER INSTANCE binding + generation bound ---
+
+    #[test]
+    fn manual_armed_lease_binds_exact_descendant_helper() {
+        let chrome = ChromiumProfile::create("Default").unwrap();
+        let ff = FirefoxProfile::create("ff-profile").unwrap();
+        let ff_exe = ff.root_path().join("fake-firefox-bin");
+        std::fs::copy(find_sleep(), &ff_exe).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&ff_exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let uid = unsafe { libc::getuid() };
+        let mut engine = EnforcementEngine::from_config(&migration_config(
+            &chrome.user_data_dir,
+            &ff.profile_dir,
+            &ff_exe,
+        ))
+        .expect("engine");
+
+        let (lease_id, _) = engine
+            .authorize_migration("chrome", "Default", "firefox", uid, None)
+            .expect("authorize");
+        assert_eq!(lease_id.0, 1);
+        // The armed lease is stamped with the current continuity generation.
+        assert_eq!(
+            engine.leases().migration[0].generation,
+            engine.runtime.current_generation()
+        );
+
+        // A helper whose ancestor is the armed target browser is observed at
+        // bind time: the lease binds the EXACT helper instance (post-bind
+        // observed exact descendant), never the browser root.
+        let ff_canon = std::fs::canonicalize(&ff_exe).unwrap();
+        let meta = std::fs::metadata(&ff_canon).unwrap();
+        use std::os::unix::fs::MetadataExt;
+        let helper = ProcessIdentity {
+            stable: guard_core::identity::ProcessStableId {
+                pid: 4242,
+                start_time: 424_200,
+                exe: PathBuf::from("/usr/lib/firefox/helper"),
+                exe_dev: 0,
+                exe_ino: 0,
+            },
+            uid,
+            gid: uid,
+            exe_owner_uid: 0,
+            trust_tier: TrustTier::SystemPackage,
+            browser: None,
+            cmdline: vec![],
+            ancestors: vec![AncestorSummary {
+                pid: 200,
+                start_time: 2000,
+                exe: ff_canon,
+                exe_dev: meta.dev(),
+                exe_ino: meta.ino(),
+            }],
+            integrity: ProcessIntegrity::Normal,
+        };
+        let res = cookie_resource("chrome", "Default", uid);
+        engine.refresh_migration_states(&res, &helper);
+        assert!(
+            matches!(
+                &engine.leases().migration[0].state,
+                MigrationLeaseState::Bound { root } if root == &helper.stable
+            ),
+            "manual armed lease must bind the exact observed helper instance"
+        );
+
+        // A second armed lease; an unrelated helper (ancestor outside the
+        // authorized tree) must NOT bind it — it stays Armed.
+        let (lease2, _) = engine
+            .authorize_migration("chrome", "Default", "firefox", uid, None)
+            .expect("authorize");
+        assert_eq!(lease2.0, 2);
+        let unrelated = ProcessIdentity {
+            stable: helper.stable.clone(),
+            uid,
+            gid: uid,
+            exe_owner_uid: 0,
+            trust_tier: TrustTier::SystemPackage,
+            browser: None,
+            cmdline: vec![],
+            ancestors: vec![AncestorSummary {
+                pid: 999,
+                start_time: 999,
+                exe: PathBuf::from("/usr/bin/unrelated"),
+                exe_dev: 0,
+                exe_ino: 0,
+            }],
+            integrity: ProcessIntegrity::Normal,
+        };
+        engine.refresh_migration_states(&res, &unrelated);
+        assert!(
+            matches!(
+                &engine.leases().migration[1].state,
+                MigrationLeaseState::Armed { .. }
+            ),
+            "an unrelated helper must never bind an armed lease"
+        );
+    }
+
+    #[test]
+    fn lose_continuity_bumps_generation_and_kills_preloss_lease() {
+        let chrome = ChromiumProfile::create("Default").unwrap();
+        let ff = FirefoxProfile::create("ff-profile").unwrap();
+        let ff_exe = ff.root_path().join("fake-firefox-bin");
+        std::fs::copy(find_sleep(), &ff_exe).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&ff_exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let uid = unsafe { libc::getuid() };
+        let mut engine = EnforcementEngine::from_config(&migration_config(
+            &chrome.user_data_dir,
+            &ff.profile_dir,
+            &ff_exe,
+        ))
+        .expect("engine");
+        let gen_before = engine.runtime.current_generation();
+
+        let (lease_id, _) = engine
+            .authorize_migration("chrome", "Default", "firefox", uid, None)
+            .expect("authorize");
+
+        let (guard, ff_pid) = spawn_exe(&ff_exe);
+        let _g = KillOnDrop(Some(guard));
+
+        // Baseline: pre-loss the armed lease binds the exact firefox instance
+        // and authorizes it.
+        let f = std::fs::File::open(&chrome.cookies).unwrap();
+        assert_eq!(
+            engine.decide(ff_pid, f.as_raw_fd()),
+            Decision::AllowByLease(lease_id)
+        );
+
+        // Continuity loss revokes all authority AND bumps the generation.
+        engine.lose_continuity(ContinuityLossReason::FanotifyQueueOverflow);
+        assert!(engine.continuity.is_lost());
+        assert_eq!(engine.runtime.current_generation(), gen_before + 1);
+
+        // Defense in depth: even if revocation of this lease failed (simulated
+        // by clearing the revoked flag), the stale generation must deny it.
+        for l in &mut engine.runtime.leases_mut().migration {
+            l.revoked = false;
+        }
+        let f2 = std::fs::File::open(&chrome.cookies).unwrap();
+        assert_eq!(
+            engine.decide(ff_pid, f2.as_raw_fd()),
+            Decision::Deny(DenyReason::StaleLeaseGeneration),
+            "a pre-loss lease must be dead by generation even if revocation missed it"
+        );
+    }
+
+    // --- LFH3: protection continuity ---
+
+    #[test]
+    fn continuity_starts_intact_and_loses_sticky() {
+        let mut continuity = ProtectionContinuity::Intact { generation: 1 };
+        assert!(!continuity.is_lost());
+        continuity.record_loss(ContinuityLossReason::FanotifyQueueOverflow);
+        assert!(continuity.is_lost());
+        // Second loss keeps the earliest reason (sticky).
+        continuity.record_loss(ContinuityLossReason::RequiredMarkLoss);
+        match continuity {
+            ProtectionContinuity::Lost { reason, .. } => {
+                assert_eq!(reason, ContinuityLossReason::FanotifyQueueOverflow);
+            }
+            _ => panic!("must stay lost"),
+        }
+    }
+
+    #[test]
+    fn lose_continuity_revokes_all_leases_and_bindings() {
+        let s = guard_test_fixtures::SshFixture::create().unwrap();
+        let mut engine =
+            EnforcementEngine::from_config(&ssh_config(&s.private_key)).expect("engine");
+        let my_uid = unsafe { libc::getuid() };
+        let target = my_stable_identity(&mut engine);
+        let my_pid = std::process::id() as i32;
+        let (_lease_id, _) = engine
+            .authorize_ssh_load(
+                &s.private_key,
+                my_uid,
+                target,
+                my_pid as u32,
+                SshAgentBinding::UncheckedForTests,
+            )
+            .expect("authorize");
+        assert!(!engine.leases().ssh[0].revoked);
+
+        engine.lose_continuity(ContinuityLossReason::FanotifyQueueOverflow);
+        assert!(engine.continuity.is_lost());
+        assert!(
+            engine.leases().ssh.iter().all(|lease| lease.revoked),
+            "all SSH load leases must be revoked on continuity loss"
+        );
+        assert!(engine.ssh_agent_bindings.is_empty());
+        assert!(engine.identity_cache.is_empty());
     }
 }

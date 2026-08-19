@@ -476,6 +476,7 @@ mod tests {
             strict_alias_matches: None,
             topology_degraded: None,
             mac_health: None,
+            linux_health: None,
             protected_files: 0,
             ssh_protected_keys: 0,
             protected_trees: 0,

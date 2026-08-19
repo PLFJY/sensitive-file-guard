@@ -1,0 +1,40 @@
+PASS: status exposes ACTIVE strict-filesystem with one deduplicated filesystem mark
+==> Strict namespace first-open matrix (no convergence waits)
+PASS: Chromium Network/Cookies denied on the first unauthorized open
+PASS: Chromium Cookies-wal denied on the first unauthorized open
+PASS: Chromium Cookies-shm denied on the first unauthorized open
+PASS: Chromium Local State denied on the first unauthorized open
+PASS: Chromium Session descendant denied on the first unauthorized open
+PASS: Chromium new-profile Cookies denied on the first unauthorized open
+PASS: Firefox cookies.sqlite denied on the first unauthorized open
+PASS: Firefox storage descendant denied on the first unauthorized open
+PASS: Firefox sessionstore descendant denied on the first unauthorized open
+==> Existing-inode alias regressions
+PASS: symlink remains denied
+PASS: known-inode hardlink remains denied
+PASS: renamed known inode remains denied
+PASS: /proc/PID/fd reopen remains denied
+PASS: enrolled Chromium still opens its own protected data
+==> Structural-hit inode promotion and rename-away
+PASS: A: authorized first structural open promotes inode before rename-away
+PASS: B: denied structural first open promotes inode before rename-away retry
+OBSERVED: C: an inode moved through a sensitive name without an open is not labeled by FAN_OPEN_PERM
+==> Alias-scan amplification stress
+PASS: alias-scan amplification completed 16000 opens in 900 ms without overflow or audit loss
+==> New-inode external-hardlink investigation
+Alias race measurement:
+  iterations: 1000
+  successful_unauthorized_reads: 0
+  denied_reads: 1000
+  other_errors: 0
+PASS: new replacement inode external hardlink had zero recoveries
+==> Optional bind-mount alias
+PASS: bind-mount alias of indexed protected inode denied
+PASS: strict backend remained healthy with zero overflow/classifier/topology degradation
+PASS: daemon log and audit DB contain no synthetic secret content
+PASS: strict daemon shut down without self-deadlock after topology and audit activity
+==> Filesystem mark lifecycle
+PASS: unmount/remount mark loss is observed and status becomes DEGRADED
+PASS: strict startup fails closed when a required protected root cannot be marked
+
+Strict filesystem summary: PASS=25 FAIL=0 BLOCKED=0 OBSERVED=1

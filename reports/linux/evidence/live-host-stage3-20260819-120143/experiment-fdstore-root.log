@@ -1,0 +1,3 @@
+==> First start: store a new group + fdstore upload
+Job for guard-fdstore-exp.service failed because the control process exited with error code.
+See "systemctl status guard-fdstore-exp.service" and "journalctl -xeu guard-fdstore-exp.service" for details.

@@ -30,9 +30,11 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 2
 fi
 
-echo "==> Building release binaries"
-cd "$REPO"
-cargo build --release 2>&1 | grep -E '(Compiling guardd|Compiling guard-test-probe|Finished|error)' || true
+if [ -z "${SKIP_BUILD:-}" ]; then
+  echo "==> Building release binaries"
+  cd "$REPO"
+  cargo build --release 2>&1 | grep -E '(Compiling guardd|Compiling guard-test-probe|Finished|error)' || true
+fi
 test -x "$GUARDD" || { echo "guardd binary missing"; exit 1; }
 test -x "$PROBE" || { echo "guard-test-probe binary missing"; exit 1; }
 
@@ -85,6 +87,8 @@ chmod 0755 "$CHROME_PROBE" "$FIREFOX_PROBE"
 # EnrolledUserWritable trust; exe_paths maps each probe to a BrowserId.
 cat > "$WORK/config.json" <<EOF
 {
+  "config_version": 1,
+  "enforcement_mode": "conservative",
   "browsers": [
     {
       "id": "chrome",

@@ -274,6 +274,7 @@ impl ControlHandler {
             strict_alias_scans: None,
             strict_alias_matches: None,
             topology_degraded: None,
+            linux_health: None,
             mac_health: Some(Box::new(guard_ipc::MacHealthInfo {
                 es_sequence_gaps: health.sequence_gaps,
                 es_global_sequence_gaps: health.global_sequence_gaps,

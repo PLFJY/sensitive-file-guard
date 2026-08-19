@@ -38,6 +38,13 @@ pub enum MigrationLeaseState {
 /// access mediators (notably Linux fanotify) do not expose the opener's flag
 /// mask. The macOS adapter separately narrows every migration AUTH_OPEN
 /// response to Darwin FREAD and reports that platform guarantee in status.
+///
+/// LFH5: authority is EXACT READER INSTANCE by default. A `Bound` lease
+/// authorizes only the exact bound process instance (`root`), never "any
+/// descendant in the tree". A helper that must read may be explicitly bound
+/// post-observation; pre-existing descendants never auto-upgrade. `generation`
+/// ties the lease to the protection-continuity generation: after a loss the
+/// generation is bumped and every lease created before it is dead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MigrationAccessLease {
     pub id: LeaseId,
@@ -50,6 +57,8 @@ pub struct MigrationAccessLease {
     /// Monotonic/epoch deadline (same clock as the `now` passed to `evaluate`).
     pub expires_at: u64,
     pub revoked: bool,
+    /// LFH5: protection-continuity generation this lease was created under.
+    pub generation: u64,
 }
 
 /// One-shot grant to load a single SSH private key into `ssh-agent`.
@@ -60,14 +69,23 @@ pub struct SshLoadLease {
     pub uid: u32,
     /// Stable identity of the exact `ssh-add` invocation.
     pub target: StableIdentity,
+    /// PID of the exact `ssh-add` invocation. Used to consume the one-shot
+    /// lease when the load completes: the lease stays valid for the whole
+    /// load (a real ssh-add performs multiple `FAN_ACCESS_PERM` events: open +
+    /// reads), and is marked used when the process exits or its identity
+    /// changes. Never trusted alone — `target` remains the authority.
+    pub pid: u32,
     pub expires_at: u64,
     pub revoked: bool,
-    /// Set after the one-shot load completes; further use is denied.
+    /// Set after the one-shot load completes (the exact process exited or
+    /// identity changed); further use is denied.
     pub used: bool,
+    /// LFH5: protection-continuity generation this lease was created under.
+    pub generation: u64,
 }
 
 /// Time-limited ordinary SSH private-key read grant. Unlike `SshLoadLease`,
-/// this covers the verified reader process and its future descendants for one
+/// this covers the verified reader process (exact instance only) for one
 /// protected key. It is never persisted or executable-wide.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SshReadAccessLease {
@@ -77,6 +95,8 @@ pub struct SshReadAccessLease {
     pub root: ProcessStableId,
     pub expires_at: u64,
     pub revoked: bool,
+    /// LFH5: protection-continuity generation this lease was created under.
+    pub generation: u64,
 }
 
 /// The set of active leases consulted by the policy engine.

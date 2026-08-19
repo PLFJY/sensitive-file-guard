@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Privileged Hardening Pass 1 acceptance: replacement inode, new profile, and
 # new nested tree coverage. Uses synthetic files only; no real profile paths.
+#
+# Fixture writes go through an ENROLLED browser identity (a copy of
+# guard-test-probe mapped as the chrome executable) because new protected-tree
+# content is protected immediately: the harness's own shell is an unknown
+# process and is correctly denied. Denial probes use a separate unenrolled copy.
 set -euo pipefail
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -20,9 +25,22 @@ cleanup() {
 }
 trap cleanup EXIT
 
+if [ -z "${SKIP_BUILD:-}" ]; then
 cargo build --manifest-path "$REPO/Cargo.toml" -p guardd -p guard-test-probe
+fi
 GUARDD="$REPO/target/debug/guardd"
 PROBE="$REPO/target/debug/guard-test-probe"
+# Enrolled browser identity: fixture writes use this binary (matches the
+# config exe_paths) so the browser can create new profile content after
+# startup.
+BROWSER_PROBE="$WORK/synthetic-chrome"
+cp "$PROBE" "$BROWSER_PROBE"
+chmod 0755 "$BROWSER_PROBE"
+# Unenrolled probe copy used for denial assertions.
+EVIL_PROBE="$WORK/evil-probe"
+cp "$PROBE" "$EVIL_PROBE"
+chmod 0755 "$EVIL_PROBE"
+
 ROOT="$WORK/chromium"
 PROFILE="$ROOT/Default"
 mkdir -p "$PROFILE/Network" "$PROFILE/Local Storage"
@@ -34,7 +52,7 @@ printf '%s' 'synthetic-ephemeral-key-fixture' > "$SSH_KEY"
 chmod 0600 "$SSH_KEY"
 
 cat > "$WORK/config.json" <<EOF
-{"browsers":[{"id":"chrome","family":"Chromium","profile_root":"$ROOT","owner_uid":0,"exe_paths":[]}],"enrolled_exes":[],"ssh_keys":["$SSH_KEY"]}
+{"config_version":1,"enforcement_mode":"conservative","browsers":[{"id":"chrome","family":"Chromium","profile_root":"$ROOT","owner_uid":0,"exe_paths":["$BROWSER_PROBE"]}],"enrolled_exes":[],"ssh_keys":["$SSH_KEY"]}
 EOF
 
 "$GUARDD" --enforce-browser-config "$WORK/config.json" \
@@ -46,11 +64,13 @@ for _ in $(seq 1 100); do
   sleep 0.05
 done
 [ -S "$WORK/guardd.sock" ] || { cat "$WORK/guardd.log"; exit 1; }
+# Let the startup marking pass and topology watcher settle before mutating.
+sleep 0.5
 
 expect_denied_eventually() {
   local path=$1
   for _ in $(seq 1 100); do
-    if ! "$PROBE" read "$path" >/dev/null 2>&1; then
+    if ! "$EVIL_PROBE" read "$path" >/dev/null 2>&1; then
       return 0
     fi
     sleep 0.02
@@ -60,40 +80,30 @@ expect_denied_eventually() {
   return 1
 }
 
-expect_allowed_eventually() {
-  local path=$1
-  for _ in $(seq 1 100); do
-    if "$PROBE" read "$path" >/dev/null 2>&1; then
-      return 0
-    fi
-    sleep 0.02
-  done
-  echo "FAIL: SSH behavioral read remained interrupted: $path"
-  cat "$WORK/guardd.log"
-  return 1
-}
-
-# New inode at an already-protected critical path.
+# New inode at an already-protected critical path. The enrolled browser
+# replaces its own Cookies file; the unknown probe must still be denied.
 rm -f "$PROFILE/Network/Cookies"
-printf '%s' 'synthetic-cookie-v2' > "$PROFILE/Network/Cookies"
+"$BROWSER_PROBE" write-file "$PROFILE/Network/Cookies" 'synthetic-cookie-v2'
 expect_denied_eventually "$PROFILE/Network/Cookies"
 
 # Directory created after startup below a protected tree.
 mkdir -p "$PROFILE/Local Storage/new/nested"
-printf '%s' 'synthetic-session' > "$PROFILE/Local Storage/new/nested/item"
+"$BROWSER_PROBE" write-file "$PROFILE/Local Storage/new/nested/item" 'synthetic-session'
 expect_denied_eventually "$PROFILE/Local Storage/new/nested/item"
 
 # Entire profile created after startup.
 NEW_PROFILE="$ROOT/Profile 2"
 mkdir -p "$NEW_PROFILE/Network"
-printf '%s' 'synthetic-preferences' > "$NEW_PROFILE/Preferences"
-printf '%s' 'synthetic-cookie-v3' > "$NEW_PROFILE/Network/Cookies"
+"$BROWSER_PROBE" write-file "$NEW_PROFILE/Preferences" 'synthetic-preferences'
+"$BROWSER_PROBE" write-file "$NEW_PROFILE/Network/Cookies" 'synthetic-cookie-v3'
 expect_denied_eventually "$NEW_PROFILE/Network/Cookies"
 
-# Configured SSH key replaced with a new inode.
+# Configured SSH key replaced with a new inode. SSH reads are gated by the
+# exact-reader confirmation model (no lease is granted to any probe here), so
+# the unknown probe must remain denied after the replacement.
 rm -f "$SSH_KEY"
 printf '%s' 'synthetic-ephemeral-key-fixture-v2' > "$SSH_KEY"
 chmod 0600 "$SSH_KEY"
-expect_allowed_eventually "$SSH_KEY"
+expect_denied_eventually "$SSH_KEY"
 
-echo "PASS: browser replacements converge to denial; SSH replacement read remains allowed"
+echo "PASS: browser replacements converge to denial; SSH replacement remains protected"

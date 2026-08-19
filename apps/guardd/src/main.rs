@@ -20,6 +20,11 @@ mod pending;
 #[cfg(target_os = "linux")]
 mod strict;
 
+/// LFH4 Experiment B test hook: fires at most once per process when
+/// CRASH_AFTER_READ_BEFORE_RESPONSE is set.
+#[cfg(target_os = "linux")]
+static HOOK_FIRED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 #[cfg(target_os = "linux")]
 use std::io::Write;
 #[cfg(target_os = "linux")]
@@ -197,10 +202,25 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
     let topology = platform_linux::topology::TopologyWatcher::new(topology_roots)
         .map_err(|e| anyhow::anyhow!("initializing browser topology watcher: {e}"))?;
 
-    let group = fanotify::FanotifyGroup::new_content()?;
-    // Mark before wrapping in Arc<Mutex>. Conservative mode preserves the
-    // existing object/tree marks. Strict mode marks each distinct filesystem;
-    // any required mark failure aborts startup rather than claiming ACTIVE.
+    // LFH1: prefer a FAN_REPORT_PIDFD group so every event carries a pidfd for
+    // its pid. On kernels that reject the flag, fall back to the legacy group
+    // and report REDUCED(legacy_process_identity) — never a silent "Strong".
+    let (group, pidfd_enabled) = match fanotify::FanotifyGroup::new_content_with_pidfd() {
+        Ok(group) => {
+            tracing::info!("fanotify group created with FAN_REPORT_PIDFD");
+            (group, true)
+        }
+        Err(error) => {
+            tracing::warn!(
+                err = %error,
+                "FAN_REPORT_PIDFD unsupported; falling back to legacy PID+starttime identity"
+            );
+            (fanotify::FanotifyGroup::new_content()?, false)
+        }
+    };
+    backend_metrics
+        .pidfd_enabled
+        .store(pidfd_enabled, std::sync::atomic::Ordering::Relaxed);
     let (n_files, n_dirs, n_filesystems) = if let Some(classifier) = &strict_classifier {
         for path in classifier.filesystem_paths() {
             group
@@ -448,14 +468,72 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                 backend_metrics
                     .fanotify_overflows
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                tracing::error!("fanotify queue overflow detected; events may have been dropped");
+                // LFH0: overflow means protection continuity is lost — the
+                // kernel dropped events without Guard seeing them, so those
+                // opens were NOT denied by Guard. Future events can still be
+                // enforced, but the daemon must not claim "all dropped events
+                // denied". LFH3: overflow => continuity LOST + revoke all
+                // live authority (leases, pending confirmations, grace).
+                tracing::error!(
+                    "fanotify queue overflow detected: protection continuity LOST; \
+                     dropped events were NOT denied by Guard (kernel dropped them unseen)"
+                );
                 if cli.print_decisions {
-                    eprintln!("guardd: OVERFLOW");
+                    eprintln!("guardd: OVERFLOW — continuity lost; dropped events not denied");
                 }
+                let mut engine = engine.lock().expect("engine mutex poisoned");
+                engine.lose_continuity(enforce::ContinuityLossReason::FanotifyQueueOverflow);
+                pending_migrations
+                    .lock()
+                    .expect("pending migration mutex poisoned")
+                    .deny_all();
+                pending_ssh_reads
+                    .lock()
+                    .expect("pending SSH read mutex poisoned")
+                    .deny_all();
+                drop(engine);
+                audit.record(engine_continuity_audit(
+                    "fanotify_queue_overflow",
+                    "protection continuity lost; all leases and pending confirmations revoked",
+                ));
                 continue;
             }
 
-            let (decision, mut audit_record) = if let Some(classifier) = &strict_classifier {
+            // LFH1: validate the pidfd before any decision. On a pidfd-enabled
+            // group the kernel pins the event's process instance; a missing or
+            // mismatched pidfd is unexpected and protected candidates fail
+            // closed (legacy fallback is reserved for kernels without
+            // FAN_REPORT_PIDFD, reported separately).
+            let mut pidfd_ok = true;
+            if pidfd_enabled {
+                match ev.pidfd {
+                    Some(pidfd) => {
+                        if !platform_linux::proc::pidfd_matches(pidfd, ev.pid) {
+                            pidfd_ok = false;
+                            backend_metrics
+                                .pidfd_missing_events
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            tracing::error!(
+                                pid = ev.pid,
+                                pidfd,
+                                "fanotify event pidfd does not match its pid; failing closed"
+                            );
+                        }
+                    }
+                    None => {
+                        pidfd_ok = false;
+                        backend_metrics
+                            .pidfd_missing_events
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        tracing::error!(
+                            pid = ev.pid,
+                            "pidfd-enabled group delivered an event without a pidfd; failing closed"
+                        );
+                    }
+                }
+            }
+
+            let (decision, audit_record) = if let Some(classifier) = &strict_classifier {
                 backend_metrics
                     .strict_events_total
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -515,10 +593,62 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                     .expect("engine")
                     .decide_event(ev.pid, ev.fd, ev.is_access_perm())
             };
+            // LFH1: on a pidfd-enabled group, an unusable pidfd is unexpected
+            // kernel/group state; protected candidates fail closed BEFORE any
+            // confirmation can be enqueued (never a silent fallback while
+            // claiming Strong).
+            let mut decision = decision;
+            let mut audit_record = audit_record;
+            if !pidfd_ok && ev.pid != daemon_pid {
+                decision = guard_core::policy::Decision::Deny(
+                    guard_core::policy::DenyReason::UnknownProcess,
+                );
+                let record = engine
+                    .lock()
+                    .expect("engine mutex poisoned")
+                    .pidfd_failure_audit_record(ev.pid, "pidfd_missing_or_mismatched");
+                if let Some(rec) = record {
+                    audit_record = Some(rec);
+                }
+            }
             let allow = matches!(
                 &decision,
                 guard_core::policy::Decision::Allow | guard_core::policy::Decision::AllowByLease(_)
             );
+
+            // LFH4 Experiment B: test-only deterministic crash hook. When
+            // CRASH_AFTER_READ_BEFORE_RESPONSE is set, the daemon writes a
+            // marker file and SIGKILLs itself AFTER reading the permission
+            // event but BEFORE writing the response. The fdstore experiment
+            // then restarts the daemon with the stored fanotify group and
+            // checks what happens to the in-flight permission. This hook is
+            // deliberately invisible unless the env var is set; it never fires
+            // in production.
+            if ev.has_fd()
+                && std::env::var_os("CRASH_AFTER_READ_BEFORE_RESPONSE").is_some()
+                && !std::sync::atomic::AtomicBool::load(
+                    &HOOK_FIRED,
+                    std::sync::atomic::Ordering::SeqCst,
+                )
+            {
+                std::sync::atomic::AtomicBool::store(
+                    &HOOK_FIRED,
+                    true,
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+                if let Some(marker) = std::env::var_os("CRASH_AFTER_READ_MARKER") {
+                    let _ = std::fs::write(std::path::Path::new(&marker), format!("{}", ev.pid));
+                }
+                tracing::error!(
+                    "LFH4 test hook: crash after read, before response (pid={})",
+                    ev.pid
+                );
+                // SAFETY: SIGKILL is terminal; the stored fd (if any) survives
+                // in systemd fdstore while the process is gone.
+                unsafe {
+                    libc::kill(std::process::id() as i32, libc::SIGKILL);
+                }
+            }
 
             // Only a positively recognized trusted browser can produce this
             // typed decision. Transfer the event fd into the bounded pending
@@ -760,6 +890,16 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                 fanotify::close_event_fd(ev.fd);
             }
 
+            // Close the pidfd exactly once after the decision is complete. The
+            // pidfd pins the process instance for the whole decision, which is
+            // exactly the window where PID reuse could otherwise slip in.
+            if let Some(pidfd) = ev.pidfd {
+                // SAFETY: pidfd is owned by this parsed event and closed once.
+                unsafe {
+                    libc::close(pidfd);
+                }
+            }
+
             processed += 1;
             if cli.exit_after != 0 && processed >= cli.exit_after {
                 tracing::info!(processed, "reached exit_after; exiting");
@@ -781,6 +921,29 @@ fn unix_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
+}
+
+/// LFH3: audit record for a continuity-loss event. Contains only the reason
+/// and metadata, never any secret bytes.
+#[cfg(target_os = "linux")]
+fn engine_continuity_audit(event_code: &str, detail: &str) -> guard_audit::AuditRecord {
+    use guard_core::resource::{ProtectedResource, ProtectedResourceId, ProtectedResourceKind};
+    let resource = ProtectedResource {
+        id: ProtectedResourceId("continuity".into()),
+        kind: ProtectedResourceKind::Other,
+        owner_uid: 0,
+        browser: None,
+        profile: None,
+        path: std::path::PathBuf::from("/"),
+    };
+    let mut record = enforce::build_audit_record(
+        &resource,
+        None,
+        guard_core::policy::Decision::Deny(guard_core::policy::DenyReason::UnknownProcess),
+        detail,
+    );
+    record.event_code = event_code.to_owned();
+    record
 }
 
 #[cfg(target_os = "linux")]
@@ -828,9 +991,12 @@ fn run_protect_test_file(target: &std::path::Path, cli: &Cli) -> anyhow::Result<
         let events = fanotify::parse_events(&buf[..n])?;
         for ev in events {
             if ev.overflow {
-                tracing::error!("fanotify queue overflow detected; events may have been dropped");
+                tracing::error!(
+                    "fanotify queue overflow detected: protection continuity LOST; \
+                     dropped events were NOT denied by Guard (kernel dropped them unseen)"
+                );
                 if cli.print_decisions {
-                    eprintln!("guardd: OVERFLOW");
+                    eprintln!("guardd: OVERFLOW — continuity lost; dropped events not denied");
                 }
                 continue;
             }

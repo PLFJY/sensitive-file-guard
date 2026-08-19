@@ -1,0 +1,24 @@
+==> Raw private-key access (exact-reader model: denied without a lease)
+PASS: direct private-key read denied without a lease
+PASS: copy private key denied without a lease
+PASS: Rust probe read denied without a lease
+PASS: Python probe read denied without a lease
+PASS: public key remains readable
+==> Kernel-observed stopped-child validation
+PASS: wrong child PID rejected
+PASS: non-child PID rejected
+PASS: running/not-stopped child rejected
+PASS: client-declared fake identity rejected
+PASS: IPC disconnect cannot leave a live SSH load capability
+==> Executable trust and lease identity
+PASS: fake/user-writable ssh-add rejected by guardctl
+Traceback (most recent call last):
+  File "/home/plfjy/sensitive-file-guard/scripts/helpers/ssh-broker-scenarios.py", line 240, in <module>
+    sys.exit(main())
+             ~~~~^^
+  File "/home/plfjy/sensitive-file-guard/scripts/helpers/ssh-broker-scenarios.py", line 198, in main
+    exit_code = finish_child(pid, writer, authorized_agent(response))
+                                          ~~~~~~~~~~~~~~~~^^^^^^^^^^
+  File "/home/plfjy/sensitive-file-guard/scripts/helpers/ssh-broker-scenarios.py", line 118, in authorized_agent
+    raise RuntimeError(f"authorization failed: {response.get('error')}")
+RuntimeError: authorization failed: protocol version mismatch: client=2, server=5

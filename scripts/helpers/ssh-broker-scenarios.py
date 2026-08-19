@@ -16,7 +16,7 @@ import subprocess
 import sys
 import time
 
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 5
 
 
 def request(socket_path, operation):

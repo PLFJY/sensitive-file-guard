@@ -174,7 +174,7 @@ fn handle_request_with_connection(
 // --- handlers ---
 
 fn handle_status(state: &IpcState, creds: PeerCreds) -> Response {
-    let engine = state.engine.lock().expect("engine mutex poisoned");
+    let mut engine = state.engine.lock().expect("engine mutex poisoned");
     let audit_dropped = state.audit.dropped();
     let backend = state.backend_metrics.snapshot();
     let required_filesystems = backend.marked_filesystems;
@@ -190,32 +190,91 @@ fn handle_status(state: &IpcState, creds: PeerCreds) -> Response {
             _ => (0, false),
         }
     };
-    // Phase 14: compute a human-readable enforcement state.
-    // - NOT_ENFORCING: no fanotify group (daemon running without enforcement).
-    // - DEGRADED: enforcement is active but audit events were dropped,
-    //   classification/topology failed, or the fanotify queue overflowed.
-    // - ACTIVE: enforcement is running normally.
-    let status = if state.group.is_none() {
-        "NOT_ENFORCING"
-    } else if audit_dropped > 0
-        || engine.unclassified > 0
+
+    // LFH3: a required mark loss is a continuity-breaking transition. Once
+    // observed it revokes all live authority and becomes sticky; current
+    // recovery later reports ACTIVE enforcement but continuity stays LOST.
+    let enforcing = state.group.is_some();
+    // LFH3: a required mark loss is a continuity-breaking transition. Once
+    // observed it revokes all live authority and becomes sticky; current
+    // recovery later reports ACTIVE enforcement but continuity stays LOST.
+    if enforcing && required_filesystems > 0 && !filesystem_marks_healthy {
+        engine.lose_continuity(crate::enforce::ContinuityLossReason::RequiredMarkLoss);
+    }
+
+    // LFH0: split health dimensions. Each condition is judged on its own axis
+    // so a dropped audit event is never conflated with lost filesystem-mark
+    // continuity, and a fanotify queue overflow is reported as continuity loss
+    // (dropped events were NOT individually denied — the kernel does not
+    // guarantee that).
+    let conservative_mode =
+        state.backend_metrics.mode == crate::enforce::EnforcementMode::Conservative;
+
+    let file_shield = if !enforcing {
+        "NOT_ENFORCING".to_owned()
+    } else if conservative_mode
         || engine.topology_degraded
-        || backend.fanotify_overflows > 0
         || backend.classifier_failures > 0
         || !filesystem_marks_healthy
     {
-        "DEGRADED"
+        "REDUCED".to_owned()
     } else {
-        "ACTIVE"
+        "ACTIVE".to_owned()
+    };
+
+    // LFH3: continuity is the engine's STICKY state — current enforcement
+    // recovering never erases a historical loss. The engine is the authority;
+    // the backend counter and mark health are cross-checks that also drive the
+    // state transition in main.rs.
+    let (continuity, continuity_reason) = if !enforcing {
+        ("LOST".to_owned(), Some("no_fanotify_group".to_owned()))
+    } else if let crate::enforce::ProtectionContinuity::Lost { reason, .. } = engine.continuity {
+        ("LOST".to_owned(), Some(reason.as_str().to_owned()))
+    } else if backend.fanotify_overflows > 0 {
+        (
+            "LOST".to_owned(),
+            Some("fanotify_queue_overflow".to_owned()),
+        )
+    } else if !filesystem_marks_healthy {
+        (
+            "LOST".to_owned(),
+            Some("required_filesystem_mark_lost".to_owned()),
+        )
+    } else {
+        ("INTACT".to_owned(), None)
+    };
+
+    let audit = if audit_dropped > 0 {
+        "DEGRADED".to_owned()
+    } else {
+        "HEALTHY".to_owned()
+    };
+
+    // Overall posture is the most conservative axis; Conservative mode can
+    // never report formal ACTIVE.
+    let status = if !enforcing {
+        "NOT_ENFORCING".to_owned()
+    } else if conservative_mode {
+        "REDUCED".to_owned()
+    } else if continuity != "INTACT"
+        || audit == "DEGRADED"
+        || engine.unclassified > 0
+        || engine.topology_degraded
+        || backend.classifier_failures > 0
+        || !filesystem_marks_healthy
+    {
+        "DEGRADED".to_owned()
+    } else {
+        "ACTIVE".to_owned()
     };
     let body = StatusInfo {
         version: state.version.clone(),
         backend_kind: "linux-fanotify".to_owned(),
         backend_diagnostic: Some("fanotify protected-file authorization".to_owned()),
         backend_state: None,
-        enforcement_active: state.group.is_some(),
+        enforcement_active: enforcing,
         read_only_guaranteed: None,
-        status: status.to_string(),
+        status,
         mode: Some(state.backend_metrics.mode.as_str().to_owned()),
         marked_filesystems: Some(marked_filesystems),
         required_filesystems: Some(required_filesystems),
@@ -229,6 +288,15 @@ fn handle_status(state: &IpcState, creds: PeerCreds) -> Response {
         strict_alias_matches: Some(backend.strict_alias_matches),
         topology_degraded: Some(engine.topology_degraded),
         mac_health: None,
+        linux_health: Some(Box::new(guard_ipc::LinuxHealthInfo {
+            file_shield,
+            continuity,
+            continuity_reason,
+            audit,
+            process_shield: "UNSUPPORTED".to_owned(),
+            pidfd_enabled: backend.pidfd_enabled,
+            pidfd_missing_events: backend.pidfd_missing_events,
+        })),
         protected_files: engine.registry().file_count(),
         ssh_protected_keys: engine
             .registry()
@@ -404,6 +472,10 @@ fn event_visible_in_build(event: &guard_audit::AuditEvent) -> bool {
     cfg!(debug_assertions)
         || matches!(event.record.decision, guard_core::policy::Decision::Deny(_))
         || event.record.event_code.starts_with("ssh_key_access_")
+        || (matches!(
+            event.record.decision,
+            guard_core::policy::Decision::AllowByLease(_)
+        ) && event.record.resource_kind == guard_core::ProtectedResourceKind::SshPrivateKey)
 }
 
 fn handle_leases_list(state: &IpcState, creds: PeerCreds) -> Response {
@@ -1108,6 +1180,7 @@ fn handle_ssh_load_authorize(
             &path_buf,
             creds.uid,
             child_after.target,
+            pid as u32,
             SshAgentBinding::Verified(pinned_agent.path.clone()),
         ) {
             Ok(value) => value,
@@ -1554,6 +1627,7 @@ mod tests {
     fn ssh_read_approval_releases_engine_lock_and_keeps_audit_metadata_only() {
         let fixture = guard_test_fixtures::SshFixture::create().expect("SSH fixture");
         let config = EnforcementConfig {
+            config_version: platform_linux::config::CONFIG_VERSION,
             enforcement_mode: EnforcementMode::Conservative,
             browsers: vec![],
             enrolled_exes: vec![],

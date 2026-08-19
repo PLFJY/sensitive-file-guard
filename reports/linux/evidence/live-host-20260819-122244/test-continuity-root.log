@@ -1,0 +1,14 @@
+==> Starting guardd (strict-filesystem)
+==> 1. continuity starts INTACT
+PASS: continuity INTACT at startup
+==> 2. unknown probe still denied while INTACT
+PASS: unknown probe denied
+==> 3. overflow stress attempt (may not deterministically overflow)
+    before=INTACT|None after=INTACT|None
+BLOCKED: no deterministic kernel overflow; state-machine semantics covered by unit tests
+==> 4. mark loss => continuity LOST
+BLOCKED: mark-loss live simulation requires unmountable test FS; unit-tested
+PASS: guardd exited on SIGTERM
+
+==> LFH3 continuity root summary: PASS=3 FAIL=0 BLOCKED=2
+    (see /tmp/guard-continuity-kodAdf/guardd.log for daemon decision log)

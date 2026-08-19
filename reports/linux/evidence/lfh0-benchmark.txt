@@ -1,0 +1,17 @@
+LFH0 baseline benchmark — benchmark-strict-filesystem-root.sh (via pkexec, SKIP_BUILD=1)
+kernel: 7.1.8-arch1-3, fs: / ext4, host: plfjy-arch
+OPEN_ITERATIONS=20000 ALLOWED_ITERATIONS=3000 DENIED_ITERATIONS=1000
+
+state | workload | iterations | wall_ms | opens/sec | p50/p95/p99/max_us | overhead(vs absent)
+absent | unprotected | 20000 | 146.317 | 136689 | 6.6/10.3/12.5/81.9 | 1.00x
+absent | browser | 3000 | 21.160 | 141778 | 5.8/9.2/13.5/81.0 | 1.00x
+absent | denied | 1000 | 8.957 | 111643 | 9.0/11.9/16.6/75.7 | 1.00x
+conservative | unprotected | 20000 | 182.855 | 109376 | 8.8/13.3/17.2/1231.9 | 1.25x
+conservative | browser | 3000 | 136.654 | 21953 | 39.8/81.1/108.7/465.7 | 6.46x
+conservative | denied | 1000 | 32.906 | 30389 | 31.2/39.0/66.7/410.7 | 3.67x
+strict | unprotected | 20000 | 447.692 | 44673 | 20.5/35.3/43.0/229.5 | 3.06x
+strict | browser | 3000 | 139.025 | 21578 | 42.0/81.9/104.5/439.5 | 6.57x
+strict | denied | 1000 | 35.897 | 27857 | 34.6/42.4/49.7/411.3 | 4.01x
+
+Strict queue health: strict_events_total=24034 strict_fast_allowed=20034 protected_events=4000
+fanotify_overflows=0 audit_dropped=0 classifier_failures=0 strict_alias_scans=4 strict_alias_matches=0

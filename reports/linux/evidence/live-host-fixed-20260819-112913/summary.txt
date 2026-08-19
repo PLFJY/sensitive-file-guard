@@ -1,0 +1,26 @@
+=== [test-pidfd-root] 11:29:13 START ===
+=== [test-pidfd-root] FAIL rc=1 ===
+guardd: IPC socket: /tmp/guard-pidfd-oheppl/guardd.sock
+[2m2026-08-19T03:29:13.028812Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m enforcement active [3mbrowsers[0m[2m=[0m1 [3mmode[0m[2m=[0m"conservative" [3mprotected_files[0m[2m=[0m2 [3mmarked_files[0m[2m=[0m2 [3mmarked_tree_dirs[0m[2m=[0m0 [3mmarked_filesystems[0m[2m=[0m0 [3mipc_socket[0m[2m=[0mSome("/tmp/guard-pidfd-oheppl/guardd.sock")
+[2m2026-08-19T03:29:13.028899Z[0m [32m INFO[0m [2mguardd::ipc[0m[2m:[0m IPC server listening [3mpath[0m[2m=[0m/tmp/guard-pidfd-oheppl/guardd.sock
+=== [experiment-fdstore-root] 11:29:16 START ===
+=== [experiment-fdstore-root] FAIL rc=1 ===
+==> First start: store a new group + fdstore upload
+Job for guard-fdstore-exp.service failed because the control process exited with error code.
+See "systemctl status guard-fdstore-exp.service" and "journalctl -xeu guard-fdstore-exp.service" for details.
+=== [test-ssh-broker-adversarial-root] 11:29:16 START ===
+=== [test-ssh-broker-adversarial-root] FAIL rc=5 ===
+PASS: daemon/audit/stdout artifacts contain no private-key bytes
+
+==> SSH broker adversarial summary: PASS=24 FAIL=5 BLOCKED=0
+=== [test-systemd-root] 11:38:52 START ===
+=== [test-systemd-root] FAIL rc=1 ===
+    Removed: /etc/systemd/system/guardd.service, /usr/local/lib/systemd/user/guard-notify.service, /usr/share/polkit-1/actions/org.guardd.policy, /usr/local/share/guardd/guardd-config.example.json, /usr/local/bin/guardd, /usr/local/bin/guardctl, /usr/local/bin/guard-notify (and any obsolete terminal UI binary)
+    Preserved: /etc/guardd (edit to remove), /var/lib/guardd (audit DB)
+==> Uninstall complete
+=== [test-installed-auth-root] 11:38:53 START ===
+=== [test-installed-auth-root] PASS ===
+PASS: guard-notify delivered installed DENY event to the user session
+
+==> Installed authorization summary: PASS=14 FAIL=0 BLOCKED=0
+=== FIXED-GATE SUMMARY: PASS=1 FAIL=4 ===

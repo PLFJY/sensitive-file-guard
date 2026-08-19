@@ -408,9 +408,12 @@ mod tests {
         let mut stream = UnixStream::connect(&sock).unwrap();
         let huge_len: u32 = (64 * 1024 + 1) as u32;
         stream.write_all(&huge_len.to_be_bytes()).unwrap();
-        // Send a small amount; the server rejects on the length check.
-        stream.write_all(&[0u8; 16]).unwrap();
-        stream.flush().unwrap();
+        // Send a small amount; the server rejects on the length check. The
+        // server may close the connection the instant it sees the oversized
+        // length — before this payload lands — so the payload write can hit
+        // EPIPE. That close IS the rejection under test.
+        let _ = stream.write_all(&[0u8; 16]);
+        let _ = stream.flush();
         // Server closes the connection without writing a response. Depending on
         // timing the client sees either a clean EOF or ECONNRESET — both prove
         // the server refused the oversized frame.

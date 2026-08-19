@@ -1,0 +1,18 @@
+==> First start: store a new group + fdstore upload
+    active; MainPID=620239
+==> Probe 1: unknown process opens protected file (blocked while alive)
+PASS: probe denied while listener alive
+==> SIGKILL the helper
+==> Probe 2: is the opener STILL blocked right after SIGKILL?
+PASS: probe still blocked 0.5s after SIGKILL (fdstore holds the group)
+==> systemd restarts the unit; helper claims the stored group
+    restarted; MainPID=620271
+==> Probe 2 outcome: did the opener unblock with a DENY?
+PASS: probe unblocked with denial after restart (rc=124)
+==> Probe 3: fresh open is denied by the restarted (claimed) group
+PASS: probe denied by restarted group (marks survived)
+
+==> LFH4 fdstore experiment summary: PASS=4 FAIL=0 BLOCKED=0
+
+VERDICT: ACCEPTED (fdstore preserved the fanotify group; queued event
+         processed after restart; marks still enforce)

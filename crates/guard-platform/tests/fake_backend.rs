@@ -98,7 +98,7 @@ fn fake_backend_can_model_allow_and_unknown_process_policy() {
         process: process(Some("chrome"), 1000),
         operation: AccessOperation::Open,
     };
-    assert_eq!(evaluate(&own, &LeaseSet::default(), 1), Decision::Allow);
+    assert_eq!(evaluate(&own, &LeaseSet::default(), 1, 0), Decision::Allow);
 
     let unknown = AccessEvent {
         resource: resource(),
@@ -106,7 +106,7 @@ fn fake_backend_can_model_allow_and_unknown_process_policy() {
         operation: AccessOperation::Open,
     };
     assert!(matches!(
-        evaluate(&unknown, &LeaseSet::default(), 1),
+        evaluate(&unknown, &LeaseSet::default(), 1, 0),
         Decision::Deny(_)
     ));
 }

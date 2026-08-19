@@ -1,0 +1,18 @@
+==> First start: store a new group + fdstore upload
+    active; MainPID=595877
+==> Probe 1: unknown process opens protected file (blocked while alive)
+PASS: probe denied while listener alive
+==> SIGKILL the helper
+==> Probe 2: is the opener STILL blocked by the fdstore duplicate?
+PASS: probe still blocked 2s after SIGKILL (fdstore holds the group)
+==> systemd restarts the unit; helper claims the stored group
+    restarted; MainPID=595915
+==> Probe 2 outcome: did the opener unblock with a DENY?
+FAIL: probe still blocked after restart (no recovery)
+==> Probe 3: fresh open is denied by the restarted (claimed) group
+PASS: probe denied by restarted group (marks survived)
+/home/plfjy/sensitive-file-guard/scripts/linux/experiment-fdstore-root.sh: line 143: 595896 Killed                     ( "$PROBE" read "$PROTECTED" > "$WORK/probe2.out" 2>&1; echo $? > "$WORK/probe2.rc" )
+
+==> LFH4 fdstore experiment summary: PASS=3 FAIL=1 BLOCKED=0
+
+VERDICT: REJECTED (fail-open or no recovery observed)

@@ -13,6 +13,7 @@ members = [
     "crates/platform-linux",
     "crates/guard-test-fixtures",
     "apps/guardd",
+    "apps/guard-fdstore",
     "apps/guardctl",
     "apps/guard-test-probe",
     "apps/guard-notify",

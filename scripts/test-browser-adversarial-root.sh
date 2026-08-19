@@ -68,10 +68,12 @@ run_as_test_user() {
   fi
 }
 
-echo "==> Building release binaries"
-CARGO_BIN="$(command -v cargo)"
-(cd "$REPO" && run_as_test_user "$CARGO_BIN" build --release --bin guardd --bin guardctl \
-  --bin guard-test-probe --bin guard-notify)
+if [ -z "${SKIP_BUILD:-}" ]; then
+  echo "==> Building release binaries"
+  CARGO_BIN="$(command -v cargo)"
+  (cd "$REPO" && run_as_test_user "$CARGO_BIN" build --release --bin guardd --bin guardctl \
+    --bin guard-test-probe --bin guard-notify)
+fi
 for binary in "$GUARDD" "$GUARDCTL" "$PROBE" "$GUARD_NOTIFY"; do
   test -x "$binary" || { echo "ERROR: missing binary: $binary"; exit 1; }
 done
@@ -177,6 +179,7 @@ import sys
 
 path, chromium, firefox, chromium_exe, firefox_exe, uid, mode = sys.argv[1:]
 config = {
+    "config_version": 1,
     "enforcement_mode": mode,
     "browsers": [
         {

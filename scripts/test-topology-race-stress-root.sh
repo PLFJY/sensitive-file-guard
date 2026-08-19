@@ -37,7 +37,9 @@ case "$ENFORCEMENT_MODE" in
 esac
 
 echo "==> Building topology race probe and daemon"
+if [ -z "${SKIP_BUILD:-}" ]; then
 cargo build --manifest-path "$REPO/Cargo.toml" -p guardd -p guard-test-probe
+fi
 GUARDD="$REPO/target/debug/guardd"
 PROBE="$REPO/target/debug/guard-test-probe"
 
@@ -51,6 +53,7 @@ printf '%s' 'SDF_CANARY_TOPOLOGY_INITIAL' > "$COOKIE"
 CONFIG="$WORK/config.json"
 printf '%s\n' \
   '{' \
+  '  "config_version": 1,' \
   "  \"enforcement_mode\": \"$ENFORCEMENT_MODE\"," \
   '  "browsers": [' \
   '    {' \

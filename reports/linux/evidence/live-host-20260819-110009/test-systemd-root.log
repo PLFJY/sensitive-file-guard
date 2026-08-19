@@ -1,0 +1,93 @@
+==> Checking unprivileged pre-built release binaries
+==> Test 1: install service
+    1. Create reviewed strict config: sudo guardctl setup --home /home/USER
+    2. Optionally choose an existing key: guardctl ssh suggest
+    3. Start: sudo systemctl enable --now guardd
+    4. Verify: guardctl status
+    5. Desktop notifications (as your user): systemctl --user daemon-reload && systemctl --user enable --now guard-notify
+FAIL: service must not be enabled by installer before configuration review
+==> Test 2: start service, verify status
+PASS: service is active
+FAIL: guardctl status does not show ACTIVE: guardd 0.1.0+3b596e7f00d565742dcd993cf7bc32464fdb830e-dirty — REDUCED
+  backend         : linux-fanotify
+  mode            : conservative
+  marked_filesystems: 0
+  required_filesystems: 0
+  filesystem_marks_healthy: true
+  protected_files : 2
+  ssh_protected_keys: 1
+  protected_trees : 0
+  browsers        : 1
+  browser_exes    : 0
+  allowed         : 0
+  denied          : 0
+  unclassified    : 0
+  strict_events   : 0
+  strict_fast_allow: 0
+  protected_events: 0
+  fanotify_overflows: 0
+  classifier_failures: 0
+  strict_alias_scans: 0
+  strict_alias_matches: 0
+  topology_degraded: false
+  file_shield_health : REDUCED
+  continuity_health  : INTACT
+  audit_health       : HEALTHY
+  process_shield     : UNSUPPORTED
+  pidfd_enabled      : true
+  audit_dropped   : 0
+  peer_uid        : 0
+==> Test 3: browser denied; SSH read allowed
+PASS: cookies denied
+FAIL: SSH key read was interrupted
+==> Test 4: stop service (fail-open)
+PASS: cookies readable after stop (fail-open confirmed)
+==> Test 5: restart, marks reconstructed
+PASS: cookies denied after restart (marks reconstructed)
+==> Test 6: crash + auto-restart
+    killed guardd (pid=578235), waiting for restart...
+PASS: systemd restarted guardd after crash
+PASS: cookies denied after crash-restart
+==> Test 7: stale socket recovery
+    stale socket created at /run/guardd/guardd.sock
+PASS: stale socket recovered, IPC responds
+==> Test 8: guardctl status states
+FAIL: status does not show ACTIVE: guardd 0.1.0+3b596e7f00d565742dcd993cf7bc32464fdb830e-dirty — REDUCED
+  backend         : linux-fanotify
+  mode            : conservative
+  marked_filesystems: 0
+  required_filesystems: 0
+  filesystem_marks_healthy: true
+  protected_files : 2
+  ssh_protected_keys: 1
+  protected_trees : 0
+  browsers        : 1
+  browser_exes    : 0
+  allowed         : 0
+  denied          : 0
+  unclassified    : 0
+  strict_events   : 0
+  strict_fast_allow: 0
+  protected_events: 0
+  fanotify_overflows: 0
+  classifier_failures: 0
+  strict_alias_scans: 0
+  strict_alias_matches: 0
+  topology_degraded: false
+  file_shield_health : REDUCED
+  continuity_health  : INTACT
+  audit_health       : HEALTHY
+  process_shield     : UNSUPPORTED
+  pidfd_enabled      : true
+  audit_dropped   : 0
+  peer_uid        : 0
+PASS: guardctl cannot connect to stopped daemon (expected)
+==> Test 9: no secret contents in journal
+PASS: no secret contents in journald
+
+==> Phase 14 systemd test summary: PASS=9 FAIL=4 BLOCKED=0
+    (see journalctl -u guardd for daemon logs)
+==> Uninstalling guardd service
+    Removed: /etc/systemd/system/guardd.service, /usr/local/lib/systemd/user/guard-notify.service, /usr/share/polkit-1/actions/org.guardd.policy, /usr/local/share/guardd/guardd-config.example.json, /usr/local/bin/guardd, /usr/local/bin/guardctl, /usr/local/bin/guard-notify (and any obsolete terminal UI binary)
+    Preserved: /etc/guardd (edit to remove), /var/lib/guardd (audit DB)
+==> Uninstall complete

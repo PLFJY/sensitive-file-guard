@@ -47,9 +47,11 @@ for tool in ssh-keygen ssh-add ssh-agent python3 cc; do
   fi
 done
 
-echo "==> Building release binaries"
-cargo build --manifest-path "$REPO/Cargo.toml" --release \
-  -p guardd -p guardctl -p guard-test-probe
+if [ -z "${SKIP_BUILD:-}" ]; then
+  echo "==> Building release binaries"
+  cargo build --manifest-path "$REPO/Cargo.toml" --release \
+    -p guardd -p guardctl -p guard-test-probe
+fi
 
 HOME_FIXTURE="$WORK/home"
 SSH_DIR="$HOME_FIXTURE/.ssh"
@@ -78,6 +80,7 @@ export SSH_AUTH_SOCK="$AGENT_SOCKET"
 CONFIG="$WORK/config.json"
 printf '%s\n' \
   '{' \
+  '  "config_version": 1,' \
   "  \"enforcement_mode\": \"$ENFORCEMENT_MODE\"," \
   '  "browsers": [],' \
   '  "enrolled_exes": [],' \
@@ -114,19 +117,21 @@ PY
   then pass "$description"; else fail "$description"; fi
 }
 
-echo "==> Raw private-key access"
-if cat "$KEY" >/dev/null 2>&1; then pass "direct private-key read allowed"; else fail "direct private-key read interrupted"; fi
+echo "==> Raw private-key access (exact-reader model: denied without a lease)"
+# No SSH-read lease has been granted to any of these unverified readers, so the
+# exact-reader model denies each read (confirmation required, headless deny).
+if cat "$KEY" >/dev/null 2>&1; then fail "direct private-key read allowed without a lease"; else pass "direct private-key read denied without a lease"; fi
 if cp "$KEY" "$WORK/copied-key" 2>/dev/null; then
-  pass "copy private key allowed"
+  fail "copy private key allowed without a lease"
   rm -f "$WORK/copied-key"
 else
-  fail "copy private key interrupted"
+  pass "copy private key denied without a lease"
 fi
-if "$PROBE" read "$KEY" >/dev/null 2>&1; then pass "Rust probe read allowed"; else fail "Rust probe read interrupted"; fi
+if "$PROBE" read "$KEY" >/dev/null 2>&1; then fail "Rust probe read allowed without a lease"; else pass "Rust probe read denied without a lease"; fi
 if python3 -c 'import sys; open(sys.argv[1], "rb").read()' "$KEY" 2>/dev/null; then
-  pass "Python probe read allowed"
+  fail "Python probe read allowed without a lease"
 else
-  fail "Python probe read interrupted"
+  pass "Python probe read denied without a lease"
 fi
 if [ -s "$PUB" ] && cat "$PUB" >/dev/null; then pass "public key remains readable"; else fail "public key was blocked"; fi
 
@@ -167,10 +172,11 @@ if python3 - "$WORK/fake-exec.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1], encoding="utf-8"))
 # Authorization is issued for the future system ssh-add identity. /usr/bin/cat
-# cannot consume that lease, but its ordinary read is intentionally allowed.
-raise SystemExit(0 if d["response"].get("ok") and d["child_exit"] == 0 else 1)
+# cannot consume that lease, and since LFH0 every protected SSH read is a
+# fail-closed boundary: cat's read must be DENIED (child_exit != 0).
+raise SystemExit(0 if d["response"].get("ok") and d["child_exit"] != 0 else 1)
 PY
-then pass "altered executable fell back to ordinary read allowance"; else fail "fake executable scenario failed"; fi
+then pass "altered executable cannot consume the lease (read denied)"; else fail "fake executable scenario failed"; fi
 
 echo "==> Same-UID malicious agent endpoint"
 FAKE_SOCKET="$WORK/fake-agent.sock"
@@ -235,7 +241,7 @@ if grep -q 'AllowByLease' "$WORK/after-load-events.json"; then
 else
   fail "successful broker load has no ALLOW_BY_LEASE audit evidence"
 fi
-if cat "$KEY" >/dev/null 2>&1; then pass "raw read remains allowed after ssh-add exit"; else fail "raw read interrupted after ssh-add exit"; fi
+if cat "$KEY" >/dev/null 2>&1; then fail "raw read succeeded after ssh-add exit (fail-closed boundary missing)"; else pass "raw read denied after ssh-add exit (fail-closed)"; fi
 
 ssh-add -D >/dev/null 2>&1 || true
 python3 "$SCENARIOS" double-open --socket "$SOCKET" --key "$KEY" \
@@ -259,10 +265,12 @@ python3 "$SCENARIOS" expired --socket "$SOCKET" --key "$KEY" \
 if python3 - "$WORK/expired.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1], encoding="utf-8"))
-raise SystemExit(0 if d["response"].get("ok") and d["child_exit"] == 0 else 1)
+# After the lease expires, the read must be DENIED (fail-closed): no
+# fallback to an ordinary allowance.
+raise SystemExit(0 if d["response"].get("ok") and d["child_exit"] != 0 else 1)
 PY
-then pass "expired lease fell back to ordinary read allowance"; else fail "expired-lease scenario failed"; fi
-if ssh-add -l >/dev/null 2>&1; then pass "ordinary allowed read loaded the key after lease expiry"; else fail "ssh-add did not load after lease expiry"; fi
+then pass "expired lease denies the read (fail-closed)"; else fail "expired-lease scenario failed"; fi
+if ssh-add -l >/dev/null 2>&1; then fail "key loaded after lease expiry (should be denied)"; else pass "no key load after lease expiry"; fi
 
 echo "==> Malicious client ignores daemon-pinned endpoint"
 IGNORE_FAKE_SOCKET="$WORK/ignore-pin-fake-agent.sock"

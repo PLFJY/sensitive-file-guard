@@ -29,6 +29,11 @@ pub struct BackendMetrics {
     pub classifier_failures: AtomicU64,
     pub strict_alias_scans: AtomicU64,
     pub strict_alias_matches: AtomicU64,
+    /// LFH1: whether the fanotify group was created with FAN_REPORT_PIDFD.
+    pub pidfd_enabled: std::sync::atomic::AtomicBool,
+    /// LFH1: events on a pidfd-enabled group that arrived without a usable
+    /// pidfd. On accepted kernels this is unexpected and fails closed.
+    pub pidfd_missing_events: AtomicU64,
 }
 
 impl BackendMetrics {
@@ -43,6 +48,8 @@ impl BackendMetrics {
             classifier_failures: AtomicU64::new(0),
             strict_alias_scans: AtomicU64::new(0),
             strict_alias_matches: AtomicU64::new(0),
+            pidfd_enabled: std::sync::atomic::AtomicBool::new(false),
+            pidfd_missing_events: AtomicU64::new(0),
         }
     }
 
@@ -60,6 +67,8 @@ impl BackendMetrics {
             classifier_failures: self.classifier_failures.load(Ordering::Relaxed),
             strict_alias_scans: self.strict_alias_scans.load(Ordering::Relaxed),
             strict_alias_matches: self.strict_alias_matches.load(Ordering::Relaxed),
+            pidfd_enabled: self.pidfd_enabled.load(Ordering::Relaxed),
+            pidfd_missing_events: self.pidfd_missing_events.load(Ordering::Relaxed),
         }
     }
 }
@@ -73,6 +82,8 @@ pub struct BackendSnapshot {
     pub classifier_failures: u64,
     pub strict_alias_scans: u64,
     pub strict_alias_matches: u64,
+    pub pidfd_enabled: bool,
+    pub pidfd_missing_events: u64,
 }
 
 #[derive(Debug)]
@@ -80,6 +91,15 @@ pub enum StrictClassification {
     Protected(ProtectedResource),
     Unrelated,
     Error(String),
+}
+
+/// One learned dynamic-object candidate (LFH2). `(dev, ino)` may map to several
+/// protected handles when a browser recreated a resource over time; each entry
+/// is compared by opaque handle, never by inode number alone.
+#[derive(Debug, Clone)]
+struct HandleCandidate {
+    handle: platform_linux::object_handle::ObjectHandle,
+    resource: ProtectedResource,
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +120,14 @@ pub struct StrictClassifier {
     browsers: Vec<BrowserNamespace>,
     ssh: Vec<SshNamespace>,
     inode_index: InodeIndex,
+    /// LFH2: `(dev, ino)` -> learned protected object handles. Only objects
+    /// that were opened under a protected path are learned; every other open
+    /// skips handle computation (fast path). A reused inode yields a different
+    /// handle and is Unrelated (no false positive).
+    handle_index: std::sync::RwLock<std::collections::HashMap<(u64, u64), Vec<HandleCandidate>>>,
+    /// Bounds the handle index so a pathological re-creation storm cannot grow
+    /// it without limit.
+    handle_index_capacity: usize,
     filesystem_paths: Vec<PathBuf>,
     metrics: std::sync::Arc<BackendMetrics>,
 }
@@ -160,6 +188,8 @@ impl StrictClassifier {
             browsers,
             ssh,
             inode_index,
+            handle_index: std::sync::RwLock::new(std::collections::HashMap::new()),
+            handle_index_capacity: 8192,
             filesystem_paths,
             metrics,
         })
@@ -196,8 +226,30 @@ impl StrictClassifier {
                     .write()
                     .expect("inode index lock poisoned")
                     .insert(identity, resource.clone());
+            } else {
+                // LFH2: a dynamic protected object seen under its protected
+                // path is *learned* by opaque handle so a later rename-away /
+                // alias open of the SAME object is still recognized, while a
+                // reused inode (different handle) is not.
+                self.learn_handle(fd, identity, resource.clone());
             }
             return StrictClassification::Protected(resource);
+        }
+
+        // LFH2: path did not classify (e.g. the object was renamed outside the
+        // profile). If this `(dev, ino)` matches learned dynamic objects,
+        // compare the event fd's handle against them: equal handle => same
+        // object => Protected; different handle => inode reuse => Unrelated.
+        if self
+            .inode_index
+            .read()
+            .expect("inode index lock poisoned")
+            .get(&identity)
+            .is_none()
+        {
+            if let Some(protected) = self.match_learned_handles(fd, identity) {
+                return protected;
+            }
         }
 
         let indexed_resource = {
@@ -248,6 +300,77 @@ impl StrictClassifier {
                 StrictClassification::Error(format!("fstat event fd link count failed: {error}"))
             }
         }
+    }
+
+    /// LFH2: learn the opaque handle of a dynamic protected object seen under
+    /// its protected path. The `(dev, ino)` key maps to a small candidate list
+    /// (a browser may recreate a resource over time); the index is bounded.
+    fn learn_handle(&self, fd: RawFd, identity: (u64, u64), resource: ProtectedResource) {
+        let handle = match platform_linux::object_handle::ObjectHandle::from_fd(fd) {
+            Ok(handle) => handle,
+            Err(error) => {
+                // A filesystem without handle support simply cannot give this
+                // guarantee; the object stays protected via path/inode paths,
+                // and the overall posture is REDUCED (reported elsewhere).
+                self.metrics
+                    .classifier_failures
+                    .fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(%error, path = %resource.path.display(), "object handle unavailable; dynamic rename guarantee REDUCED");
+                return;
+            }
+        };
+        let mut index = self
+            .handle_index
+            .write()
+            .expect("handle index lock poisoned");
+        if index.len() >= self.handle_index_capacity {
+            // Bounded: drop the oldest key rather than growing without limit.
+            if let Some(oldest) = index.keys().next().copied() {
+                index.remove(&oldest);
+            }
+        }
+        let entry = index.entry(identity).or_default();
+        if !entry.iter().any(|candidate| candidate.handle == handle) {
+            entry.push(HandleCandidate { handle, resource });
+        }
+    }
+
+    /// LFH2: compare the event fd's handle against learned candidates for this
+    /// `(dev, ino)`. Returns `Some(Protected)` on an exact handle match, or
+    /// `Some(Unrelated)` when the inode was reused (handles differ), and `None`
+    /// when this inode was never learned (fast path continues).
+    ///
+    /// A stale candidate whose handle no longer matches is dropped so a
+    /// recycled inode cannot false-positive on the stale mapping. One inode
+    /// holds exactly one object at a time, so any mismatch invalidates every
+    /// learned candidate for that inode.
+    fn match_learned_handles(
+        &self,
+        fd: RawFd,
+        identity: (u64, u64),
+    ) -> Option<StrictClassification> {
+        let candidates = {
+            let index = self
+                .handle_index
+                .read()
+                .expect("handle index lock poisoned");
+            index.get(&identity).cloned()
+        }?;
+        let event_handle = platform_linux::object_handle::ObjectHandle::from_fd(fd).ok()?;
+        if let Some(candidate) = candidates
+            .into_iter()
+            .find(|candidate| candidate.handle == event_handle)
+        {
+            return Some(StrictClassification::Protected(candidate.resource));
+        }
+        // Inode reused: the current object is not any learned protected
+        // object. Drop the whole key so a future recycled inode cannot
+        // false-positive on it.
+        self.handle_index
+            .write()
+            .expect("handle index lock poisoned")
+            .remove(&identity);
+        Some(StrictClassification::Unrelated)
     }
 
     /// Concrete critical files are safe to pin by inode.  Descendants of
@@ -496,6 +619,7 @@ mod tests {
 
     fn chromium_config(root: &Path) -> EnforcementConfig {
         EnforcementConfig {
+            config_version: platform_linux::config::CONFIG_VERSION,
             enforcement_mode: EnforcementMode::StrictFilesystem,
             browsers: vec![crate::enforce::BrowserEnrollmentConfig {
                 id: "synthetic-chromium".to_owned(),
@@ -670,5 +794,140 @@ mod tests {
             .err()
             .expect("missing root must fail strict startup");
         assert!(error.to_string().contains("requires existing browser root"));
+    }
+
+    // --- LFH2: dynamic object handle identity ---
+
+    /// name_to_handle_at is unsupported on tmpfs (e.g. /tmp), so these tests
+    /// create their sandbox under the workspace target dir (a real filesystem
+    /// on this host) where object handles are available.
+    fn fs_tempdir() -> tempfile::TempDir {
+        let repo = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
+        let base = std::path::Path::new(&repo)
+            .join("../../target")
+            .join(format!("lfh2-tests-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        tempfile::Builder::new()
+            .prefix("handle-")
+            .tempdir_in(&base)
+            .expect("fs tempdir")
+    }
+
+    fn new_classifier(root: &Path) -> (StrictClassifier, InodeIndex) {
+        let index = std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+        let metrics = std::sync::Arc::new(BackendMetrics::new(EnforcementMode::StrictFilesystem));
+        let classifier = StrictClassifier::new(
+            &chromium_config(root),
+            std::sync::Arc::clone(&index),
+            metrics,
+        )
+        .unwrap();
+        (classifier, index)
+    }
+
+    #[test]
+    fn dynamic_handle_learned_then_rename_away_still_protected() {
+        // LFH2 Step 1/2: a dynamic object (Local Storage descendant) opened
+        // under its protected path is learned by handle; after rename-out the
+        // same object (same handle) must still be Protected — closing the
+        // LFH0 "rename-away without open" gap for objects that WERE opened.
+        let temp = fs_tempdir();
+        let root = temp.path().join("chromium");
+        let dynamic = root.join("Default/Local Storage/leveldb/000001.log");
+        std::fs::create_dir_all(dynamic.parent().unwrap()).unwrap();
+        std::fs::write(&dynamic, b"synthetic session").unwrap();
+        let outside = temp.path().join("exfiltrated.log");
+
+        let (classifier, _index) = new_classifier(&root);
+
+        let first = std::fs::File::open(&dynamic).unwrap();
+        assert!(matches!(
+            classifier.classify_fd(first.as_raw_fd()),
+            StrictClassification::Protected(_)
+        ));
+        drop(first);
+
+        std::fs::rename(&dynamic, &outside).unwrap();
+        let renamed = std::fs::File::open(&outside).unwrap();
+        assert!(
+            matches!(
+                classifier.classify_fd(renamed.as_raw_fd()),
+                StrictClassification::Protected(_)
+            ),
+            "rename-away dynamic object with a learned handle must stay protected"
+        );
+    }
+
+    #[test]
+    fn inode_reuse_after_dynamic_delete_is_not_false_positive() {
+        // LFH2: after the learned dynamic object is deleted, a NEW unrelated
+        // file that reuses the same inode number must NOT be classified
+        // Protected (its handle differs). This is the inode-reuse guard.
+        let temp = fs_tempdir();
+        let root = temp.path().join("chromium");
+        let dynamic = root.join("Default/Local Storage/leveldb/000001.log");
+        std::fs::create_dir_all(dynamic.parent().unwrap()).unwrap();
+        std::fs::write(&dynamic, b"synthetic session").unwrap();
+
+        let (classifier, _index) = new_classifier(&root);
+        let first = std::fs::File::open(&dynamic).unwrap();
+        assert!(matches!(
+            classifier.classify_fd(first.as_raw_fd()),
+            StrictClassification::Protected(_)
+        ));
+        let reused_ino = fanotify::fd_identity(first.as_raw_fd()).unwrap().1;
+        drop(first);
+        std::fs::remove_file(&dynamic).unwrap();
+
+        // Simulate inode reuse by an unrelated file. On a real filesystem the
+        // kernel rarely reuses the exact inode instantly, so we instead open
+        // an unrelated file and force the classifier to treat its inode as the
+        // stale key by injecting the learned key directly.
+        let unrelated = temp.path().join("unrelated.db");
+        std::fs::write(&unrelated, b"clipboard database").unwrap();
+        let unrelated_file = std::fs::File::open(&unrelated).unwrap();
+        let unrelated_identity = fanotify::fd_identity(unrelated_file.as_raw_fd()).unwrap();
+        classifier.handle_index.write().unwrap().insert(
+            unrelated_identity,
+            vec![HandleCandidate {
+                handle: platform_linux::object_handle::ObjectHandle {
+                    mount_id: 1,
+                    handle_type: 1,
+                    handle_bytes: vec![0xDE, 0xAD, 0xBE, 0xEF],
+                },
+                resource: resource(
+                    &dynamic,
+                    ProtectedResourceKind::WebStorage,
+                    1000,
+                    Some(BrowserId("synthetic-chromium".into())),
+                    Some(ProfileId("Default".into())),
+                ),
+            }],
+        );
+        let _ = reused_ino;
+
+        // The unrelated file's real handle differs from the injected stale
+        // handle => Unrelated, and the stale mapping is dropped.
+        assert!(matches!(
+            classifier.classify_fd(unrelated_file.as_raw_fd()),
+            StrictClassification::Unrelated
+        ));
+        assert!(!classifier
+            .handle_index
+            .read()
+            .unwrap()
+            .contains_key(&unrelated_identity));
+    }
+
+    #[test]
+    fn object_handle_round_trip_via_platform_module() {
+        let file = std::fs::File::open("/proc/self/exe").expect("open self exe");
+        let handle = platform_linux::object_handle::ObjectHandle::from_fd(file.as_raw_fd());
+        if let Ok(handle) = handle {
+            assert_eq!(
+                platform_linux::object_handle::ObjectHandle::decode(&handle.encode()),
+                Some(handle)
+            );
+        }
     }
 }

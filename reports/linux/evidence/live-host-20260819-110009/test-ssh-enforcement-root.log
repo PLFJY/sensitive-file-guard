@@ -1,0 +1,50 @@
+==> Starting guardd SSH enforcement (config-enrolled key)
+guardd active (pid=573304)
+==> Test 1: Allow resolves a held SSH read without deadlocking guardd
+PASS: allow-read entered pending before any key data was returned
+PASS: allow-read was allowed and completed
+PASS: daemon remained responsive after allow-read
+==> Test 2: Block denies a held SSH read without returning key data
+PASS: block-read entered pending before any key data was returned
+PASS: block-read was blocked without returning key data
+PASS: daemon remained responsive after block-read
+==> Test 3: reader exit cancels pending access without leaking data
+PASS: exited reader was removed from pending without receiving key data
+==> Test 4: unanswered pending access times out closed
+PASS: pending timeout denied the read without returning key data
+==> Test 5: public key remains readable (not protected)
+PASS: public key remains readable
+==> Test 6: unrelated files under .ssh remain readable (config, known_hosts, notes)
+PASS: config remains readable
+PASS: known_hosts remains readable
+PASS: notes.txt remains readable
+==> Test 7: hardlink read follows the protected inode and can be allowed
+PASS: hardlink-allow entered pending before any key data was returned
+PASS: hardlink-allow was allowed and completed
+PASS: daemon remained responsive after hardlink-allow
+==> Test 8: symlink read follows the protected target and can be allowed
+PASS: symlink-allow entered pending before any key data was returned
+PASS: symlink-allow was allowed and completed
+PASS: daemon remained responsive after symlink-allow
+==> Test 9: runtime guardctl ssh protect on a NEW key => protects it
+PASS: guardctl ssh protect succeeded
+PASS: runtime-key-allow entered pending before any key data was returned
+PASS: runtime-key-allow was allowed and completed
+PASS: daemon remained responsive after runtime-key-allow
+==> Test 10: guardctl ssh protect rejects .pub file
+PASS: guardctl ssh protect rejected .pub file
+==> Test 11: guardctl ssh suggest lists conventional candidates
+PASS: ssh suggest lists private candidates, excludes .pub
+==> Test 12: protected key audit log has no key contents
+PASS: audit events contain no private-key content
+PASS: daemon log contains no private-key content
+==> Test 13: clean daemon shutdown
+PASS: guardd exited on SIGTERM
+
+==> SSH interactive-read root integration summary: PASS=27 FAIL=0 BLOCKED=0
+    (see /tmp/guard-ssh-enforce-E2iQZa/guardd.log for daemon decision log)
+
+NOTE: rename gap — fanotify marks are inode-based; renaming a protected
+      key moves the SAME inode so protection follows the rename. A key
+      re-created at the original path after deletion is NOT protected until
+      re-enrolled (documented in reports/phase-10.md).

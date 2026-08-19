@@ -47,9 +47,11 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 2
 fi
 
-echo "==> Building release binaries"
-cd "$REPO"
-cargo build --release 2>&1 | grep -E '(Compiling guardd|Compiling guardctl|Compiling guard-test-probe|Finished|error)' || true
+if [ -z "${SKIP_BUILD:-}" ]; then
+  echo "==> Building release binaries"
+  cd "$REPO"
+  cargo build --release 2>&1 | grep -E '(Compiling guardd|Compiling guardctl|Compiling guard-test-probe|Finished|error)' || true
+fi
 test -x "$GUARDD"   || { echo "guardd binary missing"; exit 1; }
 test -x "$GUARDCTL" || { echo "guardctl binary missing"; exit 1; }
 test -x "$PROBE"    || { echo "guard-test-probe binary missing"; exit 1; }
@@ -90,6 +92,8 @@ printf 'GUARD_UNICODE_COOKIE_FIXTURE' > "$UNICODE_UDD/Default/Network/Cookies"
 SOCK="$WORK/guardd.sock"
 cat > "$WORK/config.json" <<EOF
 {
+  "config_version": 1,
+  "enforcement_mode": "conservative",
   "browsers": [
     { "id": "chrome", "family": "chromium", "profile_root": "$CHROME_UDD", "owner_uid": 0, "exe_paths": [] },
     { "id": "unicode_chrome", "family": "chromium", "profile_root": "$UNICODE_UDD", "owner_uid": 0, "exe_paths": [] }
@@ -236,10 +240,14 @@ sleep 0.5
 start_guardd
 echo "guardd restarted (pid=$GUARDD_PID)"
 assert_denied "cookies denied after restart" read "$COOKIES"
+# SSH reads are gated by exact-reader confirmation (no lease was granted to
+# this unknown probe), so an unauthorized read must remain denied after
+# restart — protection persists. The behavioral "reads allowed" wording from
+# an earlier phase was superseded by the exact-reader SSH model.
 if "$PROBE" read "$PRIV_KEY" >/dev/null 2>&1; then
-  note_pass "SSH key read allowed after restart"
+  note_fail "SSH key read allowed for unknown probe after restart"
 else
-  note_fail "SSH key read interrupted after restart"
+  note_pass "SSH key read denied for unknown probe after restart"
 fi
 
 # ===========================================================================

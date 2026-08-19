@@ -1,4 +1,5 @@
 {
+  "config_version": 1,
   "enforcement_mode": "strict-filesystem",
   "browsers": [],
   "enrolled_exes": [],

@@ -74,6 +74,9 @@ fn main() -> ExitCode {
             do_probe_memory(pid)
         }
         Some("read") if args.len() == 3 => do_read(Path::new(&args[2])),
+        Some("write-file") if args.len() == 4 => {
+            do_write_file(Path::new(&args[2]), args[3].as_bytes())
+        }
         Some("mmap") if args.len() == 3 => do_mmap(Path::new(&args[2])),
         Some("sqlite") if args.len() == 3 => do_sqlite(Path::new(&args[2])),
         Some("copy-read") if args.len() == 4 => {
@@ -151,6 +154,7 @@ fn print_usage() {
         "usage: guard-test-probe COMMAND ...\n\
          commands:\n\
            read PATH\n\
+           write-file PATH CONTENT\n\
            mmap PATH\n\
            sqlite DATABASE\n\
            copy-read SOURCE DESTINATION\n\
@@ -338,6 +342,9 @@ mod mach {
     pub type mach_vm_size_t = u64;
     pub type vm_offset_t = u32;
     pub type mach_msg_type_number_t = u32;
+    // Placeholder UAPI mirror kept symmetric with the macOS module; unused on
+    // non-macOS builds where the task_read probe is a stub.
+    #[allow(dead_code)]
     pub type vm_size_t = u64;
 }
 
@@ -391,6 +398,30 @@ fn do_read(path: &Path) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(error) => report_failure("open/read", path, &error),
+    }
+}
+
+/// Write synthetic fixture content through THIS process's identity. Used by
+/// privileged harnesses so new protected-tree content is created by the
+/// enrolled browser identity (the harness shell is an unknown process and
+/// would be denied by the firewall, which is exactly the behavior under test).
+fn do_write_file(path: &Path, content: &[u8]) -> ExitCode {
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => {
+            return report_failure(
+                "resolve parent dir",
+                path,
+                &std::io::Error::new(std::io::ErrorKind::InvalidInput, "no parent directory"),
+            )
+        }
+    };
+    if let Err(error) = std::fs::create_dir_all(parent) {
+        return report_failure("create parent dirs", path, &error);
+    }
+    match std::fs::write(path, content) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => report_failure("write fixture", path, &error),
     }
 }
 

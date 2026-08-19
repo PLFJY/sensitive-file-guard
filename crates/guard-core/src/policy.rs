@@ -10,8 +10,8 @@
 //! - trusted browser + another browser's profile => Deny unless valid
 //!   `MigrationAccessLease` => otherwise `AllowByLease`
 //! - unknown / non-browser + browser protected resource => Deny (a migration
-//!   lease may still cover a target-tree helper process even if the opener's own
-//!   browser field is unset)
+//!   lease explicitly bound to the exact opener/helper instance may authorize
+//!   it even if the opener's own browser field is unset)
 //! - SSH private-key reads => require a human confirmation unless an exact
 //!   `SshLoadLease` or root-bound `SshReadAccessLease` is valid
 //! - cross-user SSH access => Deny immediately
@@ -19,7 +19,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::identity::{AncestorSummary, ProcessIdentity, ProcessIntegrity, ProcessStableId};
+use crate::identity::{ProcessIdentity, ProcessIntegrity};
 use crate::lease::{LeaseId, LeaseSet, MigrationLeaseState};
 use crate::resource::{BrowserId, ProfileId, ProtectedResource, ProtectedResourceKind};
 
@@ -62,6 +62,9 @@ pub enum DenyReason {
     WrongUid,
     IdentityMismatch,
     OneShotLeaseUsed,
+    /// LFH5: the lease was minted under an earlier protection-continuity
+    /// generation; a continuity loss invalidated all pre-loss authority.
+    StaleLeaseGeneration,
     /// The exact live process instance has been marked Compromised by Process
     /// Shield and must not receive further protected-resource authority.
     ProcessIntegrityCompromised,
@@ -94,6 +97,8 @@ impl DenyReason {
             Self::IdentityMismatch => "identity_mismatch",
             // The one-shot SshLoadLease was already consumed.
             Self::OneShotLeaseUsed => "one_shot_lease_used",
+            // The lease predates the last protection-continuity loss.
+            Self::StaleLeaseGeneration => "stale_lease_generation",
             // The exact live process instance was confirmed compromised by
             // Process Shield; it must not receive further secret authority.
             Self::ProcessIntegrityCompromised => "process_integrity_compromised",
@@ -121,23 +126,36 @@ pub struct AccessEvent {
 /// Evaluate the deterministic allow/deny decision.
 ///
 /// `now` is in the same clock/units as `expires_at` on the leases.
+/// `current_generation` is the protection-continuity generation; a lease
+/// created under an earlier generation (before a continuity loss) is stale and
+/// never authorizes (LFH5).
 ///
 /// Process Shield gate: a `Compromised` exact live process instance fails
 /// closed before any browser/SSH policy is evaluated, so a compromised browser
 /// cannot keep receiving Allow merely because its path/signature/BrowserId
 /// still match. This function is only consulted for protected resources, so
 /// the gate never affects unrelated processes.
-pub fn evaluate(event: &AccessEvent, leases: &LeaseSet, now: u64) -> Decision {
+pub fn evaluate(
+    event: &AccessEvent,
+    leases: &LeaseSet,
+    now: u64,
+    current_generation: u64,
+) -> Decision {
     if event.process.integrity != ProcessIntegrity::Normal {
         return Decision::Deny(DenyReason::ProcessIntegrityCompromised);
     }
     match event.resource.kind {
-        ProtectedResourceKind::SshPrivateKey => decide_ssh(event, leases, now),
-        _ => decide_browser(event, leases, now),
+        ProtectedResourceKind::SshPrivateKey => decide_ssh(event, leases, now, current_generation),
+        _ => decide_browser(event, leases, now, current_generation),
     }
 }
 
-fn decide_browser(event: &AccessEvent, leases: &LeaseSet, now: u64) -> Decision {
+fn decide_browser(
+    event: &AccessEvent,
+    leases: &LeaseSet,
+    now: u64,
+    current_generation: u64,
+) -> Decision {
     let res = &event.resource;
     let proc = &event.process;
 
@@ -153,14 +171,14 @@ fn decide_browser(event: &AccessEvent, leases: &LeaseSet, now: u64) -> Decision 
         return Decision::Allow;
     }
 
-    // Cross-browser (or non-browser helper in the target's tree): require a
-    // valid MigrationAccessLease. Armed leases never authorize directly: the
+    // Cross-browser (or non-browser helper): require a valid
+    // MigrationAccessLease. Armed leases never authorize directly: the
     // enforcement layer must first bind one to an exact process instance.
 
     let mut scope_match = false;
     for lease in &leases.migration {
-        // Scope: source = owning browser/profile, target = opener's browser
-        // (or the browser of an ancestor that matches the lease target), same uid.
+        // Scope: source = owning browser/profile, same uid. Target matching is
+        // decided by the exact bound root (LFH5), never by ancestry.
         let in_scope = lease.source_browser == *res_browser
             && lease.source_profile == *res_profile
             && lease.uid == proc.uid;
@@ -175,9 +193,19 @@ fn decide_browser(event: &AccessEvent, leases: &LeaseSet, now: u64) -> Decision 
         if now >= lease.expires_at {
             return Decision::Deny(DenyReason::LeaseExpired);
         }
+        // LFH5: a lease minted under an earlier protection-continuity
+        // generation is stale — a continuity loss invalidated all pre-loss
+        // authority. Fail closed with a distinct audit reason.
+        if lease.generation != current_generation {
+            return Decision::Deny(DenyReason::StaleLeaseGeneration);
+        }
         match &lease.state {
             MigrationLeaseState::Armed { .. } => continue,
-            MigrationLeaseState::Bound { root } if process_is_in_tree(proc, root) => {
+            // LFH5: EXACT READER INSTANCE only. A bound lease authorizes the
+            // exact bound process instance — never "any descendant in the
+            // tree". A helper that must read must be explicitly bound
+            // post-observation; pre-existing descendants never auto-upgrade.
+            MigrationLeaseState::Bound { root } if proc.stable == *root => {
                 return Decision::AllowByLease(lease.id);
             }
             MigrationLeaseState::Bound { .. } => continue,
@@ -204,23 +232,12 @@ fn decide_browser(event: &AccessEvent, leases: &LeaseSet, now: u64) -> Decision 
     }
 }
 
-fn process_is_in_tree(process: &ProcessIdentity, root: &ProcessStableId) -> bool {
-    process.stable == *root
-        || process
-            .ancestors
-            .iter()
-            .any(|ancestor| ancestor_matches_root(ancestor, root))
-}
-
-fn ancestor_matches_root(ancestor: &AncestorSummary, root: &ProcessStableId) -> bool {
-    ancestor.pid == root.pid
-        && ancestor.start_time == root.start_time
-        && ancestor.exe == root.exe
-        && ancestor.exe_dev == root.exe_dev
-        && ancestor.exe_ino == root.exe_ino
-}
-
-fn decide_ssh(event: &AccessEvent, leases: &LeaseSet, now: u64) -> Decision {
+fn decide_ssh(
+    event: &AccessEvent,
+    leases: &LeaseSet,
+    now: u64,
+    current_generation: u64,
+) -> Decision {
     let proc = &event.process;
     if proc.uid != event.resource.owner_uid {
         return Decision::Deny(DenyReason::WrongUid);
@@ -235,7 +252,13 @@ fn decide_ssh(event: &AccessEvent, leases: &LeaseSet, now: u64) -> Decision {
         if lease.target != proc_identity {
             continue;
         }
-        if !lease.revoked && !lease.used && now < lease.expires_at {
+        // LFH5: a stale-generation one-shot must not authorize. Scan continues
+        // so a later valid lease for the same key can still match.
+        if !lease.revoked
+            && !lease.used
+            && now < lease.expires_at
+            && lease.generation == current_generation
+        {
             return Decision::AllowByLease(lease.id);
         }
     }
@@ -244,13 +267,12 @@ fn decide_ssh(event: &AccessEvent, leases: &LeaseSet, now: u64) -> Decision {
         // reader was dynamically shielded at approval time; granting an
         // arbitrary (potentially unprotected) descendant AllowByLease would
         // hand secret bytes to a process that was never task-protected. Only
-        // the exact approved reader root may use the lease. (Migration
-        // leases keep tree matching pending the MCH2 authority matrix that
-        // decides exact-root-only vs race-free observed descendants.)
+        // the exact approved reader root may use the lease.
         if lease.resource == event.resource.id
             && lease.uid == proc.uid
             && !lease.revoked
             && now < lease.expires_at
+            && lease.generation == current_generation
             && proc.stable == lease.root
         {
             return Decision::AllowByLease(lease.id);
@@ -278,6 +300,9 @@ mod tests {
 
     const NOW: u64 = 1_000_000;
     const FUTURE: u64 = 1_000_000_000;
+    /// LFH5: protection-continuity generation under which the test leases are
+    /// minted; every `evaluate` call in this module passes it as `current`.
+    const GEN: u64 = 7;
 
     fn stable(pid: u32, start: u64, exe: &str) -> ProcessStableId {
         ProcessStableId {
@@ -406,6 +431,7 @@ mod tests {
             },
             expires_at,
             revoked: false,
+            generation: GEN,
         }
     }
 
@@ -421,9 +447,11 @@ mod tests {
             resource: res.id.clone(),
             uid,
             target,
+            pid: 0,
             expires_at,
             revoked: false,
             used: false,
+            generation: GEN,
         }
     }
 
@@ -444,7 +472,7 @@ mod tests {
             stable(1, 100, "/usr/bin/chrome"),
         );
         assert_eq!(
-            evaluate(&event(res, proc), &LeaseSet::default(), NOW),
+            evaluate(&event(res, proc), &LeaseSet::default(), NOW, GEN),
             Decision::Allow
         );
     }
@@ -464,7 +492,7 @@ mod tests {
             stable(2, 200, "/usr/bin/firefox"),
         );
         assert_eq!(
-            evaluate(&event(res, proc), &LeaseSet::default(), NOW),
+            evaluate(&event(res, proc), &LeaseSet::default(), NOW, GEN),
             Decision::RequireMigrationConfirmation(MigrationCandidate {
                 source_browser: BrowserId("chrome".into()),
                 source_profile: ProfileId("Default".into()),
@@ -488,7 +516,7 @@ mod tests {
                 stable(2, 200, &format!("/usr/bin/{target}")),
             );
             assert_eq!(
-                evaluate(&event(res, proc), &LeaseSet::default(), NOW),
+                evaluate(&event(res, proc), &LeaseSet::default(), NOW, GEN),
                 Decision::RequireMigrationConfirmation(MigrationCandidate {
                     source_browser: BrowserId(source.into()),
                     source_profile: ProfileId("Default".into()),
@@ -528,7 +556,7 @@ mod tests {
             ssh_read: vec![],
         };
         assert_eq!(
-            evaluate(&event(res, proc), &ls, NOW),
+            evaluate(&event(res, proc), &ls, NOW, GEN),
             Decision::AllowByLease(LeaseId(10))
         );
     }
@@ -548,7 +576,7 @@ mod tests {
             stable(3, 300, "/usr/bin/python3"),
         );
         assert_eq!(
-            evaluate(&event(res, proc), &LeaseSet::default(), NOW),
+            evaluate(&event(res, proc), &LeaseSet::default(), NOW, GEN),
             Decision::Deny(DenyReason::UnknownProcess)
         );
     }
@@ -569,7 +597,7 @@ mod tests {
             stable(4, 400, "/home/u/fakechrome"),
         );
         assert_eq!(
-            evaluate(&event(res, proc), &LeaseSet::default(), NOW),
+            evaluate(&event(res, proc), &LeaseSet::default(), NOW, GEN),
             Decision::Deny(DenyReason::NotTrustedIdentity)
         );
     }
@@ -584,7 +612,7 @@ mod tests {
             stable(5, 500, "/usr/bin/cat"),
         );
         assert_eq!(
-            evaluate(&event(res, proc), &LeaseSet::default(), NOW),
+            evaluate(&event(res, proc), &LeaseSet::default(), NOW, GEN),
             Decision::RequireSshKeyConfirmation
         );
     }
@@ -605,7 +633,7 @@ mod tests {
             ssh_read: vec![],
         };
         assert_eq!(
-            evaluate(&event(res, proc), &ls, NOW),
+            evaluate(&event(res, proc), &ls, NOW, GEN),
             Decision::AllowByLease(LeaseId(20))
         );
     }
@@ -621,6 +649,7 @@ mod tests {
             root: root.clone(),
             expires_at: FUTURE,
             revoked: false,
+            generation: GEN,
         };
         let allowed = browser_proc(None, TrustTier::Unknown, 1000, root.clone());
         let wrong_uid = browser_proc(None, TrustTier::Unknown, 1001, root.clone());
@@ -638,19 +667,19 @@ mod tests {
             ssh_read: vec![lease],
         };
         assert_eq!(
-            evaluate(&event(res.clone(), allowed.clone()), &leases, NOW),
+            evaluate(&event(res.clone(), allowed.clone()), &leases, NOW, GEN),
             Decision::AllowByLease(LeaseId(71))
         );
         assert_eq!(
-            evaluate(&event(res.clone(), wrong_uid), &leases, NOW),
+            evaluate(&event(res.clone(), wrong_uid), &leases, NOW, GEN),
             Decision::Deny(DenyReason::WrongUid)
         );
         assert_eq!(
-            evaluate(&event(res, wrong_process), &leases, NOW),
+            evaluate(&event(res, wrong_process), &leases, NOW, GEN),
             Decision::RequireSshKeyConfirmation
         );
         assert_eq!(
-            evaluate(&event(wrong_key, allowed), &leases, NOW),
+            evaluate(&event(wrong_key, allowed), &leases, NOW, GEN),
             Decision::RequireSshKeyConfirmation
         );
     }
@@ -686,7 +715,7 @@ mod tests {
             ssh_read: vec![],
         };
         assert_eq!(
-            evaluate(&event(res, proc), &ls, NOW),
+            evaluate(&event(res, proc), &ls, NOW, GEN),
             Decision::Deny(DenyReason::LeaseExpired)
         );
     }
@@ -721,7 +750,7 @@ mod tests {
             ssh_read: vec![],
         };
         assert_eq!(
-            evaluate(&event(res, proc), &ls, NOW),
+            evaluate(&event(res, proc), &ls, NOW, GEN),
             Decision::Deny(DenyReason::LeaseRevoked)
         );
     }
@@ -743,7 +772,7 @@ mod tests {
             ssh_read: vec![],
         };
         assert_eq!(
-            evaluate(&event(res, proc), &ls, NOW),
+            evaluate(&event(res, proc), &ls, NOW, GEN),
             Decision::RequireSshKeyConfirmation
         );
     }
@@ -766,7 +795,7 @@ mod tests {
             stable(1, 100, "/usr/bin/chrome"),
         );
         assert_eq!(
-            evaluate(&event(res, proc), &LeaseSet::default(), NOW),
+            evaluate(&event(res, proc), &LeaseSet::default(), NOW, GEN),
             Decision::Deny(DenyReason::WrongUid)
         );
     }
@@ -801,7 +830,7 @@ mod tests {
             ssh_read: vec![],
         };
         assert_eq!(
-            evaluate(&event(res, proc), &ls, NOW),
+            evaluate(&event(res, proc), &ls, NOW, GEN),
             Decision::RequireMigrationConfirmation(MigrationCandidate {
                 source_browser: BrowserId("chrome".into()),
                 source_profile: ProfileId("Default".into()),
@@ -842,7 +871,7 @@ mod tests {
             ssh_read: vec![],
         };
         assert_eq!(
-            evaluate(&event(res, proc), &ls, NOW),
+            evaluate(&event(res, proc), &ls, NOW, GEN),
             Decision::Deny(DenyReason::IdentityMismatch)
         );
     }
@@ -864,7 +893,7 @@ mod tests {
             ssh_read: vec![],
         };
         assert_eq!(
-            evaluate(&event(res, proc), &ls, NOW),
+            evaluate(&event(res, proc), &ls, NOW, GEN),
             Decision::RequireSshKeyConfirmation
         );
     }
@@ -885,12 +914,12 @@ mod tests {
             ssh_read: vec![],
         };
         assert_eq!(
-            evaluate(&event(res, proc), &ls, NOW),
+            evaluate(&event(res, proc), &ls, NOW, GEN),
             Decision::Deny(DenyReason::WrongUid)
         );
     }
 
-    // --- process-tree scoping ---
+    // --- lease scoping (LFH5: EXACT READER INSTANCE) ---
 
     fn proc_with_ancestors(
         browser: Option<&str>,
@@ -944,17 +973,19 @@ mod tests {
             ssh_read: vec![],
         };
         assert_eq!(
-            evaluate(&event(res, proc), &ls, NOW),
+            evaluate(&event(res, proc), &ls, NOW, GEN),
             Decision::Deny(DenyReason::IdentityMismatch),
             "only the enforcement layer may bind an armed lease"
         );
     }
 
     #[test]
-    fn migration_lease_allows_target_tree_helper_via_ancestor() {
-        // A firefox helper/child process (browser=None, own exe differs) opens
-        // chrome cookies. It is allowed because an ancestor is the bound target
-        // browser (process-tree scoping).
+    fn migration_lease_denies_unbound_helper_despite_ancestor_match() {
+        // LFH5: authority is EXACT READER INSTANCE. A firefox helper/child
+        // process (browser=None, own exe differs) opens chrome cookies; its
+        // ancestor is the bound target browser, but the helper itself was never
+        // bound post-observation, so it must be DENIED — ancestry alone never
+        // auto-upgrades a pre-existing descendant.
         let res = browser_resource(
             ProtectedResourceKind::CookieStore,
             "chrome",
@@ -983,9 +1014,178 @@ mod tests {
             ssh_read: vec![],
         };
         assert_eq!(
-            evaluate(&event(res, proc), &ls, NOW),
+            evaluate(&event(res, proc), &ls, NOW, GEN),
+            Decision::Deny(DenyReason::IdentityMismatch),
+            "an unbound helper must be denied even when an ancestor matches the lease root"
+        );
+    }
+
+    #[test]
+    fn migration_lease_allows_explicitly_bound_helper() {
+        // LFH5: a helper that must read is explicitly bound post-observation.
+        // Once the lease's `Bound { root }` IS the helper's exact instance, the
+        // helper may read — regardless of its (unrelated) ancestry.
+        let res = browser_resource(
+            ProtectedResourceKind::CookieStore,
+            "chrome",
+            "Default",
+            1000,
+        );
+        let helper = stable(3, 300, "/usr/lib/firefox/helper");
+        let proc = proc_with_ancestors(
+            None,
+            TrustTier::SystemPackage,
+            1000,
+            helper.clone(),
+            vec![ancestor(2, 200, "/usr/bin/firefox")],
+        );
+        let mut lease = migration(
+            11,
+            "chrome",
+            "Default",
+            "firefox",
+            1000,
+            exe_ident("/usr/lib/firefox/helper"),
+            FUTURE,
+        );
+        lease.state = MigrationLeaseState::Bound { root: helper };
+        let ls = LeaseSet {
+            migration: vec![lease],
+            ssh: vec![],
+            ssh_read: vec![],
+        };
+        assert_eq!(
+            evaluate(&event(res, proc), &ls, NOW, GEN),
             Decision::AllowByLease(LeaseId(11)),
-            "target-tree helper with matching ancestor must be allowed"
+            "an explicitly bound helper instance must be allowed"
+        );
+    }
+
+    #[test]
+    fn migration_lease_denies_pid_reuse_of_bound_root() {
+        // LFH5: same PID, different start time = a different instance. A lease
+        // bound to the earlier instance must not authorize the reused PID.
+        let res = browser_resource(
+            ProtectedResourceKind::CookieStore,
+            "chrome",
+            "Default",
+            1000,
+        );
+        let proc = browser_proc(
+            Some("firefox"),
+            TrustTier::SystemPackage,
+            1000,
+            stable(2, 9999, "/usr/bin/firefox"),
+        );
+        let lease = migration(
+            10,
+            "chrome",
+            "Default",
+            "firefox",
+            1000,
+            exe_ident("/usr/bin/firefox"),
+            FUTURE,
+        );
+        let ls = LeaseSet {
+            migration: vec![lease],
+            ssh: vec![],
+            ssh_read: vec![],
+        };
+        assert_eq!(
+            evaluate(&event(res, proc), &ls, NOW, GEN),
+            Decision::Deny(DenyReason::IdentityMismatch),
+            "PID reuse of the bound root must not inherit lease authority"
+        );
+    }
+
+    // --- LFH5: protection-continuity generation binding ---
+
+    #[test]
+    fn stale_generation_migration_lease_denied() {
+        // A lease minted under generation GEN-1 is dead after a continuity
+        // loss bumped the generation to GEN: fail closed with a distinct
+        // audit reason, never fall through to a re-grant.
+        let res = browser_resource(
+            ProtectedResourceKind::CookieStore,
+            "chrome",
+            "Default",
+            1000,
+        );
+        let proc = browser_proc(
+            Some("firefox"),
+            TrustTier::SystemPackage,
+            1000,
+            stable(2, 200, "/usr/bin/firefox"),
+        );
+        let mut lease = migration(
+            10,
+            "chrome",
+            "Default",
+            "firefox",
+            1000,
+            exe_ident("/usr/bin/firefox"),
+            FUTURE,
+        );
+        lease.generation = GEN - 1;
+        let ls = LeaseSet {
+            migration: vec![lease],
+            ssh: vec![],
+            ssh_read: vec![],
+        };
+        assert_eq!(
+            evaluate(&event(res, proc), &ls, NOW, GEN),
+            Decision::Deny(DenyReason::StaleLeaseGeneration),
+            "a stale-generation migration lease must be denied"
+        );
+    }
+
+    #[test]
+    fn stale_generation_ssh_load_lease_not_authorized() {
+        let res = ssh_resource(1000);
+        let proc = browser_proc(
+            None,
+            TrustTier::EnrolledUserWritable,
+            1000,
+            stable(6, 600, "/usr/bin/ssh-add"),
+        );
+        let mut lease = ssh_lease(20, &res, 1000, ident(600, "/usr/bin/ssh-add"), FUTURE);
+        lease.generation = GEN - 1;
+        let ls = LeaseSet {
+            migration: vec![],
+            ssh: vec![lease],
+            ssh_read: vec![],
+        };
+        assert_eq!(
+            evaluate(&event(res, proc), &ls, NOW, GEN),
+            Decision::RequireSshKeyConfirmation,
+            "a stale-generation one-shot SSH load lease must not authorize"
+        );
+    }
+
+    #[test]
+    fn stale_generation_ssh_read_lease_not_authorized() {
+        let res = ssh_resource(1000);
+        let root = stable(71, 710, "/usr/bin/git");
+        let proc = browser_proc(None, TrustTier::Unknown, 1000, root.clone());
+        let mut lease = SshReadAccessLease {
+            id: LeaseId(71),
+            resource: res.id.clone(),
+            uid: 1000,
+            root: root.clone(),
+            expires_at: FUTURE,
+            revoked: false,
+            generation: GEN,
+        };
+        lease.generation = GEN - 1;
+        let ls = LeaseSet {
+            migration: vec![],
+            ssh: vec![],
+            ssh_read: vec![lease],
+        };
+        assert_eq!(
+            evaluate(&event(res, proc), &ls, NOW, GEN),
+            Decision::RequireSshKeyConfirmation,
+            "a stale-generation SSH-read lease must not authorize"
         );
     }
 
@@ -1022,7 +1222,7 @@ mod tests {
             ssh_read: vec![],
         };
         assert_eq!(
-            evaluate(&event(res, proc), &ls, NOW),
+            evaluate(&event(res, proc), &ls, NOW, GEN),
             Decision::Deny(DenyReason::IdentityMismatch),
             "helper outside the bound target tree must be denied"
         );
@@ -1059,7 +1259,7 @@ mod tests {
             ssh_read: vec![],
         };
         assert_eq!(
-            evaluate(&event(res, proc), &ls, NOW),
+            evaluate(&event(res, proc), &ls, NOW, GEN),
             Decision::RequireMigrationConfirmation(MigrationCandidate {
                 source_browser: BrowserId("chrome".into()),
                 source_profile: ProfileId("Profile1".into()),
@@ -1119,6 +1319,10 @@ mod tests {
             "one_shot_lease_used"
         );
         assert_eq!(
+            DenyReason::StaleLeaseGeneration.reason_code(),
+            "stale_lease_generation"
+        );
+        assert_eq!(
             DenyReason::ProcessIntegrityCompromised.reason_code(),
             "process_integrity_compromised"
         );
@@ -1138,6 +1342,7 @@ mod tests {
             DenyReason::WrongUid,
             DenyReason::IdentityMismatch,
             DenyReason::OneShotLeaseUsed,
+            DenyReason::StaleLeaseGeneration,
             DenyReason::ProcessIntegrityCompromised,
         ]
         .iter()
@@ -1166,7 +1371,7 @@ mod tests {
             stable(1, 100, "/usr/bin/chrome"),
         );
         assert_eq!(
-            evaluate(&event(res, proc), &LeaseSet::default(), NOW),
+            evaluate(&event(res, proc), &LeaseSet::default(), NOW, GEN),
             Decision::Deny(DenyReason::ProcessIntegrityCompromised)
         );
     }
@@ -1202,7 +1407,7 @@ mod tests {
             };
             let proc = compromised_proc(browser, tier, 1000, stable(9, 900, "/usr/bin/proc"));
             assert_eq!(
-                evaluate(&event(res, proc), &LeaseSet::default(), NOW),
+                evaluate(&event(res, proc), &LeaseSet::default(), NOW, GEN),
                 Decision::Deny(DenyReason::ProcessIntegrityCompromised),
                 "{kind:?} must fail closed for a compromised instance"
             );
@@ -1243,7 +1448,8 @@ mod tests {
             evaluate(
                 &event(cookie_res, compromised_firefox),
                 &ls_with_migration,
-                NOW
+                NOW,
+                GEN
             ),
             Decision::Deny(DenyReason::ProcessIntegrityCompromised),
             "a migration lease must not rescue a compromised instance"
@@ -1263,7 +1469,7 @@ mod tests {
             ssh_read: vec![],
         };
         assert_eq!(
-            evaluate(&event(ssh_res, compromised_ssh), &ls_with_ssh, NOW),
+            evaluate(&event(ssh_res, compromised_ssh), &ls_with_ssh, NOW, GEN),
             Decision::Deny(DenyReason::ProcessIntegrityCompromised),
             "an SSH lease must not rescue a compromised instance"
         );
@@ -1292,11 +1498,16 @@ mod tests {
             stable(1, 9999, "/usr/bin/chrome"),
         );
         assert_eq!(
-            evaluate(&event(res.clone(), old_instance), &LeaseSet::default(), NOW),
+            evaluate(
+                &event(res.clone(), old_instance),
+                &LeaseSet::default(),
+                NOW,
+                GEN
+            ),
             Decision::Deny(DenyReason::ProcessIntegrityCompromised)
         );
         assert_eq!(
-            evaluate(&event(res, new_instance), &LeaseSet::default(), NOW),
+            evaluate(&event(res, new_instance), &LeaseSet::default(), NOW, GEN),
             Decision::Allow,
             "PID reuse must not inherit compromise from the previous instance"
         );
@@ -1338,11 +1549,16 @@ mod tests {
             stable(5, 500, "/usr/bin/cat"),
         );
         assert_eq!(
-            evaluate(&event(cookie.clone(), trusted), &LeaseSet::default(), NOW),
+            evaluate(
+                &event(cookie.clone(), trusted),
+                &LeaseSet::default(),
+                NOW,
+                GEN
+            ),
             Decision::Allow
         );
         assert_eq!(
-            evaluate(&event(cookie, importer), &LeaseSet::default(), NOW),
+            evaluate(&event(cookie, importer), &LeaseSet::default(), NOW, GEN),
             Decision::RequireMigrationConfirmation(MigrationCandidate {
                 source_browser: BrowserId("chrome".into()),
                 source_profile: ProfileId("Default".into()),
@@ -1350,7 +1566,7 @@ mod tests {
             })
         );
         assert_eq!(
-            evaluate(&event(ssh.clone(), cat), &LeaseSet::default(), NOW),
+            evaluate(&event(ssh.clone(), cat), &LeaseSet::default(), NOW, GEN),
             Decision::RequireSshKeyConfirmation
         );
         // A browser field with an Unknown trust tier is still NotTrustedIdentity
@@ -1362,7 +1578,7 @@ mod tests {
             stable(4, 400, "/home/u/fakechrome"),
         );
         assert_eq!(
-            evaluate(&event(ssh, unknown.clone()), &LeaseSet::default(), NOW),
+            evaluate(&event(ssh, unknown.clone()), &LeaseSet::default(), NOW, GEN),
             Decision::RequireSshKeyConfirmation
         );
         let cookie2 = browser_resource(
@@ -1372,7 +1588,7 @@ mod tests {
             1000,
         );
         assert_eq!(
-            evaluate(&event(cookie2, fake), &LeaseSet::default(), NOW),
+            evaluate(&event(cookie2, fake), &LeaseSet::default(), NOW, GEN),
             Decision::Deny(DenyReason::NotTrustedIdentity)
         );
     }

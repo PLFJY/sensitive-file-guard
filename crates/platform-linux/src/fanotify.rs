@@ -24,6 +24,14 @@ use libc::{
     O_RDONLY,
 };
 
+/// `FAN_REPORT_PIDFD` (Linux UAPI): ask the kernel to attach a pidfd for the
+/// event's pid. Only meaningful when the group is created with it.
+const FAN_REPORT_PIDFD: u32 = 0x0000_0080;
+
+/// `FAN_EVENT_INFO_TYPE_PIDFD` (Linux UAPI): the info record that carries the
+/// pidfd. We walk info records by `info_type`, never assuming an order.
+const FAN_EVENT_INFO_TYPE_PIDFD: u8 = 4;
+
 /// Kernel UAPI version of `fanotify_event_metadata.vers`.
 const FANOTIFY_METADATA_VERSION: u8 = 3;
 
@@ -64,17 +72,23 @@ pub fn fd_path(fd: RawFd) -> io::Result<std::path::PathBuf> {
 pub enum FanotifyError {
     #[error("fanotify metadata version mismatch: found {found}, expected {expected}")]
     VersionMismatch { found: u8, expected: u8 },
+    #[error("malformed fanotify info record (bad length or type bounds)")]
+    MalformedInfoRecord,
     #[error("io: {0}")]
     Io(#[from] io::Error),
 }
 
 /// A parsed fanotify event.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ParsedEvent {
     pub mask: u64,
     pub fd: RawFd,
     pub pid: i32,
     pub overflow: bool,
+    /// Kernel-provided pidfd for `pid` when the group was created with
+    /// `FAN_REPORT_PIDFD`. `None` on legacy kernels or when the kernel did not
+    /// attach one. Ownership: the caller must close it exactly once.
+    pub pidfd: Option<RawFd>,
 }
 
 impl ParsedEvent {
@@ -98,6 +112,9 @@ impl ParsedEvent {
 /// A permission-capable fanotify group owning one kernel fd.
 pub struct FanotifyGroup {
     fd: RawFd,
+    /// Whether this group was created with `FAN_REPORT_PIDFD`. Event parsing
+    /// then expects (and validates) pidfd info records.
+    pidfd_enabled: bool,
 }
 
 impl FanotifyGroup {
@@ -116,7 +133,36 @@ impl FanotifyGroup {
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok(Self { fd })
+        Ok(Self {
+            fd,
+            pidfd_enabled: false,
+        })
+    }
+
+    /// Initialize a `FAN_CLASS_CONTENT` group with `FAN_REPORT_PIDFD` so each
+    /// event carries a pidfd for its pid (kernel >= 5.9). On kernels that
+    /// reject the flag (EINVAL) the caller should fall back to `new_content`
+    /// and report `REDUCED(legacy_process_identity)`.
+    pub fn new_content_with_pidfd() -> io::Result<Self> {
+        // SAFETY: same as new_content; FAN_REPORT_PIDFD is UAPI.
+        let fd = unsafe {
+            fanotify_init(
+                FAN_CLASS_CONTENT | FAN_CLOEXEC | FAN_REPORT_PIDFD,
+                (O_RDONLY | O_LARGEFILE) as libc::c_uint,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self {
+            fd,
+            pidfd_enabled: true,
+        })
+    }
+
+    /// True when this group was created with `FAN_REPORT_PIDFD`.
+    pub fn pidfd_enabled(&self) -> bool {
+        self.pidfd_enabled
     }
 
     /// Mark `path` for `mask` (typically `FAN_OPEN_PERM`).
@@ -285,6 +331,12 @@ pub fn close_event_fd(fd: RawFd) {
 ///   expected to retain it for the next read in a real daemon. For the PoC this
 ///   simply means it is dropped, which is acceptable because each fanotify read
 ///   returns whole events.
+///
+/// Each event's `metadata_len` (>= the metadata header) anchors variable-length
+/// info records. We walk them by `info_type` and extract a `FAN_EVENT_INFO_TYPE
+/// _PIDFD` record's pidfd when present. Malformed records (bad length/type
+/// bounds) fail closed with `FanotifyError::MalformedInfoRecord` rather than
+/// silently dropping the pidfd.
 pub fn parse_events(buf: &[u8]) -> Result<Vec<ParsedEvent>, FanotifyError> {
     let mut out = Vec::new();
     let mut off = 0;
@@ -305,15 +357,51 @@ pub fn parse_events(buf: &[u8]) -> Result<Vec<ParsedEvent>, FanotifyError> {
             break; // incomplete trailing record
         }
         let overflow = (meta.mask & FAN_Q_OVERFLOW) != 0;
+        let info_len = meta.metadata_len as usize;
+        // Kernel semantics: `metadata_len` is the fixed header size (usually
+        // 40); any info records occupy `[off+metadata_len, off+event_len)`.
+        let pidfd = if !overflow && ev_len > info_len {
+            parse_pidfd_info(&buf[off + info_len..off + ev_len])?
+        } else {
+            None
+        };
         out.push(ParsedEvent {
             mask: meta.mask,
             fd: meta.fd,
             pid: meta.pid,
             overflow,
+            pidfd,
         });
         off += ev_len;
     }
     Ok(out)
+}
+
+/// Extract the pidfd from the info-record region of one event. Walks records
+/// by `info_type`; a malformed record fails closed with
+/// `FanotifyError::MalformedInfoRecord`.
+fn parse_pidfd_info(info: &[u8]) -> Result<Option<RawFd>, FanotifyError> {
+    const HDR: usize = 4; // fanotify_event_info_header: info_type(1) pad(1) len(2)
+    let mut off = 0;
+    while off + HDR <= info.len() {
+        let info_type = info[off];
+        let len = u16::from_le_bytes([info[off + 2], info[off + 3]]) as usize;
+        if len < HDR || off + len > info.len() {
+            return Err(FanotifyError::MalformedInfoRecord);
+        }
+        if info_type == FAN_EVENT_INFO_TYPE_PIDFD {
+            if len < HDR + std::mem::size_of::<i32>() {
+                return Err(FanotifyError::MalformedInfoRecord);
+            }
+            // SAFETY: len >= HDR + 4 and off+len <= info.len(), so 4 bytes of
+            // pidfd payload are present at off+HDR.
+            let pidfd =
+                unsafe { std::ptr::read_unaligned(info.as_ptr().add(off + HDR) as *const i32) };
+            return Ok(Some(pidfd));
+        }
+        off += len;
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -328,11 +416,22 @@ mod tests {
     /// Build `event_len` bytes representing one metadata record (padded with
     /// zeros past the header, as the kernel does for info records).
     fn make_event(vers: u8, mask: u64, fd: i32, pid: i32, event_len: usize) -> Vec<u8> {
+        make_event_with_meta(vers, mask, fd, pid, hdr_size() as u16, event_len)
+    }
+
+    fn make_event_with_meta(
+        vers: u8,
+        mask: u64,
+        fd: i32,
+        pid: i32,
+        metadata_len: u16,
+        event_len: usize,
+    ) -> Vec<u8> {
         let meta = fanotify_event_metadata {
             event_len: event_len as u32,
             vers,
             reserved: 0,
-            metadata_len: hdr_size() as u16,
+            metadata_len,
             mask,
             fd,
             pid,
@@ -346,6 +445,48 @@ mod tests {
         };
         buf[..bytes.len()].copy_from_slice(bytes);
         buf
+    }
+
+    /// Append a `FAN_EVENT_INFO_TYPE_PIDFD` info record (header + pidfd int)
+    /// to a metadata record and return the combined buffer. The record is
+    /// placed immediately after the fixed metadata header (as the kernel does:
+    /// `metadata_len` stays the header size, `event_len` covers the info).
+    fn with_pidfd_info(mut buf: Vec<u8>, pidfd: i32) -> Vec<u8> {
+        let meta_len = hdr_size();
+        let total = meta_len + 4 + 4;
+        let mut out = vec![0u8; total];
+        // metadata header
+        let mut meta = fanotify_event_metadata {
+            event_len: total as u32,
+            vers: 3,
+            reserved: 0,
+            metadata_len: meta_len as u16,
+            mask: FAN_OPEN_PERM,
+            fd: 7,
+            pid: 99,
+        };
+        // Preserve the original header fields if the caller set them.
+        if buf.len() >= meta_len {
+            // SAFETY: buf has >= meta_len bytes; copy the original metadata.
+            let orig = unsafe { &*(buf.as_ptr() as *const fanotify_event_metadata) };
+            meta = *orig;
+            meta.event_len = total as u32;
+            meta.metadata_len = meta_len as u16;
+        }
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                &meta as *const _ as *const u8,
+                std::mem::size_of::<fanotify_event_metadata>(),
+            )
+        };
+        out[..bytes.len()].copy_from_slice(bytes);
+        // info record: type=4, pad=0, len=8, pidfd int
+        out[meta_len] = FAN_EVENT_INFO_TYPE_PIDFD;
+        out[meta_len + 2] = 8;
+        let pidfd_bytes = pidfd.to_le_bytes();
+        out[meta_len + 4..meta_len + 8].copy_from_slice(&pidfd_bytes);
+        let _ = &mut buf;
+        out
     }
 
     #[test]
@@ -368,6 +509,72 @@ mod tests {
         let event = parse_events(&buf).unwrap().pop().unwrap();
         assert!(event.is_access_perm());
         assert!(!event.is_open_perm());
+    }
+
+    #[test]
+    fn parses_pidfd_info_record() {
+        let buf = with_pidfd_info(make_event(3, FAN_OPEN_PERM, 7, 99, hdr_size()), 42);
+        let evs = parse_events(&buf).expect("ok");
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].pidfd, Some(42));
+    }
+
+    #[test]
+    fn walks_info_records_by_type_without_fixed_order() {
+        // A non-PIDFD record (type=1 FID) first, then the PIDFD record. The
+        // parser must skip type 1 and find type 4.
+        let meta_len = hdr_size();
+        let fid_len = 4 + 16; // header + fsid(8) + handle bytes(8)
+        let pidfd_len = 4 + 4;
+        let total = meta_len + fid_len + pidfd_len;
+        let mut out = vec![0u8; total];
+        let meta = fanotify_event_metadata {
+            event_len: total as u32,
+            vers: 3,
+            reserved: 0,
+            metadata_len: meta_len as u16,
+            mask: FAN_OPEN_PERM,
+            fd: 7,
+            pid: 99,
+        };
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                &meta as *const _ as *const u8,
+                std::mem::size_of::<fanotify_event_metadata>(),
+            )
+        };
+        out[..bytes.len()].copy_from_slice(bytes);
+        // FID record first.
+        out[meta_len] = 1; // FAN_EVENT_INFO_TYPE_FID
+        out[meta_len + 2] = fid_len as u8;
+        // PIDFD record second.
+        out[meta_len + fid_len] = FAN_EVENT_INFO_TYPE_PIDFD;
+        out[meta_len + fid_len + 2] = pidfd_len as u8;
+        out[meta_len + fid_len + 4..meta_len + fid_len + 8].copy_from_slice(&(77i32).to_le_bytes());
+        let evs = parse_events(&out).expect("ok");
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].pidfd, Some(77));
+    }
+
+    #[test]
+    fn malformed_info_record_fails_closed() {
+        // metadata_len stays the header size; the info record's length field
+        // overflows the event buffer -> MalformedInfoRecord.
+        let meta_len = hdr_size();
+        let total = meta_len + 4;
+        let mut buf = make_event_with_meta(3, FAN_OPEN_PERM, 7, 99, meta_len as u16, total);
+        // Info record claims len=16 but only 4 bytes remain in event_len.
+        buf[meta_len] = FAN_EVENT_INFO_TYPE_PIDFD;
+        buf[meta_len + 2] = 16;
+        let err = parse_events(&buf).unwrap_err();
+        assert!(matches!(err, FanotifyError::MalformedInfoRecord));
+    }
+
+    #[test]
+    fn no_info_records_yields_no_pidfd() {
+        let buf = make_event(3, FAN_OPEN_PERM, 7, 99, hdr_size());
+        let evs = parse_events(&buf).expect("ok");
+        assert_eq!(evs[0].pidfd, None);
     }
 
     #[test]
@@ -418,6 +625,7 @@ mod tests {
             fd: 42,
             pid: 1,
             overflow: false,
+            pidfd: None,
         };
         assert!(ev.has_fd());
         let ov = ParsedEvent {
@@ -425,6 +633,7 @@ mod tests {
             fd: FAN_NOFD,
             pid: -1,
             overflow: true,
+            pidfd: None,
         };
         assert!(!ov.has_fd());
     }

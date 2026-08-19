@@ -17,7 +17,9 @@ parser.add_argument("--hold-seconds", type=int, default=0)
 args = parser.parse_args()
 
 open(args.pid_file, "w", encoding="ascii").write(str(os.getpid()))
-payload = json.dumps({"version": 2, "op": json.loads(args.operation_json)}).encode()
+# Keep in sync with guard-ipc::PROTOCOL_VERSION (crates/guard-ipc/src/lib.rs).
+# A mismatch makes the server reject every request (protocol version mismatch).
+payload = json.dumps({"version": 5, "op": json.loads(args.operation_json)}).encode()
 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
     client.connect(args.socket)
     client.sendall(struct.pack(">I", len(payload)) + payload)

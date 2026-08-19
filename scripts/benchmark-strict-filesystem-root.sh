@@ -5,7 +5,9 @@ set -euo pipefail
 if [ "$(id -u)" -ne 0 ]; then echo "ERROR: run as root"; exit 2; fi
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CARGO_BIN="$(command -v cargo)"
-(cd "$REPO" && "$CARGO_BIN" build -p guardd -p guardctl -p guard-test-probe)
+if [ -z "${SKIP_BUILD:-}" ]; then
+  (cd "$REPO" && "$CARGO_BIN" build -p guardd -p guardctl -p guard-test-probe)
+fi
 GUARDD="$REPO/target/debug/guardd"
 GUARDCTL="$REPO/target/debug/guardctl"
 PROBE="$REPO/target/debug/guard-test-probe"
@@ -71,6 +73,11 @@ bench() {
 }
 
 cargo_wall() {
+  # SKIP_BUILD: the root harness consumes prebuilt artifacts and must not
+  # compile the user repository as root; compile-wall is then not measured.
+  if [ -n "${SKIP_BUILD:-}" ]; then
+    return
+  fi
   local state="$1" started finished
   started="$(date +%s%N)"
   "$CARGO_BIN" check --manifest-path "$REPO/Cargo.toml" --workspace --all-features -q
@@ -132,7 +139,8 @@ for state,workload,d in rows:
           + overhead_text)
 print("cargo check wall seconds:")
 for state in ("absent","conservative","strict"):
-    print(f"  {state}: {(w/f'{state}-cargo.time').read_text().strip()}")
+    t=w/f"{state}-cargo.time"
+    print(f"  {state}: {t.read_text().strip() if t.exists() else 'not measured (SKIP_BUILD)'}")
 status=json.load(open(w/"strict-status.json", encoding="utf-8"))["data"]
 print("Strict queue health:")
 for key in ("strict_events_total","strict_fast_allowed","protected_events",

@@ -1,0 +1,11 @@
+=== [experiment-fdstore-root] 12:01:43 START ===
+=== [experiment-fdstore-root] FAIL rc=1 ===
+==> First start: store a new group + fdstore upload
+Job for guard-fdstore-exp.service failed because the control process exited with error code.
+See "systemctl status guard-fdstore-exp.service" and "journalctl -xeu guard-fdstore-exp.service" for details.
+=== [test-native-browser-compat-root] 12:01:43 START ===
+=== [test-native-browser-compat-root] FAIL rc=10 ===
+
+==> LFH6 native browser compat summary: PASS=2 FAIL=10 BLOCKED=5 NOT_INSTALLED=5
+    logs: /tmp/guard-lfh6-rAmNlc
+=== STAGE-3 SUMMARY: PASS=0 FAIL=2 ===

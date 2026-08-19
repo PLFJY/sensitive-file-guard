@@ -1,0 +1,29 @@
+isolated ssh-agent ready (pid=576624, sock=/tmp/guard-ssh-load-VbR3dC/agent.sock)
+==> Starting guardd SSH enforcement (config-enrolled key)
+guardd active (pid=576629)
+==> Test 1: direct cat of the protected key => denied without a lease
+PASS: direct read denied without an exact-reader lease
+==> Test 2: direct ssh-add (no lease) => read denied
+PASS: direct ssh-add read denied without an exact-reader lease
+==> Test 3: guardctl ssh load => succeeds under a one-shot lease
+PASS: guardctl ssh load succeeded
+==> Test 4: ssh-add -l sees the loaded test identity
+PASS: ssh-add -l lists the loaded identity
+==> Test 5: after the load lease ends, direct cat remains denied
+PASS: direct read denied after lease cleanup without a fresh lease
+==> Test 6: a second guardctl ssh load works (fresh one-shot lease)
+PASS: second guardctl ssh load succeeded with a fresh lease
+==> Test 7: the used/revoked lease is in a terminal state
+PASS: no live ssh_load lease remains (all used or revoked)
+==> Test 8: audit log contains no private-key bytes
+PASS: audit events contain no private-key content
+PASS: guardd log contains no private-key content
+==> Test 9: clean daemon shutdown
+PASS: guardd exited on SIGTERM
+
+==> Phase 11 root integration summary: PASS=10 FAIL=0 BLOCKED=0
+    (see /tmp/guard-ssh-load-VbR3dC/guardd.log for daemon decision log)
+
+NOTE: documented limitation — once a key is loaded into ssh-agent, same-user
+      malware that can reach SSH_AUTH_SOCK may request signatures. V1 mediates
+      raw private-key file access; it does not fully mediate agent signing.

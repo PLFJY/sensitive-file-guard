@@ -1,0 +1,26 @@
+==> Starting guardd enforcement (browser + SSH)
+guardd active (pid=629537)
+==> Test 1: agent reads normal project file => succeeds
+PASS: agent read normal project file
+==> Test 2: agent writes normal project file => succeeds
+PASS: agent wrote normal project file
+==> Test 3: agent reads browser cookie fixture => denied
+PASS: agent denied reading browser cookie fixture
+==> Test 4: agent reads SSH test key => denied without a lease
+PASS: agent SSH-key read denied without an exact-reader lease
+==> Test 5: guardctl explain --json shows stable reason_code
+PASS: guardctl explain --json has reason_code=browser_protected_resource
+PASS: guardctl explain --json has resource_kind_code
+==> Test 6: git on a local temp repo => unaffected
+PASS: git init + add + commit succeeded
+==> Test 7: no secret contents in audit/explain output
+PASS: no secret contents in audit/explain/log output
+==> Test 8: clean daemon shutdown
+PASS: guardd exited on SIGTERM
+
+==> Phase 12 root integration summary: PASS=9 FAIL=0 BLOCKED=0
+    (see /tmp/guard-agent-compat-fFEKsb/guardd.log for daemon decision log)
+
+NOTE: filesystem denial uses ordinary EPERM/EACCES from the OS. guardd does NOT
+      inject custom text into open(2) errors. Tools use 'guardctl explain --json'
+      + the stable 'reason_code' field to understand denials.

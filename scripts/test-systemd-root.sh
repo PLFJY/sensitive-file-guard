@@ -84,6 +84,8 @@ PRIV_KEY="$SSH_DIR/id_ed25519"
 # --- config ---
 cat > "$WORK/config.json" <<EOF
 {
+  "config_version": 1,
+  "enforcement_mode": "strict-filesystem",
   "browsers": [
     { "id": "chrome", "family": "chromium", "profile_root": "$CHROME_UDD", "owner_uid": 0, "exe_paths": [] }
   ],
@@ -101,7 +103,13 @@ echo "==> Test 1: install service"
 # Install binaries + unit, but use our test config.
 bash "$REPO/deploy/install.sh" 2>&1 | tail -5
 CLEANUP_UNIT=true
+# A prior installation on this host may have left the unit enabled; the
+# installer itself must never enable, so reset to a clean disabled state
+# before asserting the property.
+systemctl disable guardd 2>/dev/null || true
+systemctl daemon-reload
 # Overwrite the config with our test config.
+mkdir -p /etc/guardd
 install -m 0640 "$WORK/config.json" /etc/guardd/config.json
 if systemctl is-enabled guardd >/dev/null 2>&1; then
   note_fail "service must not be enabled by installer before configuration review"
@@ -141,16 +149,20 @@ fi
 # ===========================================================================
 # Test 3: verify browser denial and SSH behavioral read allowance
 # ===========================================================================
-echo "==> Test 3: browser denied; SSH read allowed"
+echo "==> Test 3: browser denied; SSH read fail-closed"
 if "$PROBE" read "$COOKIES" > /dev/null 2>&1; then
   note_fail "cookies readable (should be denied)"
 else
   note_pass "cookies denied"
 fi
+# LFH0 behavioral model: the SSH key OPEN is allowed (no audit) but the
+# subsequent FAN_ACCESS_PERM read event is a fail-closed authorization
+# boundary — an unapproved reader (no SshLoadLease, no confirmation) is
+# denied, so the probe cannot read the key bytes.
 if "$PROBE" read "$PRIV_KEY" > /dev/null 2>&1; then
-  note_pass "SSH key read allowed under the behavioral model"
+  note_fail "SSH key read succeeded (fail-closed boundary did not deny)"
 else
-  note_fail "SSH key read was interrupted"
+  note_pass "SSH key read denied (fail-closed)"
 fi
 
 # ===========================================================================

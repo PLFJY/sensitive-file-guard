@@ -5,7 +5,9 @@ if [ "$(id -u)" -ne 0 ]; then echo "ERROR: run as root"; exit 2; fi
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CARGO_BIN="$(command -v cargo)"
-(cd "$REPO" && "$CARGO_BIN" build -p guardd -p guardctl -p guard-test-probe)
+if [ -z "${SKIP_BUILD:-}" ]; then
+  (cd "$REPO" && "$CARGO_BIN" build -p guardd -p guardctl -p guard-test-probe)
+fi
 GUARDD="$REPO/target/debug/guardd"
 GUARDCTL="$REPO/target/debug/guardctl"
 PROBE="$REPO/target/debug/guard-test-probe"
@@ -35,7 +37,7 @@ chmod 0755 "$ENROLLED"
 CONFIG="$WORK/config.json"
 python3 - "$CONFIG" "$PROFILE" "$ENROLLED" <<'PY'
 import json, sys
-json.dump({"enforcement_mode":"strict-filesystem","browsers":[{
+json.dump({"config_version":1,"enforcement_mode":"strict-filesystem","browsers":[{
  "id":"synthetic-chromium","family":"Chromium","profile_root":sys.argv[2],
  "owner_uid":0,"exe_paths":[sys.argv[3]]}],"enrolled_exes":[sys.argv[3]],"ssh_keys":[]},
  open(sys.argv[1],"w",encoding="utf-8"))

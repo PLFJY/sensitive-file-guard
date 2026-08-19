@@ -1,0 +1,37 @@
+==> Starting guardd browser enforcement
+guardd active (pid=572754)
+guardd: enforcement ACTIVE — mode=conservative browsers=2 protected_files=10 marked_files=10 marked_tree_dirs=4 marked_filesystems=0 browser_exes=2 (fanotify fd=7)
+==> Test 1: ordinary process (cat) reads fake Cookie => denied
+PASS: cat denied before open completed
+==> Test 2: ordinary process copies fake Cookie => denied (source open fails)
+PASS: cp denied because source open failed
+==> Test 3: symlink path to protected file => denied
+PASS: symlink to protected file denied
+==> Test 4: hardlink to protected critical file => denied by inode mark
+PASS: hardlink to protected Cookie denied (inode mark + fd_index)
+==> Test 5: trusted simulated Browser A (chrome-probe) -> own profile => allowed
+PASS: chrome-probe read own Cookie (allowed)
+==> Test 6: Browser B (firefox-probe) -> Browser A profile => denied without lease
+PASS: firefox-probe denied chrome Cookie (cross-browser, no lease)
+==> Test 7: rapid repeated denied opens do not crash daemon (no prompt storm)
+PASS: daemon survived 300 denied opens, no fd leak (before=8 after=8)
+==> Test 8: SQLite WAL/SHM sidecar paths are covered
+PASS: Cookies-wal denied
+PASS: Cookies-shm denied
+==> Test 8b: firefox cookies.sqlite also protected
+PASS: firefox cookies.sqlite denied
+==> Test 9: unprotected file (Bookmarks) opens normally (no over-blocking)
+PASS: unprotected Bookmarks opened normally
+==> Test 10: firefox-probe reading own firefox profile => allowed
+PASS: firefox-probe read own cookies.sqlite (allowed)
+==> Test 11: chrome-probe reading firefox profile => denied (cross-browser reverse)
+PASS: chrome-probe denied firefox Cookie (cross-browser, no lease)
+==> Test 12: clean daemon shutdown releases resources
+PASS: guardd exited on SIGTERM
+
+==> Phase 06 root integration summary: PASS=14 FAIL=0 BLOCKED=0
+    (see /tmp/guard-browser-enforce-hFjeW5/guardd.log for daemon decision log)
+
+NOTE: open-before-daemon limitation is documented in reports/phase-06.md:
+      an fd opened BEFORE guardd protection begins cannot be retroactively
+      prevented; fanotify only gates new opens. This is a known V1 boundary.

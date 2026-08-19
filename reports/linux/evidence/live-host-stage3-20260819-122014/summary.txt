@@ -1,0 +1,11 @@
+=== [experiment-fdstore-root] 12:20:14 START ===
+=== [experiment-fdstore-root] FAIL rc=1 ===
+==> LFH4 fdstore experiment summary: PASS=3 FAIL=1 BLOCKED=0
+
+VERDICT: REJECTED (fail-open or no recovery observed)
+=== [test-native-browser-compat-root] 12:20:18 START ===
+=== [test-native-browser-compat-root] FAIL rc=1 ===
+
+==> LFH6 native browser compat summary: PASS=7 FAIL=1 BLOCKED=5 NOT_INSTALLED=5
+    logs: /tmp/guard-lfh6-wrSbu8
+=== STAGE-3 SUMMARY: PASS=0 FAIL=2 ===

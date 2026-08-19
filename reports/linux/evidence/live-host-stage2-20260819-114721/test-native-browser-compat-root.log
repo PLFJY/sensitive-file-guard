@@ -1,0 +1,16 @@
+detected: firefox (Firefox) at /usr/lib/firefox/firefox
+BLOCKED: firefox-esr NOT INSTALLED (not a failure)
+BLOCKED: chromium NOT INSTALLED (not a failure)
+BLOCKED: google-chrome NOT INSTALLED (not a failure)
+BLOCKED: zen NOT INSTALLED (not a failure)
+BLOCKED: zen NOT INSTALLED (not a failure)
+==> writing harmless local page
+
+==> LFH6 compat run: firefox (Firefox) elf=/usr/lib/firefox/firefox
+    launching firefox headless to populate the disposable profile
+    firefox did not create /tmp/guard-lfh6-fRBozA/firefox/profile/cookies.sqlite (waited 120x0.5s); see /tmp/guard-lfh6-fRBozA/firefox/populate.log
+FAIL: firefox disposable profile population (installed but no artifact)
+FAIL: firefox compat run aborted
+
+==> LFH6 native browser compat summary: PASS=0 FAIL=2 BLOCKED=5 NOT_INSTALLED=5
+    logs: /tmp/guard-lfh6-fRBozA

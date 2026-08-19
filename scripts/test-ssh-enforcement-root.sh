@@ -33,9 +33,11 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 2
 fi
 
-echo "==> Building release binaries"
-cd "$REPO"
-cargo build --release 2>&1 | grep -E '(Compiling guardd|Compiling guardctl|Compiling guard-test-probe|Finished|error)' || true
+if [ -z "${SKIP_BUILD:-}" ]; then
+  echo "==> Building release binaries"
+  cd "$REPO"
+  cargo build --release 2>&1 | grep -E '(Compiling guardd|Compiling guardctl|Compiling guard-test-probe|Finished|error)' || true
+fi
 test -x "$GUARDD" || { echo "guardd binary missing"; exit 1; }
 test -x "$GUARDCTL" || { echo "guardctl binary missing"; exit 1; }
 test -x "$PROBE" || { echo "guard-test-probe binary missing"; exit 1; }
@@ -48,7 +50,11 @@ cleanup() {
     kill -TERM "$GUARDD_PID" 2>/dev/null || true
     wait "$GUARDD_PID" 2>/dev/null || true
   fi
-  rm -rf "$WORK"
+  if [ -z "${KEEP_WORK:-}" ]; then
+    rm -rf "$WORK"
+  else
+    echo "KEEP_WORK: $WORK"
+  fi
 }
 trap cleanup EXIT
 
@@ -87,6 +93,8 @@ NOTES="$SSH_DIR/notes.txt"
 SOCK="$WORK/guardd.sock"
 cat > "$WORK/config.json" <<EOF
 {
+  "config_version": 1,
+  "enforcement_mode": "conservative",
   "browsers": [],
   "enrolled_exes": [],
   "ssh_keys": ["$PRIV_KEY"]

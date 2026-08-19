@@ -669,6 +669,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "guard-fdstore"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "libc",
+]
+
+[[package]]
 name = "guard-ipc"
 version = "0.1.0"
 dependencies = [

@@ -16,6 +16,7 @@ pub mod fanotify;
 pub mod identity;
 #[cfg(target_os = "linux")]
 pub mod ipc;
+pub mod object_handle;
 #[cfg(target_os = "linux")]
 pub mod proc;
 #[cfg(target_os = "linux")]

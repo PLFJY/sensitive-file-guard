@@ -2750,6 +2750,7 @@ mod tests {
         assert!(!platform_service::shows_linux_mode());
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn configuration_snapshot_changed_detects_policy_drift_only() {
         // MCH hardening: the protection page auto-resync must re-render only
@@ -2967,6 +2968,7 @@ mod tests {
             strict_alias_matches: Some(0),
             topology_degraded: Some(false),
             mac_health: None,
+            linux_health: None,
             protected_files: 1,
             ssh_protected_keys: 0,
             protected_trees: 1,

@@ -1,0 +1,26 @@
+detected: firefox (Firefox) at /usr/lib/firefox/firefox
+BLOCKED: firefox-esr NOT INSTALLED (not a failure)
+BLOCKED: chromium NOT INSTALLED (not a failure)
+BLOCKED: google-chrome NOT INSTALLED (not a failure)
+BLOCKED: zen NOT INSTALLED (not a failure)
+BLOCKED: zen NOT INSTALLED (not a failure)
+==> writing harmless local page
+
+==> LFH6 compat run: firefox (Firefox) elf=/usr/lib/firefox/firefox
+    launching firefox headless to populate the disposable profile
+    starting guardd
+    launching unknown probes (must all be denied)
+    (probe target /tmp/guard-lfh6-qt4sOk/firefox/profile/logins.json absent; skipped)
+    legal workload: firefox relaunch (startup settle, tabs, writes, restart)
+PASS: firefox continuity=INTACT
+PASS: firefox fanotify_overflows=0
+PASS: firefox classifier_failures=0
+PASS: firefox unclassified=0
+PASS: firefox audit_dropped=0
+PASS: firefox unknown probes denied (4/4)
+PASS: firefox no unexpected DENY on legal workload
+PASS: firefox legal workload left a live profile artifact
+    firefox compat run finished (see /tmp/guard-lfh6-qt4sOk/firefox/guardd.log)
+
+==> LFH6 native browser compat summary: PASS=8 FAIL=0 BLOCKED=5 NOT_INSTALLED=5
+    logs: /tmp/guard-lfh6-qt4sOk

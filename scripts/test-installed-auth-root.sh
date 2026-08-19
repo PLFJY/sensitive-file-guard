@@ -94,9 +94,12 @@ chown -R "$TEST_UID:$TEST_GID" "$PROFILE" "$KEY" "$KEY.pub"
 echo "==> Installing real systemd/polkit configuration"
 bash "$REPO/deploy/install.sh" >/dev/null
 INSTALLED=1
+mkdir -p /etc/guardd
 install -m 0640 /dev/null /etc/guardd/config.json
 printf '%s\n' \
   '{' \
+  '  "config_version": 1,' \
+  '  "enforcement_mode": "strict-filesystem",' \
   '  "browsers": [' \
   '    {' \
   '      "id": "installed-synthetic-chromium",' \

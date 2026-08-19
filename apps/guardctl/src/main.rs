@@ -75,6 +75,11 @@ enum Command {
         #[command(subcommand)]
         action: BrowserAction,
     },
+    /// Probe this kernel's security capabilities (fanotify permission events,
+    /// FAN_MARK_FILESYSTEM, FAN_REPORT_PIDFD, name_to_handle_at, BPF LSM).
+    /// Local only; no daemon connection. Full fanotify results require root.
+    #[command(name = "capabilities")]
+    Capabilities,
     /// Create a reviewed strict-filesystem configuration for one explicitly
     /// selected user's native browser profiles. This does not start guardd.
     Setup {
@@ -291,6 +296,11 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
     if let Command::Setup { home, config, yes } = &cli.command {
         return run_setup(home.as_deref(), config, *yes);
     }
+    // Local capability inventory (no daemon connection). Runs probes against
+    // this kernel; full fanotify results need root (CAP_SYS_ADMIN).
+    if let Command::Capabilities = &cli.command {
+        return run_capabilities(cli.json);
+    }
     // macOS-only local config diagnostic (no daemon connection).
     if let Command::Config {
         action: ConfigAction::ValidateLocal,
@@ -366,6 +376,7 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
         Command::Config {
             action: ConfigAction::ValidateLocal,
         } => unreachable!("config validate-local handled before IPC dispatch"),
+        Command::Capabilities => unreachable!("capabilities handled before IPC dispatch"),
         Command::Privileged { .. } => unreachable!("privileged helper handled before IPC dispatch"),
         Command::ServiceStatus | Command::NotificationService { .. } => {
             unreachable!("service commands handled before IPC dispatch")
@@ -792,10 +803,115 @@ struct SetupBrowserConfig {
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[cfg(any(target_os = "linux", test))]
 struct SetupConfig {
+    config_version: u32,
     enforcement_mode: &'static str,
     browsers: Vec<SetupBrowserConfig>,
     enrolled_exes: Vec<String>,
     ssh_keys: Vec<String>,
+}
+
+#[cfg(target_os = "linux")]
+fn run_capabilities(json: bool) -> anyhow::Result<()> {
+    // Probe mark filesystem support on a synthetic temp dir. std::env::temp_dir
+    // may point to /tmp (tmpfs) — fine for a syscall-availability probe.
+    let tmp = std::env::temp_dir().join(format!("guardctl-cap-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp)?;
+    // Probe object-handle support on the filesystems guardd would mark:
+    // enrolled browser profile roots + SSH key parents from the authoritative
+    // config, plus the root filesystem as a baseline.
+    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+    let mut add_path = |p: &Path| {
+        if !paths.contains(&p.to_path_buf()) {
+            paths.push(p.to_path_buf());
+        }
+    };
+    if let Ok(text) = std::fs::read_to_string("/etc/guardd/config.json") {
+        if let Ok(cfg) = serde_json::from_str::<platform_linux::config::EnforcementConfig>(&text) {
+            for browser in &cfg.browsers {
+                add_path(&browser.profile_root);
+            }
+            for key in &cfg.ssh_keys {
+                if let Some(parent) = key.parent() {
+                    add_path(parent);
+                }
+            }
+        }
+    }
+    add_path(Path::new("/"));
+    let refs: Vec<&Path> = paths.iter().map(|p| p.as_path()).collect();
+    let report = platform_linux::capability::inventory(&refs, &tmp);
+    let _ = std::fs::remove_dir_all(&tmp);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print_capability_report(&report);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn print_capability_report(report: &platform_linux::capability::CapabilityReport) {
+    use platform_linux::capability::BpfLsmConfig;
+    println!("kernel: {}", report.kernel);
+    println!("cap_sys_admin (effective): {}", report.cap_sys_admin);
+    println!(
+        "fanotify_permission_events : {} ({})",
+        report.fanotify_permission_events.supported,
+        report
+            .fanotify_permission_events
+            .detail
+            .as_deref()
+            .unwrap_or("-")
+    );
+    println!(
+        "fanotify_mark_filesystem   : {} ({})",
+        report.fanotify_mark_filesystem.supported,
+        report
+            .fanotify_mark_filesystem
+            .detail
+            .as_deref()
+            .unwrap_or("-")
+    );
+    println!(
+        "fanotify_report_pidfd      : {} ({})",
+        report.fanotify_report_pidfd.supported,
+        report
+            .fanotify_report_pidfd
+            .detail
+            .as_deref()
+            .unwrap_or("-")
+    );
+    println!(
+        "name_to_handle_at(AT_EMPTY_PATH): {} ({})",
+        report.name_to_handle_at_syscall.supported,
+        report
+            .name_to_handle_at_syscall
+            .detail
+            .as_deref()
+            .unwrap_or("-")
+    );
+    for fs_probe in &report.filesystem_handles {
+        println!(
+            "  fs {}: handle_supported={} ({})",
+            fs_probe.path,
+            fs_probe.supported,
+            fs_probe.detail.as_deref().unwrap_or("-")
+        );
+    }
+    println!(
+        "bpf: btf_vmlinux_present={}, config={}",
+        report.bpf_lsm.btf_vmlinux_present,
+        match &report.bpf_lsm.bpf_lsm_config {
+            BpfLsmConfig::Enabled => "CONFIG_BPF_LSM=y".to_owned(),
+            BpfLsmConfig::NotEnabled => "CONFIG_BPF_LSM present but not =y".to_owned(),
+            BpfLsmConfig::Unreadable(reason) => format!("unreadable ({reason})"),
+        }
+    );
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_capabilities(_json: bool) -> anyhow::Result<()> {
+    anyhow::bail!("capability inventory is available only on Linux")
 }
 
 #[cfg(target_os = "linux")]
@@ -939,6 +1055,7 @@ fn setup_config(discovery: &BrowserDiscovery) -> anyhow::Result<SetupConfig> {
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     Ok(SetupConfig {
+        config_version: platform_linux::config::CONFIG_VERSION,
         enforcement_mode: "strict-filesystem",
         browsers,
         enrolled_exes: Vec::new(),
@@ -1293,6 +1410,22 @@ fn print_status(s: &StatusInfo) {
     }
     if let Some(value) = s.topology_degraded {
         println!("  topology_degraded: {value}");
+    }
+    if let Some(linux) = &s.linux_health {
+        println!("  file_shield_health : {}", linux.file_shield);
+        println!("  continuity_health  : {}", linux.continuity);
+        if let Some(reason) = &linux.continuity_reason {
+            println!("  continuity_reason  : {reason}");
+        }
+        println!("  audit_health       : {}", linux.audit);
+        println!("  process_shield     : {}", linux.process_shield);
+        println!("  pidfd_enabled      : {}", linux.pidfd_enabled);
+        if linux.pidfd_missing_events > 0 {
+            println!(
+                "  pidfd_missing_events: {} (protected candidates failed closed)",
+                linux.pidfd_missing_events
+            );
+        }
     }
     println!("  audit_dropped   : {}", s.audit_dropped);
     println!("  peer_uid        : {}", s.peer_uid);
@@ -2163,6 +2296,10 @@ mod tests {
         let config = setup_config(&discovery).unwrap();
         let value = serde_json::to_value(config).unwrap();
         assert_eq!(value["enforcement_mode"], "strict-filesystem");
+        assert_eq!(
+            value["config_version"],
+            serde_json::json!(platform_linux::config::CONFIG_VERSION)
+        );
         assert_eq!(value["browsers"][0]["family"], "firefox");
         assert!(value["browsers"][0].get("owner_uid").is_none());
         assert_eq!(value["ssh_keys"], serde_json::json!([]));

@@ -1,0 +1,12 @@
+==> Starting guardd with FAN_REPORT_PIDFD group
+guardd did not become ACTIVE
+{
+  "kind": "status",
+  "data": {
+    "version": "0.1.0+3b596e7f00d565742dcd993cf7bc32464fdb830e-dirty",
+    "backend_kind": "linux-fanotify",
+[2m2026-08-19T03:00:09.556216Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m fanotify group created with FAN_REPORT_PIDFD
+guardd: enforcement ACTIVE — mode=conservative browsers=1 protected_files=2 marked_files=2 marked_tree_dirs=0 marked_filesystems=0 browser_exes=1 (fanotify fd=7)
+guardd: IPC socket: /tmp/guard-pidfd-Lwrh9s/guardd.sock
+[2m2026-08-19T03:00:09.556298Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m enforcement active [3mbrowsers[0m[2m=[0m1 [3mmode[0m[2m=[0m"conservative" [3mprotected_files[0m[2m=[0m2 [3mmarked_files[0m[2m=[0m2 [3mmarked_tree_dirs[0m[2m=[0m0 [3mmarked_filesystems[0m[2m=[0m0 [3mipc_socket[0m[2m=[0mSome("/tmp/guard-pidfd-Lwrh9s/guardd.sock")
+[2m2026-08-19T03:00:09.556453Z[0m [32m INFO[0m [2mguardd::ipc[0m[2m:[0m IPC server listening [3mpath[0m[2m=[0m/tmp/guard-pidfd-Lwrh9s/guardd.sock

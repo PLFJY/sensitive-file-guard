@@ -1,0 +1,12 @@
+==> Checking unprivileged pre-built release binaries
+==> Test 1: install service
+    1. Create reviewed strict config: sudo guardctl setup --home /home/USER
+    2. Optionally choose an existing key: guardctl ssh suggest
+    3. Start: sudo systemctl enable --now guardd
+    4. Verify: guardctl status
+    5. Desktop notifications (as your user): systemctl --user daemon-reload && systemctl --user enable --now guard-notify
+install: cannot create regular file '/etc/guardd/config.json': No such file or directory
+==> Uninstalling guardd service
+    Removed: /etc/systemd/system/guardd.service, /usr/local/lib/systemd/user/guard-notify.service, /usr/share/polkit-1/actions/org.guardd.policy, /usr/local/share/guardd/guardd-config.example.json, /usr/local/bin/guardd, /usr/local/bin/guardctl, /usr/local/bin/guard-notify (and any obsolete terminal UI binary)
+    Preserved: /etc/guardd (edit to remove), /var/lib/guardd (audit DB)
+==> Uninstall complete

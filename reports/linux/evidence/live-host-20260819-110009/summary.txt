@@ -1,0 +1,95 @@
+=== [test-pidfd-root] 11:00:09 START ===
+=== [test-pidfd-root] FAIL rc=1 ===
+guardd: IPC socket: /tmp/guard-pidfd-Lwrh9s/guardd.sock
+[2m2026-08-19T03:00:09.556298Z[0m [32m INFO[0m [2mguardd[0m[2m:[0m enforcement active [3mbrowsers[0m[2m=[0m1 [3mmode[0m[2m=[0m"conservative" [3mprotected_files[0m[2m=[0m2 [3mmarked_files[0m[2m=[0m2 [3mmarked_tree_dirs[0m[2m=[0m0 [3mmarked_filesystems[0m[2m=[0m0 [3mipc_socket[0m[2m=[0mSome("/tmp/guard-pidfd-Lwrh9s/guardd.sock")
+[2m2026-08-19T03:00:09.556453Z[0m [32m INFO[0m [2mguardd::ipc[0m[2m:[0m IPC server listening [3mpath[0m[2m=[0m/tmp/guard-pidfd-Lwrh9s/guardd.sock
+=== [test-object-identity-root] 11:00:12 START ===
+=== [test-object-identity-root] PASS ===
+BLOCKED: /tmp/guard-object-id-TTKmfM is on tmpfs; object handles unsupported (use a real filesystem)
+=== [test-continuity-root] 11:00:12 START ===
+=== [test-continuity-root] PASS ===
+
+==> LFH3 continuity root summary: PASS=3 FAIL=0 BLOCKED=2
+    (see /tmp/guard-continuity-jUq8gv/guardd.log for daemon decision log)
+=== [experiment-fdstore-root] 11:00:15 START ===
+=== [experiment-fdstore-root] FAIL rc=5 ===
+==> First start: store a new group + fdstore upload
+Failed to start guard-fdstore-exp.service: Unit guard-fdstore-exp.service not found.
+=== [test-browser-enforcement-root] 11:00:16 START ===
+=== [test-browser-enforcement-root] PASS ===
+NOTE: open-before-daemon limitation is documented in reports/phase-06.md:
+      an fd opened BEFORE guardd protection begins cannot be retroactively
+      prevented; fanotify only gates new opens. This is a known V1 boundary.
+=== [test-ssh-enforcement-root] 11:02:16 START ===
+=== [test-ssh-enforcement-root] PASS ===
+      key moves the SAME inode so protection follows the rename. A key
+      re-created at the original path after deletion is NOT protected until
+      re-enrolled (documented in reports/phase-10.md).
+=== [test-fanotify-root] 11:03:17 START ===
+=== [test-fanotify-root] PASS ===
+
+==> Phase 02 root integration summary: PASS=6 FAIL=0 BLOCKED=0
+    (see /tmp/guard-fanotify-2F1qj0/guardd.log for daemon decision log)
+=== [test-bypass-root] 11:03:18 START ===
+=== [test-bypass-root] PASS ===
+==> Phase 13 root bypass summary: PASS=18 FAIL=0 BLOCKED=2
+    （BLOCKED 项是 fanotify 已知限制，详见 docs/安全模型.md）
+    (see /tmp/guard-bypass-lEKzIk/guardd.log for daemon decision log)
+=== [test-hardening-root] 11:04:19 START ===
+=== [test-hardening-root] PASS ===
+PASS: browser replacements converge to denial; SSH replacement remains protected
+=== [test-agent-compat-root] 11:05:20 START ===
+=== [test-agent-compat-root] PASS ===
+NOTE: filesystem denial uses ordinary EPERM/EACCES from the OS. guardd does NOT
+      inject custom text into open(2) errors. Tools use 'guardctl explain --json'
+      + the stable 'reason_code' field to understand denials.
+=== [test-ssh-broker-adversarial-root] 11:06:20 START ===
+=== [test-ssh-broker-adversarial-root] FAIL rc=1 ===
+  File "/home/plfjy/sensitive-file-guard/scripts/helpers/ssh-broker-scenarios.py", line 118, in authorized_agent
+    raise RuntimeError(f"authorization failed: {response.get('error')}")
+RuntimeError: authorization failed: protocol version mismatch: client=2, server=5
+=== [test-ssh-load-root] 11:11:20 START ===
+=== [test-ssh-load-root] PASS ===
+NOTE: documented limitation — once a key is loaded into ssh-agent, same-user
+      malware that can reach SSH_AUTH_SOCK may request signatures. V1 mediates
+      raw private-key file access; it does not fully mediate agent signing.
+=== [test-strict-concurrency-root] 11:18:21 START ===
+=== [test-strict-concurrency-root] PASS ===
+  classifier_failures: 0
+  topology_degraded: False
+PASS: bounded concurrent stress completed without deadlock, overflow, or audit loss
+=== [test-topology-race-stress-root] 11:18:24 START ===
+=== [test-topology-race-stress-root] PASS ===
+  time-to-protection p50/p95/p99/max (us): 58/111/159/2190
+PASS: empirical topology-race measurement completed and final inode converged
+NOTE: successful_unauthorized_reads is a measured known gap, not a test PASS claim.
+=== [test-systemd-root] 11:18:25 START ===
+=== [test-systemd-root] FAIL rc=4 ===
+    Removed: /etc/systemd/system/guardd.service, /usr/local/lib/systemd/user/guard-notify.service, /usr/share/polkit-1/actions/org.guardd.policy, /usr/local/share/guardd/guardd-config.example.json, /usr/local/bin/guardd, /usr/local/bin/guardctl, /usr/local/bin/guard-notify (and any obsolete terminal UI binary)
+    Preserved: /etc/guardd (edit to remove), /var/lib/guardd (audit DB)
+==> Uninstall complete
+=== [test-installed-auth-root] 11:19:36 START ===
+=== [test-installed-auth-root] FAIL rc=1 ===
+==> Installing real systemd/polkit configuration
+install: cannot create regular file '/etc/guardd/config.json': No such file or directory
+=== [test-browser-adversarial-root] 11:19:37 START ===
+=== [test-browser-adversarial-root] PASS ===
+Enforcement PASS always means: probe failed + canary absent + new audit DENY.
+Notification delivery is reported independently and cannot make enforcement pass.
+Use KEEP_WORK=1 to retain synthetic logs under: /tmp/guard-browser-adversarial.SYAD3W
+=== [test-strict-filesystem-root] 11:19:49 START ===
+=== [test-strict-filesystem-root] PASS ===
+PASS: strict startup fails closed when a required protected root cannot be marked
+
+Strict filesystem summary: PASS=25 FAIL=0 BLOCKED=0 OBSERVED=1
+=== [test-native-browser-compat-root] 11:19:52 START ===
+=== [test-native-browser-compat-root] PASS ===
+
+==> LFH6 native browser compat summary: PASS=0 FAIL=0 BLOCKED=6 NOT_INSTALLED=5
+    logs: /tmp/guard-lfh6-lUjYwI
+=== [benchmark-strict-filesystem-root] 11:20:37 START ===
+=== [benchmark-strict-filesystem-root] PASS ===
+  strict_alias_scans: 7
+  strict_alias_matches: 0
+PASS: performance benchmark completed with no fanotify overflow or classifier failure
+=== LIVE HOST GATE SUMMARY: PASS=15 FAIL=5 ===

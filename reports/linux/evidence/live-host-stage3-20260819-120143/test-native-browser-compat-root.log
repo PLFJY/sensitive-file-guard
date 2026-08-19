@@ -1,0 +1,38 @@
+detected: firefox (Firefox) at /usr/lib/firefox/firefox
+BLOCKED: firefox-esr NOT INSTALLED (not a failure)
+BLOCKED: chromium NOT INSTALLED (not a failure)
+BLOCKED: google-chrome NOT INSTALLED (not a failure)
+BLOCKED: zen NOT INSTALLED (not a failure)
+BLOCKED: zen NOT INSTALLED (not a failure)
+==> writing harmless local page
+
+==> LFH6 compat run: firefox (Firefox) elf=/usr/lib/firefox/firefox
+    launching firefox headless to populate the disposable profile
+    starting guardd
+    launching unknown probes (must all be denied)
+    (probe target /tmp/guard-lfh6-rAmNlc/firefox/profile/logins.json absent; skipped)
+/home/plfjy/sensitive-file-guard/scripts/linux/test-native-browser-compat-root.sh: line 203: /tmp/guard-lfh6-rAmNlc/firefox/profile/storage/default/probe-target.ls: Operation not permitted
+    legal workload: firefox relaunch (startup settle, tabs, writes, restart)
+/home/plfjy/sensitive-file-guard/scripts/linux/test-native-browser-compat-root.sh: line 228: /tmp/guard-lfh6-rAmNlc/firefox/profile/cookies.sqlite: Operation not permitted
+PASS: firefox continuity=INTACT
+FAIL: firefox fanotify_overflows=?
+FAIL: firefox classifier_failures=?
+FAIL: firefox unclassified=?
+FAIL: firefox audit_dropped=?
+FAIL: firefox probe probe-cookies.sqlite.out READ protected data (deny missed)
+FAIL: firefox probe probe-key4.db.out READ protected data (deny missed)
+FAIL: firefox probe probe-probe-target.ls.out READ protected data (deny missed)
+FAIL: firefox probe probe-recovery.jsonlz4.out READ protected data (deny missed)
+FAIL: firefox unknown probes: only 0/4 denied
+    UNEXPECTED DENY: guardd: pid=593254 decision=DENY(WrongUid) allow=false
+    UNEXPECTED DENY: guardd: pid=593699 decision=DENY(UnknownProcess) allow=false
+    UNEXPECTED DENY: guardd: pid=593702 decision=DENY(UnknownProcess) allow=false
+    UNEXPECTED DENY: guardd: pid=593703 decision=DENY(UnknownProcess) allow=false
+    UNEXPECTED DENY: guardd: pid=593704 decision=DENY(UnknownProcess) allow=false
+    UNEXPECTED DENY: guardd: pid=593254 decision=DENY(WrongUid) allow=false
+FAIL: firefox 6 unexpected DENY on legal workload
+PASS: firefox legal workload left a live profile artifact
+    firefox compat run finished (see /tmp/guard-lfh6-rAmNlc/firefox/guardd.log)
+
+==> LFH6 native browser compat summary: PASS=2 FAIL=10 BLOCKED=5 NOT_INSTALLED=5
+    logs: /tmp/guard-lfh6-rAmNlc

@@ -1,0 +1,19 @@
+LFH0 baseline privileged suite — all run on HOST via pkexec (pre-capsule policy), real kernel fanotify
+kernel: 7.1.8-arch1-3, fs: / ext4, host: plfjy-arch
+
+test-fanotify-root.sh:              PASS=6  FAIL=0 BLOCKED=0   (real FAN_OPEN_PERM deny + no fd leak + burst)
+test-browser-enforcement-root.sh:   PASS=14 FAIL=0 BLOCKED=0   (conservative mode; cat/cp/symlink/hardlink/rename/WAL/SHM denied; own-browser allowed; cross-browser denied)
+test-browser-adversarial-root.sh:   PASS=23 FAIL=0 BLOCKED=1   (BLOCKED: desktop notification delivery — env limitation; /proc fd: kernel procfs policy denied before fanotify)
+test-bypass-root.sh:                PASS=18 FAIL=0 BLOCKED=2   (BLOCKED: open-before-mark + inherited-fd — documented fanotify limits)
+test-hardening-root.sh:             PASS (rewritten: enrolled-browser fixture writes; replacement inode/new tree/new profile converge to denial; SSH replacement stays protected)
+test-agent-compat-root.sh:          PASS=9  FAIL=0 BLOCKED=0   (agent normal work unhindered; secrets denied; no log leak)
+test-strict-filesystem-root.sh:     PASS=25 FAIL=0 BLOCKED=0 OBSERVED=1 (OBSERVED: rename-away without open not labeled by FAN_OPEN_PERM — LFH2 gap)
+test-strict-concurrency-root.sh:    PASS (180k events, 0 overflow, 0 audit loss, no deadlock)
+test-topology-race-stress-root.sh:  PASS (measurement; 9999/10000 unauthorized reads before convergence — documented known gap)
+test-ssh-enforcement-root.sh:       PASS=27 FAIL=0 BLOCKED=0   (allow/block/exit/timeout/hardlink/symlink/runtime enroll; no key bytes in logs)
+test-ssh-load-root.sh:              PASS=10 FAIL=0 BLOCKED=0   (one-shot lease flow; direct reads denied w/o lease; ssh-add -l sees identity)
+benchmark-strict-filesystem-root.sh: PASS (no overflow/classifier failure; raw numbers in lfh0-benchmark.txt)
+
+NOTE: IPC helper protocol version was stale (2 vs 5) — fixed in scripts/helpers/ipc-request.py.
+NOTE: SSH load one-shot lease consumed on FIRST permission event (open), breaking multi-event reads —
+      fixed: lease consumed on exact-process exit (PID+start_time), stays valid across open+reads.

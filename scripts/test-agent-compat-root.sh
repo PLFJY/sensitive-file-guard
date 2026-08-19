@@ -41,9 +41,11 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 2
 fi
 
-echo "==> Building release binaries"
-cd "$REPO"
-cargo build --release 2>&1 | grep -E '(Compiling guardd|Compiling guardctl|Compiling guard-test-probe|Finished|error)' || true
+if [ -z "${SKIP_BUILD:-}" ]; then
+  echo "==> Building release binaries"
+  cd "$REPO"
+  cargo build --release 2>&1 | grep -E '(Compiling guardd|Compiling guardctl|Compiling guard-test-probe|Finished|error)' || true
+fi
 test -x "$GUARDD"   || { echo "guardd binary missing"; exit 1; }
 test -x "$GUARDCTL" || { echo "guardctl binary missing"; exit 1; }
 test -x "$PROBE"    || { echo "guard-test-probe binary missing"; exit 1; }
@@ -83,6 +85,8 @@ printf '# Project\n\nNormal files an agent edits.\n' > "$PROJECT_DIR/README.md"
 SOCK="$WORK/guardd.sock"
 cat > "$WORK/config.json" <<EOF
 {
+  "config_version": 1,
+  "enforcement_mode": "conservative",
   "browsers": [
     {
       "id": "chrome",
@@ -146,13 +150,15 @@ else
 fi
 
 # ===========================================================================
-# Test 4: agent reads SSH test key => ALLOW + behavioral observation
+# Test 4: agent reads SSH test key => gated by exact-reader confirmation
 # ===========================================================================
-echo "==> Test 4: agent reads SSH test key => allowed"
+# No SSH-read lease has been granted to this probe, so the read must fail
+# closed (RequireSshKeyConfirmation with no approval in a headless harness).
+echo "==> Test 4: agent reads SSH test key => denied without a lease"
 if "$PROBE" read "$PRIV_KEY" > "$WORK/t4.out" 2>&1; then
-  note_pass "agent SSH-key read was not interrupted"
+  note_fail "agent SSH-key read succeeded without an exact-reader lease"
 else
-  note_fail "agent SSH-key read was interrupted"
+  note_pass "agent SSH-key read denied without an exact-reader lease"
 fi
 
 # ===========================================================================

@@ -46,9 +46,11 @@ for tool in ssh-keygen ssh-add ssh-agent; do
   fi
 done
 
-echo "==> Building release binaries"
-cd "$REPO"
-cargo build --release 2>&1 | grep -E '(Compiling guardd|Compiling guardctl|Finished|error)' || true
+if [ -z "${SKIP_BUILD:-}" ]; then
+  echo "==> Building release binaries"
+  cd "$REPO"
+  cargo build --release 2>&1 | grep -E '(Compiling guardd|Compiling guardctl|Finished|error)' || true
+fi
 test -x "$GUARDD" || { echo "guardd binary missing"; exit 1; }
 test -x "$GUARDCTL" || { echo "guardctl binary missing"; exit 1; }
 
@@ -64,7 +66,11 @@ cleanup() {
     kill -TERM "$SSH_AGENT_PID" 2>/dev/null || true
     wait "$SSH_AGENT_PID" 2>/dev/null || true
   fi
-  rm -rf "$WORK"
+  if [ -z "${KEEP_WORK:-}" ]; then
+    rm -rf "$WORK"
+  else
+    echo "KEEP_WORK: $WORK"
+  fi
 }
 trap cleanup EXIT
 
@@ -113,6 +119,7 @@ echo "isolated ssh-agent ready (pid=$SSH_AGENT_PID, sock=$AGENT_SOCK)"
 SOCK="$WORK/guardd.sock"
 cat > "$WORK/config.json" <<EOF
 {
+  "config_version": 1,
   "enforcement_mode": "$ENFORCEMENT_MODE",
   "browsers": [],
   "enrolled_exes": [],
@@ -138,22 +145,25 @@ echo "guardd active (pid=$GUARDD_PID)"
 # still contains the system ssh-add.
 export PATH="$PATH"
 
-echo "==> Test 1: direct cat of the protected key => allowed and reported"
+echo "==> Test 1: direct cat of the protected key => denied without a lease"
+# No SSH-read lease has been granted to `cat`; the exact-reader model requires
+# confirmation, which a headless harness cannot approve, so the read fails
+# closed. Only the brokered `guardctl ssh load` (Test 3) grants access.
 if cat "$PRIV_KEY" > "$WORK/t1.out" 2>/dev/null; then
-  note_pass "direct read was not interrupted"
+  note_fail "direct read was allowed without an exact-reader lease"
 else
-  note_fail "direct read was interrupted"
+  note_pass "direct read denied without an exact-reader lease"
 fi
 
-echo "==> Test 2: direct ssh-add (no lease) => read remains allowed"
+echo "==> Test 2: direct ssh-add (no lease) => read denied"
 if ssh-add "$PRIV_KEY" > "$WORK/t2.out" 2>&1; then
   if ssh-add -l 2>/dev/null | grep -q "guard-ephemeral-load-test"; then
-    note_pass "direct ssh-add was not interrupted"
+    note_fail "direct ssh-add was allowed without an exact-reader lease"
   else
     note_fail "direct ssh-add returned success without loading the fixture"
   fi
 else
-  note_fail "direct ssh-add read was interrupted"
+  note_pass "direct ssh-add read denied without an exact-reader lease"
 fi
 ssh-add -d "$PRIV_KEY" >/dev/null 2>&1 || true
 
@@ -171,13 +181,14 @@ else
   note_fail "ssh-add -l did not show the loaded identity: $(ssh-add -l 2>&1)"
 fi
 
-echo "==> Test 5: after the load lease ends, direct cat remains allowed"
-# Lease lifetime affects only the brokered attribution, never raw-read access.
+echo "==> Test 5: after the load lease ends, direct cat remains denied"
+# The one-shot load lease is consumed/revoked after the load; a direct read
+# without a fresh lease still requires confirmation and fails closed.
 sleep 1
 if cat "$PRIV_KEY" > "$WORK/t5.out" 2>/dev/null; then
-  note_pass "direct read remained uninterrupted after lease cleanup"
+  note_fail "direct read was allowed after lease cleanup without a fresh lease"
 else
-  note_fail "direct read was interrupted after lease cleanup"
+  note_pass "direct read denied after lease cleanup without a fresh lease"
 fi
 
 echo "==> Test 6: a second guardctl ssh load works (fresh one-shot lease)"

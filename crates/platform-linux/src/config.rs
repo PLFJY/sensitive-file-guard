@@ -13,10 +13,18 @@ pub use guard_platform::config::{
 };
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+/// Current configuration schema version. Configs carrying a higher version are
+/// rejected with an explicit error so a future incompatible schema can never be
+/// silently interpreted as this one.
+pub const CONFIG_VERSION: u32 = 1;
+
+fn default_config_version() -> u32 {
+    CONFIG_VERSION
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum EnforcementMode {
-    #[default]
     Conservative,
     StrictFilesystem,
 }
@@ -35,7 +43,10 @@ impl EnforcementMode {
 /// policy configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EnforcementConfig {
-    #[serde(default)]
+    /// Config schema version. Missing/legacy configs are interpreted as v1,
+    /// but must still carry an explicit `enforcement_mode` — see `validate`.
+    #[serde(default = "default_config_version")]
+    pub config_version: u32,
     pub enforcement_mode: EnforcementMode,
     pub browsers: Vec<BrowserEnrollmentConfig>,
     #[serde(default)]
@@ -54,6 +65,14 @@ impl EnforcementConfig {
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
+        if self.config_version > CONFIG_VERSION {
+            anyhow::bail!(
+                "config_version {} is newer than supported version {}; \
+                 update guardd or migrate the configuration explicitly",
+                self.config_version,
+                CONFIG_VERSION
+            );
+        }
         self.policy().validate()?;
         if self.enforcement_mode == EnforcementMode::StrictFilesystem {
             for browser in &self.browsers {
@@ -252,6 +271,7 @@ mod tests {
 
     fn config() -> EnforcementConfig {
         EnforcementConfig {
+            config_version: CONFIG_VERSION,
             enforcement_mode: EnforcementMode::Conservative,
             browsers: Vec::new(),
             enrolled_exes: vec![PathBuf::from("/synthetic/exe")],
@@ -265,11 +285,51 @@ mod tests {
     }
 
     #[test]
+    fn missing_enforcement_mode_is_an_explicit_parse_error() {
+        // Legacy configs without `enforcement_mode` must not silently fall back
+        // to a security-weaker mode: they fail to parse and guardd refuses to
+        // start (never ACTIVE).
+        let result: Result<EnforcementConfig, _> = serde_json::from_str(
+            r#"{"browsers":[],"enrolled_exes":["/synthetic/exe"],"ssh_keys":[]}"#,
+        );
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains("enforcement_mode"),
+            "missing mode must name the missing field, got: {error}"
+        );
+    }
+
+    #[test]
     fn legacy_behavior_window_is_ignored() {
         let config: EnforcementConfig = serde_json::from_str(
-            r#"{"browsers":[],"enrolled_exes":["/synthetic/exe"],"ssh_keys":[],"ssh_behavior_window_secs":10}"#,
+            r#"{"enforcement_mode":"conservative","browsers":[],"enrolled_exes":["/synthetic/exe"],"ssh_keys":[],"ssh_behavior_window_secs":10}"#,
         )
         .unwrap();
         assert_eq!(config.enrolled_exes, vec![PathBuf::from("/synthetic/exe")]);
+    }
+
+    #[test]
+    fn unknown_future_config_version_is_rejected() {
+        let config = EnforcementConfig {
+            config_version: CONFIG_VERSION + 1,
+            enforcement_mode: EnforcementMode::StrictFilesystem,
+            browsers: Vec::new(),
+            enrolled_exes: vec![PathBuf::from("/synthetic/exe")],
+            ssh_keys: Vec::new(),
+        };
+        let error = config.validate().unwrap_err().to_string();
+        assert!(
+            error.contains("newer than supported"),
+            "future version must be rejected explicitly, got: {error}"
+        );
+    }
+
+    #[test]
+    fn missing_version_defaults_to_current() {
+        let config: EnforcementConfig = serde_json::from_str(
+            r#"{"enforcement_mode":"strict-filesystem","browsers":[],"enrolled_exes":["/synthetic/exe"],"ssh_keys":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(config.config_version, CONFIG_VERSION);
     }
 }
