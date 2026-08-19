@@ -31,6 +31,14 @@ blocked() { echo "BLOCKED: $1"; BLOCKED=$((BLOCKED + 1)); }
 observed() { echo "OBSERVED: $1"; OBSERVED=$((OBSERVED + 1)); }
 
 WORK="$(mktemp -d -t guard-strict-filesystem-XXXXXX)"
+# AGENTS.md LIVE-TEST SAFETY rule 3: NEVER FAN_MARK_FILESYSTEM the root
+# mount (a root-fs mark gates every open on the machine -> total lockup; this
+# happened twice). Hard-assert the fixture filesystem is not the root mount.
+if [ "$(stat -c %d "$WORK")" = "$(stat -c %d /)" ]; then
+  echo "BLOCKED: fixture dir $WORK is on the ROOT filesystem (st_dev $(stat -c %d /));"
+  echo "        strict mode would gate every open on the whole machine (AGENTS.md)."
+  exit 2
+fi
 DAEMON_PID=""
 HOLDER_PID=""
 BIND_MOUNT=""

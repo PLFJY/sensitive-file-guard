@@ -22,7 +22,7 @@ as PASS.
 ## Completed gates (review closure)
 - [x] F1 exit codes 0/1/2: `run-all-root-gates.sh` + `rerun-review-batch.sh` aggregate separately; `test-continuity-root.sh`/`test-bypass-root.sh` exit 2 on mandatory BLOCKED (continuity verified rc=2)
 - [x] F2 real isolated test fs: `test-object-identity-root.sh` auto loop-backed ext4 / explicit TEST_FS_ROOT (root mount/tmpfs → exit 2); live 8/8 PASS
-- [ ] F3 LFH2 Step 3: cross-group ordering implemented (permission hot path sync-drains the topology queue under the learner's mutex). Kernel 7.1 measured: move fid = PARENT DIR (never the file); DFID_NAME (0xC00) adds the name → learner resolves `parent/name`. LIVE: SETTLED 1000/1000 + runtime-subdir 200/200 denied, 0 recovery; FAST attack (10k zero-settle) measured 145/10000 recovered (~1.45%) — kernel provides no moved-file identity, as-prescribed 0-recovery fast gate is kernel-limited (evidence: live-host-step3-fin-*, fid-definitive/fid-sep probes) → F3 RE-OPENED for the fast attack
+- [x] F3 LFH2 Step 3: cross-group ordering (sync drain under the learner mutex) + **FAN_REPORT_TARGET_FID** (move events carry the moved file's OWN fid — verified by C probes) → LIVE zero-settle fast attack 10000/10000 denied, 0 recovery; settled 1000/1000; runtime-subdir 200/200 (live-host-step3-target-20260820-011146)
 - [x] F4 handle-verify fail-closed: `match_learned_handles` from_fd failure → `StrictClassification::Error`; injection hook + unit test
 - [x] F5 handle_index capacity fail-closed: no eviction of learned targets, `handle_index_exhausted` + `handle_index_full` status; unit test 8192+ files
 - [x] F6 ObjectHandle alignment: `AlignedBuffer` repr(C,align(8)) + `read_unaligned`; unit tests
@@ -48,7 +48,7 @@ as PASS.
 |---|---|---|---|
 | PENDING LIVE | live kernel fanotify-queue-overflow gate — R3 rewrite: temporarily lower `/proc/sys/fs/fanotify/max_queued_events` (64), create the group under the low limit, restore sysctl, SIGSTOP daemon, 80 concurrent opens → real FAN_Q_OVERFLOW → `fanotify_overflows`++ → LOST | `test-continuity-root.sh` Test A (batch 3) | no longer "no deterministic generator": the sysctl mechanism is deterministic |
 | PENDING LIVE | real kernel mark loss — R4 rewrite: `guard-test-probe fsmark-remove` duplicates the exact live permission-group fd (pidfd_open+pidfd_getfd) and `FAN_MARK_REMOVE|FAN_MARK_FILESYSTEM` → fdinfo count drops → LOST(required_filesystem_mark_lost) + audit; restore does NOT erase sticky LOST | `test-continuity-root.sh` Test B (batch 3) | no longer "unmountable test FS": FAN_MARK_REMOVE on the same group is the UAPI way |
-| KERNEL-LIMITED | R1 fast attack (rename-in → immediate rename-out → immediate open): kernel 7.1 move events carry only the parent-dir fid + name; the moved file's identity is NOT in the events (proven), so resolution races the immediate rename-out → measured 145/10000 (~1.45%) recovery | `test-step3-zero-settle-root.sh` §1 + fid-definitive/fid-sep C probes | F3 fast-attack gate cannot be met via fanotify on this kernel; ordering + settled (1000/1000) + subdir (200/200) are live-verified 0-recovery |
+| RESOLVED | R1 fast attack — closed by FAN_REPORT_TARGET_FID (0x1000): move events carry the moved file's OWN fid → learned directly, no resolution race | `test-step3-zero-settle-root.sh` §1: 10000/10000 denied, 0 recovery + fid-target.c probe | — |
 | INFO | only Firefox installed | `command -v chromium/google-chrome` empty | Chromium-family NOT ACCEPTED (F11) |
 
 ## Security posture snapshot

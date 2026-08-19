@@ -14,6 +14,14 @@ TEST_USER="$SUDO_USER"
 TEST_UID="$(id -u "$TEST_USER")"
 TEST_GID="$(id -g "$TEST_USER")"
 WORK="$(mktemp -d -t guard-installed-auth-XXXXXX)"
+# AGENTS.md LIVE-TEST SAFETY rule 3: NEVER FAN_MARK_FILESYSTEM the root
+# mount (a root-fs mark gates every open on the machine -> total lockup; this
+# happened twice). Hard-assert the fixture filesystem is not the root mount.
+if [ "$(stat -c %d "$WORK")" = "$(stat -c %d /)" ]; then
+  echo "BLOCKED: fixture dir $WORK is on the ROOT filesystem (st_dev $(stat -c %d /));"
+  echo "        strict mode would gate every open on the whole machine (AGENTS.md)."
+  exit 2
+fi
 KEEP_WORK="${KEEP_WORK:-0}"
 # Use the distribution rules directory for the ephemeral rule: this Arch host
 # loads it at daemon startup, while its /etc rules directory did not produce an

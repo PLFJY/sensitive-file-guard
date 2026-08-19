@@ -79,6 +79,14 @@ for binary in "$GUARDD" "$GUARDCTL" "$PROBE" "$GUARD_NOTIFY"; do
 done
 
 WORK="$(mktemp -d /tmp/guard-browser-adversarial.XXXXXX)"
+# AGENTS.md LIVE-TEST SAFETY rule 3: NEVER FAN_MARK_FILESYSTEM the root
+# mount (a root-fs mark gates every open on the machine -> total lockup; this
+# happened twice). Hard-assert the fixture filesystem is not the root mount.
+if [ "$(stat -c %d "$WORK")" = "$(stat -c %d /)" ]; then
+  echo "BLOCKED: fixture dir $WORK is on the ROOT filesystem (st_dev $(stat -c %d /));"
+  echo "        strict mode would gate every open on the whole machine (AGENTS.md)."
+  exit 2
+fi
 touch "$WORK/.guard-disposable-fixture"
 chmod 0755 "$WORK"
 GUARDD_PID=""

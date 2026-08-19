@@ -28,6 +28,42 @@ successfully opened. This is an access firewall, not an antivirus/EDR/DLP.
 - Audit logs must NEVER contain secret contents (no cookie values, passwords,
   key bytes, browser DB rows, or private-key material).
 
+## LIVE-TEST SAFETY — HARD RULES (two real system-wide lockups)
+The ONLY root cause of a total system lock is a `FAN_MARK_FILESYSTEM` mark on
+the ROOT filesystem: strict mode then gates EVERY open on the whole machine
+through guardd, and a busy/slow daemon stalls every process. This happened
+TWICE (test fixture placed on `/var/tmp`, then on `$REPO/target` — both on the
+root mount). These rules are mandatory, not advisory:
+
+1. **NEVER perform `FAN_MARK_FILESYSTEM` on the root mount** (any path whose
+   `st_dev` equals `/`'s). Verify with `stat -c %d`, not by pathname: `/home`,
+   `/var/tmp`, `$REPO`, `/root` are ALL on the root mount.
+2. **Every strict-filesystem live test MUST place its fixtures (profile, WORK,
+   benchmark data) on an ISOLATED loop-backed ext4** (the `select_test_fs`
+   pattern in `scripts/linux/test-object-identity-root.sh`), or on an explicit
+   non-root, non-tmpfs filesystem passed via `TEST_FS_ROOT`. NEVER inside the
+   repo (`$REPO/target/...`), `/home`, `/var/tmp`, or any root-mount path.
+3. **Every root test script MUST assert non-root before starting guardd**:
+   compare `stat -c %d "$FIXTURE_DIR"` with `stat -c %d /`; on equality, print a
+   loud error and `exit 2` (BLOCKED). No fixture, no guardd start, no exception.
+4. A `FAN_MARK_FILESYSTEM` mark on tmpfs is also dangerous: if guardd stalls
+   under load, every `/tmp` open blocks and the desktop (wofi, terminals,
+   firefox, waybar) wedges. Prefer the isolated loop fs for load/benchmark
+   tests too; never SIGSTOP or flood a daemon whose fs mark is shared with the
+   desktop's filesystems.
+5. **The permission hot path must stay bounded**: per-open work (e.g. the R1
+   topology drain) must be O(1)-amortized (a zero-timeout poll, only draining
+   when events are actually pending). Any change that adds per-open cost must
+   be benchmarked on an isolated loop fs before a real-host run.
+6. Before ANY real-host live batch, list every script in the batch and verify
+   its fixture filesystem in code — the review checklist must include the
+   `st_dev` of every strict-mode fixture.
+7. `guardd` REFUSES to start when strict-filesystem would mark the root mount
+   (exit with a loud error; `GUARDD_ALLOW_ROOT_FS_MARK=1` keeps the legacy
+   warn-only behavior for operators who explicitly accept the whole-machine
+   gate). Tests must treat the refusal as the default and never set the env
+   var.
+
 ## Authorization hot path
 - Deterministic decisions MUST return immediately; the platform callback
   thread MUST NOT wait for a human UI.

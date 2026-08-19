@@ -55,6 +55,12 @@ const FAN_EVENT_INFO_TYPE_DFID_NAME: u8 = 2;
 /// NO name; passing it silently degrades the records to type DFID without a
 /// name, which the learner cannot resolve.)
 const FAN_REPORT_DFID_NAME: u32 = 0x0000_0400 | 0x0000_0800;
+/// `FAN_REPORT_TARGET_FID` (Linux UAPI, 0x1000): "Report dirent target id".
+/// With it, move events carry TWO records: the parent directory's fid (with
+/// DFID_NAME: + the name) FIRST, then the moved object's OWN fid LAST — the
+/// moved file's identity, directly, with no userspace resolution race. This
+/// is what makes the zero-settle fast attack enforceable on kernel 7.1.
+const FAN_REPORT_TARGET_FID: u32 = 0x0000_1000;
 
 /// `FAN_MOVE` = `FAN_MOVED_FROM | FAN_MOVED_TO` (Linux UAPI): move/rename
 /// notification events. NOTE (measured on kernel 7.1): the events carry the
@@ -212,7 +218,11 @@ impl FanotifyGroup {
         // FAN_REPORT_DFID_NAME are UAPI.
         let fd = unsafe {
             fanotify_init(
-                FAN_CLOEXEC | FAN_REPORT_FID | FAN_REPORT_DFID_NAME | libc::FAN_NONBLOCK,
+                FAN_CLOEXEC
+                    | FAN_REPORT_FID
+                    | FAN_REPORT_DFID_NAME
+                    | FAN_REPORT_TARGET_FID
+                    | libc::FAN_NONBLOCK,
                 0,
             )
         };
@@ -539,9 +549,11 @@ pub struct FidObject {
 #[derive(Debug)]
 pub struct FidEvent {
     pub mask: u64,
-    /// The object's fid when the event carries one (moves/renames with
-    /// `FAN_REPORT_FID`). `None` on overflow or non-FID events.
-    pub fid: Option<FidObject>,
+    /// The info records carried by the event (moves/renames with
+    /// `FAN_REPORT_FID`). With `FAN_REPORT_TARGET_FID` the LAST plain-FID
+    /// record is the moved object's OWN handle (the earlier records are the
+    /// parent directory's). Empty on overflow or non-FID events.
+    pub fids: Vec<FidObject>,
     pub overflow: bool,
 }
 
@@ -568,14 +580,14 @@ pub fn parse_fid_events(buf: &[u8]) -> Result<Vec<FidEvent>, FanotifyError> {
         }
         let overflow = (meta.mask & FAN_Q_OVERFLOW) != 0;
         let info_len = meta.metadata_len as usize;
-        let fid = if !overflow && ev_len > info_len {
-            parse_fid_info(&buf[off + info_len..off + ev_len])?
+        let fids = if !overflow && ev_len > info_len {
+            parse_fid_infos(&buf[off + info_len..off + ev_len])?
         } else {
-            None
+            Vec::new()
         };
         out.push(FidEvent {
             mask: meta.mask,
-            fid,
+            fids,
             overflow,
         });
         off += ev_len;
@@ -583,11 +595,15 @@ pub fn parse_fid_events(buf: &[u8]) -> Result<Vec<FidEvent>, FanotifyError> {
     Ok(out)
 }
 
-/// Extract the first `FAN_EVENT_INFO_TYPE_FID` record. Layout (Linux UAPI):
-/// `hdr` (4 bytes: type, pad, len) + `__kernel_fsid_t` (8 bytes: two u32) +
-/// an opaque `struct file_handle` (`handle_bytes` u32, `handle_type` i32,
-/// then the payload) exactly as `open_by_handle_at(2)` expects.
-fn parse_fid_info(info: &[u8]) -> Result<Option<FidObject>, FanotifyError> {
+/// Extract every `FAN_EVENT_INFO_TYPE_FID`/`FAN_EVENT_INFO_TYPE_DFID_NAME`
+/// record. Layout (Linux UAPI): `hdr` (4 bytes: type, pad, len) +
+/// `__kernel_fsid_t` (8 bytes: two u32) + an opaque `struct file_handle`
+/// (`handle_bytes` u32, `handle_type` i32, then the payload) exactly as
+/// `open_by_handle_at(2)` expects, followed (DFID_NAME) by the object's name.
+/// With `FAN_REPORT_TARGET_FID` a move event carries the parent record FIRST
+/// and the moved object's OWN fid LAST.
+fn parse_fid_infos(info: &[u8]) -> Result<Vec<FidObject>, FanotifyError> {
+    let mut records = Vec::new();
     const HDR: usize = 4;
     const FSID: usize = 8;
     let mut off = 0;
@@ -635,16 +651,17 @@ fn parse_fid_info(info: &[u8]) -> Result<Option<FidObject>, FanotifyError> {
             } else {
                 None
             };
-            return Ok(Some(FidObject {
+            records.push(FidObject {
                 fsid: [fsid0, fsid1],
                 handle_type,
                 handle_bytes: payload.to_vec(),
                 name,
-            }));
+            });
+            off += len;
+            continue;
         }
-        off += len;
     }
-    Ok(None)
+    Ok(records)
 }
 
 #[cfg(test)]
@@ -942,7 +959,7 @@ mod tests {
         let ev = &events[0];
         assert_eq!(ev.mask, FAN_MOVE_EVENTS);
         assert!(!ev.overflow);
-        let fid = ev.fid.as_ref().expect("fid present");
+        let fid = ev.fids.first().expect("fid present");
         assert_eq!(fid.fsid, [1, 2]);
         assert_eq!(fid.handle_type, 0x81);
         assert_eq!(fid.handle_bytes, payload);
@@ -955,7 +972,7 @@ mod tests {
         // only occur with FAN_REPORT_TARGET_FID; the parser takes the first).
         let buf = make_fid_move_event(FAN_MOVE_EVENTS, [7, 8], 1, &[0xAA]);
         let events = parse_fid_events(&buf).unwrap();
-        let fid = events[0].fid.as_ref().expect("fid present");
+        let fid = events[0].fids.first().expect("fid present");
         assert_eq!(fid.fsid, [7, 8]);
         assert_eq!(fid.handle_bytes, vec![0xAA]);
         assert_eq!(fid.name, None);
@@ -1000,7 +1017,7 @@ mod tests {
         buf[info_off + 28..info_off + 28 + name.len()].copy_from_slice(name);
 
         let events = parse_fid_events(&buf).unwrap();
-        let fid = events[0].fid.as_ref().expect("fid present");
+        let fid = events[0].fids.first().expect("fid present");
         assert_eq!(fid.handle_bytes, payload);
         assert_eq!(fid.handle_type, 1);
         assert_eq!(fid.name.as_deref(), Some(&b"Cookies"[..]));
@@ -1026,6 +1043,6 @@ mod tests {
         let events = parse_fid_events(&buf).unwrap();
         assert_eq!(events.len(), 1);
         assert!(events[0].overflow);
-        assert!(events[0].fid.is_none());
+        assert!(events[0].fids.is_empty());
     }
 }

@@ -149,10 +149,9 @@ echo "==> Starting guardd (strict-filesystem, isolated loop fs)"
 start_guardd
 
 echo "==> 1. fast attack (rename-in -> immediate rename-out -> immediate open, 10k)"
-echo "    NOTE: kernel 7.1 move events carry only the PARENT DIR fid + name"
-echo "    (proven by C probes); the moved file's identity is NOT in the event,"
-echo "    so resolution races the immediate rename-out. This section MEASURES"
-echo "    the kernel-limited recovery rate; the enforceable gate is section 2."
+echo "    FAN_REPORT_TARGET_FID: move events carry the moved file's OWN fid"
+echo "    (the last plain-FID record), so the learner learns it directly with"
+echo "    no resolution race. Zero-settle, zero recovery is enforceable."
 RESULT_FAST="$LOOP_MNT/result-fast.json"
 if ! "$PROBE" rename-out-race "$TARGET" "$OUTSIDE" "$OUTSIDE/.sdf-race-tmp" 10000 > "$RESULT_FAST" 2>&1; then
   note_fail "fast: probe errored"; cat "$RESULT_FAST"; exit 1
@@ -162,7 +161,10 @@ python3 - "$RESULT_FAST" <<'PY'
 import json, sys
 r = json.load(open(sys.argv[1], encoding="utf-8"))
 print(f"  fast-attack measurement: recovered={r['successful_unauthorized_reads']} denied={r['denied_reads']} other={r['other_errors']}")
+if r["successful_unauthorized_reads"] != 0 or r["other_errors"] != 0:
+    raise SystemExit(1)
 PY
+note_pass "fast attack: 0 successful unauthorized reads across 10000 iterations (no settle)"
 
 echo "==> 2. SETTLED move-in -> later rename-out -> open (the enforceable guarantee)"
 # Move the object INTO the protected tree and let it REMAIN; the learner

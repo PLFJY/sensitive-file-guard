@@ -228,17 +228,29 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
             // Safety: strict mode gates EVERY open on this filesystem. If that
             // filesystem is the root mount, every process on the machine is
             // serialized through guardd — a busy or overloaded daemon then
-            // blocks the whole system. This is an operational constraint, not
-            // a silent permission: warn loudly so the operator knows the
-            // scope, and refuse nothing (the profile may legitimately live on
-            // the root fs), but the posture must not be presented as Strong
-            // for a whole-machine gate.
+            // blocks the whole system. This caused TWO real system-wide
+            // lockups in testing. Default: REFUSE to start (a root-fs mark
+            // holds the whole machine hostage); an explicit
+            // GUARDD_ALLOW_ROOT_FS_MARK=1 keeps the legacy documented
+            // warn-only behavior for operators who accept the operational
+            // risk on a dedicated profile filesystem.
             if fs_is_root_mount(path) {
+                if std::env::var_os("GUARDD_ALLOW_ROOT_FS_MARK").is_none() {
+                    return Err(anyhow::anyhow!(
+                        "REFUSING to start: strict-filesystem would mark the ROOT \
+                         filesystem ({}) with FAN_MARK_FILESYSTEM — every open on the \
+                         machine would be gated through guardd and a daemon stall \
+                         blocks the whole system (two real lockups; see AGENTS.md). \
+                         Put the protected profile on a dedicated filesystem, or set \
+                         GUARDD_ALLOW_ROOT_FS_MARK=1 to accept the whole-machine gate.",
+                        path.display()
+                    ));
+                }
                 tracing::warn!(
                     fs = %path.display(),
-                    "strict-filesystem marks the ROOT filesystem: every open on the \
-                     machine is gated by guardd; a daemon stall would block the whole \
-                     system (use a dedicated profile filesystem for production)"
+                    "GUARDD_ALLOW_ROOT_FS_MARK=1: strict-filesystem marks the ROOT \
+                     filesystem; every open on the machine is gated by guardd; a \
+                     daemon stall would block the whole system"
                 );
             }
             group

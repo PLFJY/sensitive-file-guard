@@ -12,12 +12,52 @@ GUARDD="$REPO/target/debug/guardd"
 GUARDCTL="$REPO/target/debug/guardctl"
 PROBE="$REPO/target/debug/guard-test-probe"
 
-WORK="$(mktemp -d "$REPO/target/guard-strict-perf.XXXXXX")"
+# LIVE-TEST SAFETY (AGENTS.md): strict-filesystem mode performs
+# FAN_MARK_FILESYSTEM on the profile's filesystem. The fixtures MUST live on
+# an ISOLATED loop-backed ext4 — NEVER on the root mount (a root-fs mark gates
+# every open on the whole machine and the daemon stalls → total lockup; this
+# happened twice). TEST_FS_ROOT may override with an explicit non-root,
+# non-tmpfs filesystem.
+LOOP_IMG=""; LOOP_DEV=""; LOOP_MNT=""; WORK=""
+select_test_fs() {
+  if [ -n "${TEST_FS_ROOT:-}" ]; then
+    if [ "$(stat -c %d "$TEST_FS_ROOT")" = "$(stat -c %d /)" ]; then
+      echo "BLOCKED: TEST_FS_ROOT=$TEST_FS_ROOT is on the ROOT filesystem (st_dev"
+      echo "        $(stat -c %d "$TEST_FS_ROOT") == root); strict mode would gate every"
+      echo "        open on the whole machine. Use the auto loop-backed ext4 instead."
+      exit 2
+    fi
+    if [ "$(stat -f -c %T "$TEST_FS_ROOT")" = "tmpfs" ]; then
+      echo "BLOCKED: TEST_FS_ROOT=$TEST_FS_ROOT is tmpfs (AGENTS.md rule 4);"
+      echo "        a stalled daemon would wedge every /tmp open."
+      exit 2
+    fi
+    WORK="$(mktemp -d "$TEST_FS_ROOT/guard-strict-perf-XXXXXX")"
+    return
+  fi
+  LOOP_IMG="$(mktemp /tmp/guard-perf-img-XXXXXX.img)"
+  truncate -s 128M "$LOOP_IMG"
+  LOOP_DEV="$(losetup -f)"
+  losetup "$LOOP_DEV" "$LOOP_IMG"
+  mkfs.ext4 -q -F "$LOOP_DEV"
+  LOOP_MNT="$(mktemp -d /tmp/guard-perf-mnt-XXXXXX)"
+  mount "$LOOP_DEV" "$LOOP_MNT"
+  WORK="$LOOP_MNT"
+  echo "isolated loop-backed ext4: $LOOP_DEV at $LOOP_MNT (never touches the root fs)"
+}
+select_test_fs
 touch "$WORK/.synthetic-phase19-benchmark"
 DAEMON_PID=""
 cleanup() {
   if [ -n "$DAEMON_PID" ]; then kill -TERM "$DAEMON_PID" 2>/dev/null || true; wait "$DAEMON_PID" 2>/dev/null || true; fi
-  case "$WORK" in "$REPO"/target/guard-strict-perf.*) rm -rf -- "$WORK" ;; esac
+  if [ -n "$LOOP_DEV" ]; then
+    umount "$LOOP_DEV" 2>/dev/null || true
+    losetup -d "$LOOP_DEV" 2>/dev/null || true
+    rm -f "$LOOP_IMG" 2>/dev/null || true
+    rmdir "$LOOP_MNT" 2>/dev/null || true
+  else
+    rm -rf -- "$WORK" 2>/dev/null || true
+  fi
 }
 trap cleanup EXIT
 

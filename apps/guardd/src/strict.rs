@@ -632,7 +632,50 @@ impl StrictClassifier {
             if event.mask & fanotify::FAN_MOVE_EVENTS == 0 {
                 continue;
             }
-            let Some(fid) = &event.fid else {
+            if event.fids.is_empty() {
+                continue;
+            }
+            // FAN_REPORT_TARGET_FID: the LAST plain-FID record is the moved
+            // object's OWN handle (the earlier record(s) are the parent dir).
+            // Learn it directly — no userspace resolution — so the zero-settle
+            // fast attack (immediate rename-in -> rename-out -> open) is
+            // enforceable even though the file left the protected path before
+            // the event was processed.
+            let target = event
+                .fids
+                .iter()
+                .rev()
+                .find(|f| f.name.is_none() && !f.handle_bytes.is_empty());
+            if let Some(target) = target {
+                // Attribute the learned object: prefer the protected path
+                // implied by the parent record + name, else the fallback.
+                let resource = event
+                    .fids
+                    .iter()
+                    .find(|f| f.name.is_some())
+                    .and_then(|f| {
+                        let key = (f.handle_type, f.handle_bytes.clone());
+                        let parent = self.marked_dir_path(&key)?;
+                        let name = std::str::from_utf8(f.name.as_ref()?).ok()?;
+                        Some(parent.join(name))
+                    })
+                    .and_then(|path| self.classify_path(&path))
+                    .unwrap_or_else(|| self.fallback_dynamic_resource());
+                self.learn_topology_handle(
+                    target.handle_type,
+                    target.handle_bytes.clone(),
+                    resource,
+                );
+                tracing::debug!(
+                    handle = format_args!("{:02x?}", target.handle_bytes),
+                    mask = format_args!("0x{:x}", event.mask),
+                    "topology: learned moved object handle (target fid)"
+                );
+                continue;
+            }
+            // No target fid (older kernel / flag rejected): fall back to the
+            // DFID_NAME parent/name resolution while the file remains there.
+            let Some(fid) = event.fids.first() else {
                 continue;
             };
             if fid.handle_bytes.is_empty() {
@@ -648,14 +691,7 @@ impl StrictClassifier {
                 Err(_) => continue,
             };
             // Resolve the parent dir's handle to its path, then `parent/name`.
-            let parent = {
-                let map = self
-                    .marked_dir_handles
-                    .read()
-                    .expect("marked dir handle map lock poisoned");
-                map.get(&(fid.handle_type, fid.handle_bytes.clone()))
-                    .cloned()
-            };
+            let parent = self.marked_dir_path(&(fid.handle_type, fid.handle_bytes.clone()));
             let Some(parent) = parent else {
                 tracing::debug!(
                     mask = format_args!("0x{:x}", event.mask),
@@ -713,6 +749,15 @@ impl StrictClassifier {
     }
 
     /// R1: record a marked tree directory's handle so move events' parent
+    /// R1: resolve a marked tree directory's handle back to its path.
+    fn marked_dir_path(&self, key: &(i32, Vec<u8>)) -> Option<std::path::PathBuf> {
+        self.marked_dir_handles
+            .read()
+            .expect("marked dir handle map lock poisoned")
+            .get(key)
+            .cloned()
+    }
+
     /// handles can be resolved back to paths. Called by the topology learner
     /// when it marks a directory (startup walk + periodic refresh).
     pub(crate) fn record_marked_dir(&self, path: &Path) {

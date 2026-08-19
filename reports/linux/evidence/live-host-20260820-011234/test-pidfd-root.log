@@ -1,0 +1,12 @@
+==> Starting guardd with FAN_REPORT_PIDFD group
+pidfd_enabled=True
+PASS: daemon reports pidfd_enabled=true (FAN_REPORT_PIDFD accepted)
+==> Unknown probe denied
+PASS: unknown probe denied
+==> Enrolled browser probe allowed
+PASS: enrolled probe read its own fixture
+PASS: pidfd_missing_events=0 after normal enforcement
+PASS: guardd exited on SIGTERM
+
+==> LFH1 pidfd root integration summary: PASS=5 FAIL=0 BLOCKED=0
+    (see /tmp/guard-pidfd-akak4q/guardd.log for daemon decision log)

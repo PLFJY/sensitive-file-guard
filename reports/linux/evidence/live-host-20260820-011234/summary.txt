@@ -1,0 +1,64 @@
+=== [test-pidfd-root] 01:12:34 START ===
+=== [test-pidfd-root] PASS ===
+
+==> LFH1 pidfd root integration summary: PASS=5 FAIL=0 BLOCKED=0
+    (see /tmp/guard-pidfd-akak4q/guardd.log for daemon decision log)
+=== [test-object-identity-root] 01:12:34 START ===
+=== [test-object-identity-root] PASS ===
+
+==> LFH2 object-identity root summary: PASS=8 FAIL=0 BLOCKED=0
+    (see /tmp/guard-objectid-mnt-6jwDbB/guardd.log for daemon decision log)
+=== [test-step3-zero-settle-root] 01:12:40 START ===
+=== [test-step3-zero-settle-root] PASS ===
+PASS: guardd exited on SIGTERM
+
+==> LFH2 Step 3 zero-settle summary: PASS=8 FAIL=0 BLOCKED=0
+=== [test-continuity-root] 01:12:42 START ===
+=== [test-continuity-root] PASS ===
+
+==> LFH3 continuity root summary: PASS=14 FAIL=0 BLOCKED=0 MANDATORY_BLOCKED=0
+    (see /tmp/guard-continuity-mnt-FWozBt/guardd.log for daemon decision log)
+=== [experiment-fdstore-root] 01:12:43 START ===
+=== [experiment-fdstore-root] PASS ===
+VERDICT: PARTIAL (A proven: fdstore preserves the group and queued events;
+         B not recoverable via public UAPI: the read-but-unanswered
+         permission stays pending after restart → crash continuity REDUCED)
+=== [test-browser-enforcement-root] 01:12:51 START ===
+=== [test-browser-enforcement-root] PASS ===
+NOTE: open-before-daemon limitation is documented in reports/phase-06.md:
+      an fd opened BEFORE guardd protection begins cannot be retroactively
+      prevented; fanotify only gates new opens. This is a known V1 boundary.
+=== [test-ssh-enforcement-root] 01:14:51 START ===
+=== [test-ssh-enforcement-root] PASS ===
+      key moves the SAME inode so protection follows the rename. A key
+      re-created at the original path after deletion is NOT protected until
+      re-enrolled (documented in reports/phase-10.md).
+=== [test-fanotify-root] 01:15:52 START ===
+=== [test-fanotify-root] PASS ===
+
+==> Phase 02 root integration summary: PASS=6 FAIL=0 BLOCKED=0
+    (see /tmp/guard-fanotify-RG6Ra5/guardd.log for daemon decision log)
+=== [test-bypass-root] 01:15:53 START ===
+=== [test-bypass-root] PASS ===
+==> Phase 13 root bypass summary: PASS=18 FAIL=0 BLOCKED=2
+    （BLOCKED 项是 fanotify 已知限制，详见 docs/安全模型.md）
+    (see /tmp/guard-bypass-rluEWW/guardd.log for daemon decision log)
+=== [test-hardening-root] 01:16:54 START ===
+=== [test-hardening-root] PASS ===
+PASS: browser replacements converge to denial; SSH replacement remains protected
+=== [test-agent-compat-root] 01:17:55 START ===
+=== [test-agent-compat-root] PASS ===
+NOTE: filesystem denial uses ordinary EPERM/EACCES from the OS. guardd does NOT
+      inject custom text into open(2) errors. Tools use 'guardctl explain --json'
+      + the stable 'reason_code' field to understand denials.
+=== [test-ssh-broker-adversarial-root] 01:18:55 START ===
+=== [test-ssh-broker-adversarial-root] PASS ===
+PASS: daemon/audit/stdout artifacts contain no private-key bytes
+
+==> SSH broker adversarial summary: PASS=29 FAIL=0 BLOCKED=0
+=== [test-ssh-load-root] 01:28:31 START ===
+=== [test-ssh-load-root] PASS ===
+NOTE: documented limitation — once a key is loaded into ssh-agent, same-user
+      malware that can reach SSH_AUTH_SOCK may request signatures. V1 mediates
+      raw private-key file access; it does not fully mediate agent signing.
+=== [test-strict-concurrency-root] 01:35:32 START ===
