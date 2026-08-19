@@ -465,10 +465,13 @@ pub fn parse_events(buf: &[u8]) -> Result<Vec<ParsedEvent>, FanotifyError> {
     let mut off = 0;
     let hdr = std::mem::size_of::<fanotify_event_metadata>();
     while off + hdr <= buf.len() {
-        // SAFETY: we have at least `hdr` bytes starting at `off`; we only read
-        // fixed-size fields and never retain the reference beyond this scope.
-        let meta: &fanotify_event_metadata =
-            unsafe { &*(buf.as_ptr().add(off) as *const fanotify_event_metadata) };
+        // SAFETY: at least `hdr` bytes remain at `off`; read_unaligned into a
+        // local value so no `&T` with unverified alignment is ever formed
+        // (review P1: a kernel event buffer is `&[u8]`, not guaranteed
+        // aligned for `fanotify_event_metadata`).
+        let meta: fanotify_event_metadata = unsafe {
+            std::ptr::read_unaligned(buf.as_ptr().add(off) as *const fanotify_event_metadata)
+        };
         if meta.vers != FANOTIFY_METADATA_VERSION {
             return Err(FanotifyError::VersionMismatch {
                 found: meta.vers,
@@ -564,10 +567,11 @@ pub fn parse_fid_events(buf: &[u8]) -> Result<Vec<FidEvent>, FanotifyError> {
     let mut off = 0;
     let hdr = std::mem::size_of::<fanotify_event_metadata>();
     while off + hdr <= buf.len() {
-        // SAFETY: at least `hdr` bytes remain; we only read fixed fields and
-        // never retain the reference beyond this scope.
-        let meta: &fanotify_event_metadata =
-            unsafe { &*(buf.as_ptr().add(off) as *const fanotify_event_metadata) };
+        // SAFETY: at least `hdr` bytes remain at `off`; read_unaligned into a
+        // local value (review P1: no `&T` with unverified alignment).
+        let meta: fanotify_event_metadata = unsafe {
+            std::ptr::read_unaligned(buf.as_ptr().add(off) as *const fanotify_event_metadata)
+        };
         if meta.vers != FANOTIFY_METADATA_VERSION {
             return Err(FanotifyError::VersionMismatch {
                 found: meta.vers,
@@ -660,6 +664,10 @@ fn parse_fid_infos(info: &[u8]) -> Result<Vec<FidObject>, FanotifyError> {
             off += len;
             continue;
         }
+        // Unknown-but-valid record type: advance past it. A missing advance
+        // here would loop forever on an unrecognized info record, holding the
+        // topology drain mutex and wedging the permission hot path (review P1).
+        off += len;
     }
     Ok(records)
 }
@@ -1021,6 +1029,24 @@ mod tests {
         assert_eq!(fid.handle_bytes, payload);
         assert_eq!(fid.handle_type, 1);
         assert_eq!(fid.name.as_deref(), Some(&b"Cookies"[..]));
+    }
+
+    #[test]
+    fn unknown_info_record_type_advances_not_infinite_loop() {
+        // P1-e (review): an unrecognized-but-valid info record type must
+        // advance past it. A missing advance would loop forever on an
+        // unknown record, holding the topology drain mutex and wedging the
+        // permission hot path.
+        let meta_len = hdr_size();
+        let unknown_len = 8usize; // hdr(4) + 4 bytes payload
+        let total = meta_len + unknown_len;
+        let mut buf = make_event(3, FAN_MOVE_EVENTS, FAN_NOFD, -1, total);
+        buf[meta_len] = 9; // unknown info_type
+        buf[meta_len + 2] = unknown_len as u8;
+        // parse_fid_events must return (not hang) with no fid records.
+        let events = parse_fid_events(&buf).unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].fids.is_empty());
     }
 
     #[test]

@@ -49,6 +49,14 @@ pub struct BackendMetrics {
     /// evicted (an evicted protected identity must not silently become
     /// Unrelated), new candidates are not learned, and the posture degrades.
     pub handle_index_exhausted: std::sync::atomic::AtomicBool,
+    /// P1-b (review): the LFH2 Step 3 FID topology identity subsystem is
+    /// UNCERTAIN — group creation failed, tree marks incomplete, learner
+    /// thread dead, queue overflow, parse/read failure, or a required
+    /// topology mark lost. While set, an ambiguous outside-path open (whose
+    /// identity would have been established by the topology group) is DENIED
+    /// instead of Unrelated, and status reports REDUCED. STICKY until restart
+    /// (same philosophy as continuity loss).
+    pub topology_uncertain: std::sync::atomic::AtomicBool,
 }
 
 impl BackendMetrics {
@@ -66,6 +74,7 @@ impl BackendMetrics {
             pidfd_enabled: std::sync::atomic::AtomicBool::new(false),
             pidfd_missing_events: AtomicU64::new(0),
             handle_index_exhausted: std::sync::atomic::AtomicBool::new(false),
+            topology_uncertain: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -86,6 +95,7 @@ impl BackendMetrics {
             pidfd_enabled: self.pidfd_enabled.load(Ordering::Relaxed),
             pidfd_missing_events: self.pidfd_missing_events.load(Ordering::Relaxed),
             handle_index_exhausted: self.handle_index_exhausted.load(Ordering::Relaxed),
+            topology_uncertain: self.topology_uncertain.load(Ordering::Relaxed),
         }
     }
 }
@@ -101,6 +111,8 @@ pub struct BackendSnapshot {
     pub strict_alias_matches: u64,
     pub pidfd_enabled: bool,
     pub pidfd_missing_events: u64,
+    /// P1-b: LFH2 Step 3 FID topology identity is uncertain (see BackendMetrics).
+    pub topology_uncertain: bool,
     pub handle_index_exhausted: bool,
 }
 
@@ -134,6 +146,13 @@ struct SshNamespace {
     owner_uid: u32,
 }
 
+/// Topology-learned identity key: `(filesystem fsid, handle_type,
+/// handle_bytes)`. The fsid disambiguates opaque filesystem handles across
+/// filesystems (review P1-d): a handle is fs-scoped identity, NOT globally
+/// unique, so keying without the fsid lets identical payloads on different
+/// filesystems collide and misattribute resources/browsers.
+pub type TopologyKey = ([u32; 2], i32, Vec<u8>);
+
 pub struct StrictClassifier {
     browsers: Vec<BrowserNamespace>,
     ssh: Vec<SshNamespace>,
@@ -147,14 +166,13 @@ pub struct StrictClassifier {
     /// it without limit.
     handle_index_capacity: usize,
     /// LFH2 Step 3: NEVER-OPENED dynamic objects learned from the SEPARATE
-    /// FAN_CLASS_NOTIF|FAN_REPORT_FID topology group, keyed by the opaque
-    /// handle payload `(handle_type, handle_bytes)`. Unlike `handle_index`
+    /// FAN_CLASS_NOTIF|FAN_REPORT_FID topology group, keyed by
+    /// `TopologyKey` = (fsid, handle_type, handle_bytes). Unlike `handle_index`
     /// (keyed by `(dev, ino)`), these objects were never resolved to an
     /// inode — the topology event's fid IS their identity, so an open of the
     /// same object anywhere is recognized purely by handle. Bounded with the
     /// same fail-closed capacity semantics (never evict; degrade health).
-    topology_handles:
-        std::sync::RwLock<std::collections::HashMap<(i32, Vec<u8>), ProtectedResource>>,
+    topology_handles: std::sync::RwLock<std::collections::HashMap<TopologyKey, ProtectedResource>>,
     /// R1: the LFH2 Step 3 topology group's queue is drained under this mutex
     /// by BOTH the background learner and, before an ambiguous outside-path
     /// open may be allowed, synchronously by the permission hot path. Holding
@@ -171,7 +189,7 @@ pub struct StrictClassifier {
     /// (`parent/name`) while it remains at the protected path: each marked
     /// dir records its handle at mark time.
     marked_dir_handles:
-        std::sync::RwLock<std::collections::HashMap<(i32, Vec<u8>), std::path::PathBuf>>,
+        std::sync::RwLock<std::collections::HashMap<TopologyKey, std::path::PathBuf>>,
     filesystem_paths: Vec<PathBuf>,
     metrics: std::sync::Arc<BackendMetrics>,
 }
@@ -318,11 +336,30 @@ impl StrictClassifier {
             // the background learner uses, polls the queue, and drains
             // synchronously when it holds events — no settle, no
             // scheduler-timing assumption, no consumed-but-unpublished race.
+            //
+            // P1-b (review): if the topology identity subsystem is UNCERTAIN
+            // (group creation failed, marks incomplete, learner dead, queue
+            // overflow, parse/read failure), an ambiguous outside-path open
+            // can no longer be trusted to be Unrelated — the object may be a
+            // never-opened dynamic object whose identity was lost. Fail closed
+            // (Error -> deny) instead of allowing, and status reports REDUCED.
+            if self
+                .metrics
+                .topology_uncertain
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                return StrictClassification::Error(
+                    "topology identity uncertain; ambiguous open denied (fail-closed)".into(),
+                );
+            }
             self.sync_topology_if_pending();
             if self.topology_handles_nonempty() {
                 match platform_linux::object_handle::ObjectHandle::from_fd(fd) {
                     Ok(event_handle) => {
-                        if let Some(resource) = self.match_topology_handle(&event_handle) {
+                        let fsid = fsid_of_fd(fd);
+                        if let Some(resource) =
+                            fsid.and_then(|fsid| self.match_topology_handle(fsid, &event_handle))
+                        {
                             tracing::debug!(
                                 fd_path = %path.display(),
                                 handle = format_args!("{:02x?}", event_handle.handle_bytes),
@@ -501,6 +538,7 @@ impl StrictClassifier {
     /// unverifiable opens are denied instead of allowed.
     pub fn learn_topology_handle(
         &self,
+        fsid: [u32; 2],
         handle_type: i32,
         handle_bytes: Vec<u8>,
         resource: ProtectedResource,
@@ -519,7 +557,9 @@ impl StrictClassifier {
             );
             return;
         }
-        index.entry((handle_type, handle_bytes)).or_insert(resource);
+        index
+            .entry((fsid, handle_type, handle_bytes))
+            .or_insert(resource);
     }
 
     /// True when any topology-learned handle exists (fast-path guard: the
@@ -535,12 +575,13 @@ impl StrictClassifier {
     /// Look up a topology-learned object by the event fd's handle.
     pub fn match_topology_handle(
         &self,
+        fsid: [u32; 2],
         handle: &platform_linux::object_handle::ObjectHandle,
     ) -> Option<ProtectedResource> {
         self.topology_handles
             .read()
             .expect("topology handle index lock poisoned")
-            .get(&(handle.handle_type, handle.handle_bytes.clone()))
+            .get(&(fsid, handle.handle_type, handle.handle_bytes.clone()))
             .cloned()
     }
 
@@ -593,11 +634,17 @@ impl StrictClassifier {
                         self.process_fid_events(events);
                     }
                     Err(error) => {
+                        self.metrics
+                            .topology_uncertain
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
                         tracing::error!(%error, "topology drain parse failed closed");
                     }
                 },
                 Err(error) if error.raw_os_error() == Some(libc::EAGAIN) => break,
                 Err(error) => {
+                    self.metrics
+                        .topology_uncertain
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
                     tracing::warn!(%error, "topology drain read failed");
                     break;
                 }
@@ -627,11 +674,17 @@ impl StrictClassifier {
                 Ok(n) => match fanotify::parse_fid_events(&buf[..n]) {
                     Ok(events) => self.process_fid_events(events),
                     Err(error) => {
+                        self.metrics
+                            .topology_uncertain
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
                         tracing::error!(%error, "topology drain parse failed closed");
                     }
                 },
                 Err(error) if error.raw_os_error() == Some(libc::EAGAIN) => break,
                 Err(error) => {
+                    self.metrics
+                        .topology_uncertain
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
                     tracing::warn!(%error, "topology drain read failed");
                     break;
                 }
@@ -659,7 +712,12 @@ impl StrictClassifier {
     fn process_fid_events(&self, events: Vec<fanotify::FidEvent>) {
         for event in events {
             if event.overflow {
-                tracing::warn!("topology group overflow; a move may have been missed (REDUCED)");
+                self.metrics
+                    .topology_uncertain
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                tracing::warn!(
+                    "topology group overflow; a move may have been missed (topology UNCERTAIN)"
+                );
                 continue;
             }
             if event.mask & fanotify::FAN_MOVE_EVENTS == 0 {
@@ -687,7 +745,7 @@ impl StrictClassifier {
                     .iter()
                     .find(|f| f.name.is_some())
                     .and_then(|f| {
-                        let key = (f.handle_type, f.handle_bytes.clone());
+                        let key = (f.fsid, f.handle_type, f.handle_bytes.clone());
                         let parent = self.marked_dir_path(&key)?;
                         let name = std::str::from_utf8(f.name.as_ref()?).ok()?;
                         Some(parent.join(name))
@@ -695,6 +753,7 @@ impl StrictClassifier {
                     .and_then(|path| self.classify_path(&path))
                     .unwrap_or_else(|| self.fallback_dynamic_resource());
                 self.learn_topology_handle(
+                    target.fsid,
                     target.handle_type,
                     target.handle_bytes.clone(),
                     resource,
@@ -724,7 +783,8 @@ impl StrictClassifier {
                 Err(_) => continue,
             };
             // Resolve the parent dir's handle to its path, then `parent/name`.
-            let parent = self.marked_dir_path(&(fid.handle_type, fid.handle_bytes.clone()));
+            let parent =
+                self.marked_dir_path(&(fid.fsid, fid.handle_type, fid.handle_bytes.clone()));
             let Some(parent) = parent else {
                 tracing::debug!(
                     mask = format_args!("0x{:x}", event.mask),
@@ -771,7 +831,14 @@ impl StrictClassifier {
             let resource = self
                 .classify_path(&moved_path)
                 .unwrap_or_else(|| self.fallback_dynamic_resource());
-            self.learn_topology_handle(handle.handle_type, handle.handle_bytes.clone(), resource);
+            if let Some(fsid) = fsid_of_fd(fd) {
+                self.learn_topology_handle(
+                    fsid,
+                    handle.handle_type,
+                    handle.handle_bytes.clone(),
+                    resource,
+                );
+            }
             tracing::debug!(
                 path = %moved_path.display(),
                 handle = format_args!("{:02x?}", handle.handle_bytes),
@@ -783,7 +850,7 @@ impl StrictClassifier {
 
     /// R1: record a marked tree directory's handle so move events' parent
     /// R1: resolve a marked tree directory's handle back to its path.
-    fn marked_dir_path(&self, key: &(i32, Vec<u8>)) -> Option<std::path::PathBuf> {
+    fn marked_dir_path(&self, key: &TopologyKey) -> Option<std::path::PathBuf> {
         self.marked_dir_handles
             .read()
             .expect("marked dir handle map lock poisoned")
@@ -804,15 +871,16 @@ impl StrictClassifier {
             return;
         }
         let handle = platform_linux::object_handle::ObjectHandle::from_fd(fd);
+        let fsid = fsid_of_fd(fd);
         unsafe { libc::close(fd) };
-        let Ok(handle) = handle else {
+        let (Ok(handle), Some(fsid)) = (handle, fsid) else {
             return;
         };
         self.marked_dir_handles
             .write()
             .expect("marked dir handle map lock poisoned")
             .insert(
-                (handle.handle_type, handle.handle_bytes.clone()),
+                (fsid, handle.handle_type, handle.handle_bytes.clone()),
                 path.to_path_buf(),
             );
     }
@@ -1124,6 +1192,24 @@ impl StrictClassifier {
         }
         None
     }
+}
+
+/// P1-d (review): the filesystem identity (`fstatfs` `f_fsid`) of an open
+/// descriptor. fanotify move events carry this same `__kernel_fsid_t` in the
+/// fid, so topology-learned handles are keyed by `(fsid, handle_type,
+/// handle_bytes)` — a filesystem handle is fs-scoped opaque identity, NOT
+/// globally unique, and keying without the fsid lets identical payloads on
+/// different filesystems collide (wrong resource/browser attribution).
+fn fsid_of_fd(fd: RawFd) -> Option<[u32; 2]> {
+    let mut st = unsafe { std::mem::zeroed::<libc::statfs>() };
+    // SAFETY: st is a valid statfs buffer for the given fd.
+    let rc = unsafe { libc::fstatfs(fd, &mut st) };
+    if rc != 0 {
+        return None;
+    }
+    // __fsid_t is two ints (fields private in libc); transmute the whole
+    // value — bit-identical to the fanotify __kernel_fsid_t.
+    Some(unsafe { std::mem::transmute::<libc::fsid_t, [u32; 2]>(st.f_fsid) })
 }
 
 fn path_identity(path: &Path) -> std::io::Result<(u64, u64)> {
@@ -1603,9 +1689,15 @@ mod tests {
         let probe = std::fs::File::open(&dynamic).unwrap();
         let handle =
             platform_linux::object_handle::ObjectHandle::from_fd(probe.as_raw_fd()).unwrap();
+        let fsid = fsid_of_fd(probe.as_raw_fd()).expect("fsid");
         drop(probe);
         let resource = classifier.fallback_dynamic_resource();
-        classifier.learn_topology_handle(handle.handle_type, handle.handle_bytes.clone(), resource);
+        classifier.learn_topology_handle(
+            fsid,
+            handle.handle_type,
+            handle.handle_bytes.clone(),
+            resource,
+        );
 
         // Rename outside before any protected-path open (the Step 3 case).
         let moved = temp.path().join("exfil-000001.log");
@@ -1808,5 +1900,83 @@ mod tests {
             classifier.classify_fd(moved_file.as_raw_fd()),
             StrictClassification::Error(_)
         ));
+    }
+
+    #[test]
+    fn topology_uncertain_fails_closed_on_ambiguous_open() {
+        // P1-b (review): when the FID topology identity subsystem is UNCERTAIN
+        // (group creation failed, marks incomplete, learner dead, queue
+        // overflow, parse/read failure), an ambiguous outside-path open must
+        // NOT be allowed as Unrelated — the object may be a never-opened
+        // dynamic object whose identity was lost. classify_fd must return
+        // Error (deny) and status must report REDUCED.
+        let temp = fs_tempdir();
+        let root = temp.path().join("chromium");
+        std::fs::create_dir_all(root.join("Default")).unwrap();
+        let (classifier, _) = new_classifier(&root);
+
+        // An unrelated file whose open is ambiguous (not path-classified).
+        let unrelated = temp.path().join("ordinary.txt");
+        std::fs::write(&unrelated, b"synthetic").unwrap();
+
+        // Healthy: Unrelated (allow).
+        let f = std::fs::File::open(&unrelated).unwrap();
+        assert!(matches!(
+            classifier.classify_fd(f.as_raw_fd()),
+            StrictClassification::Unrelated
+        ));
+        drop(f);
+
+        // UNCERTAIN: ambiguous open fails closed.
+        classifier
+            .metrics
+            .topology_uncertain
+            .store(true, Ordering::Relaxed);
+        let f = std::fs::File::open(&unrelated).unwrap();
+        assert!(matches!(
+            classifier.classify_fd(f.as_raw_fd()),
+            StrictClassification::Error(_)
+        ));
+    }
+
+    #[test]
+    fn topology_handle_miss_does_not_cross_filesystems() {
+        // P1-d (review): topology-learned handles are keyed by (fsid,
+        // handle_type, handle_bytes). A filesystem handle is fs-scoped opaque
+        // identity — identical payloads on different filesystems must NOT
+        // match (no cross-fs collision / misattribution).
+        let classifier = StrictClassifier {
+            browsers: Vec::new(),
+            ssh: Vec::new(),
+            inode_index: std::sync::Arc::new(std::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+            handle_index: std::sync::RwLock::new(std::collections::HashMap::new()),
+            topology_handles: std::sync::RwLock::new(std::collections::HashMap::new()),
+            topology: std::sync::Mutex::new(TopologyDrainState {
+                group: None,
+                buf: Vec::new(),
+            }),
+            marked_dir_handles: std::sync::RwLock::new(std::collections::HashMap::new()),
+            handle_index_capacity: 8192,
+            filesystem_paths: Vec::new(),
+            metrics: std::sync::Arc::new(BackendMetrics::new(EnforcementMode::StrictFilesystem)),
+        };
+        let handle = platform_linux::object_handle::ObjectHandle {
+            mount_id: 0,
+            handle_type: 1,
+            handle_bytes: vec![0xAA, 0xBB, 0xCC, 0xDD],
+        };
+        let resource = classifier.fallback_dynamic_resource();
+        classifier.learn_topology_handle(
+            [1, 2],
+            handle.handle_type,
+            handle.handle_bytes.clone(),
+            resource,
+        );
+        // Same payload, different filesystem: no match.
+        assert!(classifier.match_topology_handle([3, 4], &handle).is_none());
+        // Same filesystem: match.
+        assert!(classifier.match_topology_handle([1, 2], &handle).is_some());
     }
 }

@@ -28,6 +28,41 @@ successfully opened. This is an access firewall, not an antivirus/EDR/DLP.
 - Audit logs must NEVER contain secret contents (no cookie values, passwords,
   key bytes, browser DB rows, or private-key material).
 
+## PRIVILEGED LIVE-TEST ENVIRONMENT — systemd-nspawn CAPSULE (use this for root)
+
+A dedicated unattended privileged `systemd-nspawn` test capsule runs on the
+host. It is the ONLY authorized way to run privileged/live Linux tests now.
+
+- **Never use interactive `sudo`, `sudo -S`, `pkexec`, password caching, or
+  any other privileged host command while the capsule is available.** The only
+  host-side privileged entrypoint is `sudo -n /usr/local/sbin/sfg-test-capsule`.
+- **Development stays on the host as the normal user**: source editing, `cargo
+  build`, normal unit tests, and repository operations never move into the
+  capsule.
+- Discover paths / status with `sudo -n /usr/local/sbin/sfg-test-capsule paths`
+  and `sudo -n /usr/local/sbin/sfg-test-capsule status`.
+- One-shot privileged tests: `sudo -n /usr/local/sbin/sfg-test-capsule run CMD
+  [ARGS...]`. Tests needing a real systemd PID 1: `... boot`, then
+  `... exec CMD [ARGS...]`; shut down with `... stop`; reset the writable
+  synthetic filesystem with `... reset-work`.
+- The staging directory is writable by the normal host user: build artifacts on
+  the host, then copy ONLY runtime artifacts, test scripts, configs, synthetic
+  fixtures/templates, and service files into staging. **Never bind or copy the
+  real user browser profile, SSH private keys, password stores, tokens,
+  cookies, or other real secrets.**
+- Inside the capsule: `/stage` is a read-only view of staged artifacts;
+  `/testfs` is the writable synthetic test filesystem — ALL destructive and
+  adversarial filesystem tests operate there unless a test explicitly proves
+  another location is technically required.
+- The capsule uses the HOST Linux kernel (real `CAP_SYS_ADMIN`, permission
+  events, filesystem marks, pidfd, object handles). Do NOT automatically treat
+  a capsule result as equivalent to every host deployment: if a result may
+  depend on PID/mount namespaces, nspawn restrictions, nspawn
+  seccomp/kernel-interface restrictions, BPF LSM availability, or another
+  container-specific difference, explicitly investigate it and downgrade to
+  REDUCED / NOT ACCEPTED / BLOCKED rather than inventing host acceptance. A
+  passing capsule test is evidence only for exactly what the test proves.
+
 ## LIVE-TEST SAFETY — HARD RULES (two real system-wide lockups)
 The root cause of BOTH observed system-wide lockups was a `FAN_MARK_FILESYSTEM`
 mark on the ROOT filesystem: strict mode then gates EVERY open on the whole

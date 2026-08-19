@@ -41,9 +41,7 @@ use guard_core::policy::evaluate;
 use guard_core::policy::{AccessEvent, AccessOperation, Decision, DenyReason, MigrationCandidate};
 #[cfg(test)]
 use guard_core::resource::BrowserFamily;
-use guard_core::resource::{
-    BrowserId, ProfileId, ProtectedResource, ProtectedResourceId, ProtectedResourceKind,
-};
+use guard_core::resource::{BrowserId, ProfileId, ProtectedResource, ProtectedResourceKind};
 pub use guard_platform::config::BrowserEnrollmentConfig;
 use guard_runtime::AuthorizationRuntime;
 pub use guard_runtime::{MigrationPendingDetails, SshPendingDetails};
@@ -535,24 +533,6 @@ impl EnforcementEngine {
     /// Audit record for a pidfd validation failure (LFH1). The requester's
     /// resource is unknown because we deliberately never trust a pathname for
     /// this decision; the record carries only process metadata and the reason.
-    pub fn pidfd_failure_audit_record(&mut self, pid: i32, detail: &str) -> Option<AuditRecord> {
-        let resolved = self.resolve_process(pid);
-        let record = build_audit_record(
-            &ProtectedResource {
-                id: ProtectedResourceId("pidfd-validation-failure".into()),
-                kind: ProtectedResourceKind::Other,
-                owner_uid: 0,
-                browser: None,
-                profile: None,
-                path: PathBuf::from("/proc/<pid>/exe"),
-            },
-            resolved.as_ref().map(|(identity, _)| identity),
-            Decision::Deny(DenyReason::UnknownProcess),
-            detail,
-        );
-        Some(record)
-    }
-
     /// Authorize a one-shot SSH load lease (Phase 11). The lease is bound to
     /// the exact `ssh-add` process invocation via `StableIdentity` (exe +
     /// start_time + dev + ino) and the exact PID. The `uid` is the authorizing
@@ -653,7 +633,18 @@ impl EnforcementEngine {
             .files()
             .filter(|resource| resource.kind == ProtectedResourceKind::SshPrivateKey)
         {
-            group.mark_file(libc::FAN_ACCESS_PERM, &resource.path)?;
+            // P0 (review): OPEN_PERM is the SSH private-key authorization
+            // boundary. FAN_ACCESS_PERM alone cannot gate mmap(): Linux v7.1
+            // `fsnotify_mmap_perm()` only emits pre-content (HSM) events, so a
+            // `FAN_CLASS_CONTENT + FAN_ACCESS_PERM` group never sees an
+            // mmap()-triggered access-permission event — an unknown process
+            // that received a readable fd could mmap() the key bytes straight
+            // through. Mark OPEN_PERM too so an unauthorized open is denied
+            // BEFORE any readable fd exists (this also neutralizes
+            // splice/sendfile/copy_file_range/io_uring reads, all of which
+            // require a readable fd). ACCESS_PERM stays as an extra read-time
+            // constraint for authorized flows.
+            group.mark_file(libc::FAN_OPEN_PERM | libc::FAN_ACCESS_PERM, &resource.path)?;
             n += 1;
         }
         Ok(n)

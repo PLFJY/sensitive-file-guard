@@ -174,7 +174,7 @@ fn handle_request_with_connection(
 // --- handlers ---
 
 fn handle_status(state: &IpcState, creds: PeerCreds) -> Response {
-    let mut engine = state.engine.lock().expect("engine mutex poisoned");
+    let engine = state.engine.lock().expect("engine mutex poisoned");
     let audit_dropped = state.audit.dropped();
     let backend = state.backend_metrics.snapshot();
     let required_filesystems = backend.marked_filesystems;
@@ -195,20 +195,11 @@ fn handle_status(state: &IpcState, creds: PeerCreds) -> Response {
     // observed it revokes all live authority and becomes sticky; current
     // recovery later reports ACTIVE enforcement but continuity stays LOST.
     let enforcing = state.group.is_some();
-    // LFH3: a required mark loss is a continuity-breaking transition. Once
-    // observed it revokes all live authority and becomes sticky; current
-    // recovery later reports ACTIVE enforcement but continuity stays LOST.
-    if enforcing && required_filesystems > 0 && !filesystem_marks_healthy {
-        engine.lose_continuity(crate::enforce::ContinuityLossReason::RequiredMarkLoss);
-        // R4 live gate evidence: the revocation ran (leases/pending/grace
-        // dropped, generation bumped); record it in the audit trail and flush
-        // so the next CLI query sees it (the writer batches 64 records).
-        state.audit.record(crate::engine_continuity_audit(
-            "required_filesystem_mark_lost",
-            "required filesystem mark lost; all leases and pending confirmations revoked",
-        ));
-        state.audit.flush();
-    }
+    // LFH3 / P1-c: mark-loss detection is AUTONOMOUS in the daemon event loop
+    // (periodic required-mark health check), NOT triggered by this status
+    // query. The status path only READS state — a security-state transition
+    // must never depend on CLI/UI polling. `filesystem_marks_healthy` below
+    // still reflects the observed mark count for reporting.
 
     // LFH0: split health dimensions. Each condition is judged on its own axis
     // so a dropped audit event is never conflated with lost filesystem-mark
@@ -224,6 +215,11 @@ fn handle_status(state: &IpcState, creds: PeerCreds) -> Response {
         || engine.topology_degraded
         || backend.classifier_failures > 0
         || !filesystem_marks_healthy
+        // P1-b (review): topology identity UNCERTAIN (group creation failed,
+        // marks incomplete, learner dead, queue overflow, parse/read failure)
+        // makes ambiguous outside-path opens fail closed — posture is REDUCED
+        // until restart, mirroring continuity-loss philosophy.
+        || backend.topology_uncertain
     {
         "REDUCED".to_owned()
     } else {

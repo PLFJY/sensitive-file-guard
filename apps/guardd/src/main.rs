@@ -366,9 +366,12 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
         let topology_group = match fanotify::FanotifyGroup::new_topology() {
             Ok(group) => Some(Arc::new(group)),
             Err(error) => {
+                backend_metrics
+                    .topology_uncertain
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
                 tracing::warn!(
                     err = %error,
-                    "LFH2 Step 3 topology group creation failed; never-opened dynamic rename guarantee REDUCED"
+                    "LFH2 Step 3 topology group creation failed; topology identity UNCERTAIN, ambiguous opens fail closed"
                 );
                 None
             }
@@ -402,18 +405,33 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                                 )
                             }
                             Err(error) => {
-                                tracing::warn!(%error, "topology tree marks incomplete; Step 3 guarantee REDUCED")
+                                backend_metrics
+                                    .topology_uncertain
+                                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                                tracing::warn!(%error, "topology tree marks incomplete; topology identity UNCERTAIN, ambiguous opens fail closed")
                             }
                         }
-                        std::thread::Builder::new()
+                        match std::thread::Builder::new()
                             .name("guardd-topology-fid".into())
                             .spawn(move || learner.run())
-                            .ok()
+                        {
+                            Ok(handle) => Some(handle),
+                            Err(error) => {
+                                backend_metrics
+                                    .topology_uncertain
+                                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                                tracing::warn!(%error, "topology learner thread spawn failed; topology identity UNCERTAIN, ambiguous opens fail closed");
+                                None
+                            }
+                        }
                     }
                     Err(error) => {
+                        backend_metrics
+                            .topology_uncertain
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
                         tracing::warn!(
                             err = %error,
-                            "LFH2 Step 3 topology group unavailable; never-opened dynamic rename guarantee REDUCED"
+                            "LFH2 Step 3 topology group unavailable; topology identity UNCERTAIN, ambiguous opens fail closed"
                         );
                         None
                     }
@@ -488,7 +506,49 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
     let mut buf = vec![0u8; 65536];
     let mut processed: u64 = 0;
     let daemon_pid = std::process::id() as i32;
+    // P1-c (review): required filesystem-mark health is checked by the daemon
+    // AUTONOMOUSLY on a bounded period, NOT by guardctl status polling. A
+    // security-state transition (continuity LOST + revoke) must never depend
+    // on a UI/CLI query. The IPC status path only READS state.
+    let mut last_mark_check = std::time::Instant::now();
+    let mark_check_period = std::time::Duration::from_secs(1);
     loop {
+        // P1-c: periodic required-mark health check (cheap fdinfo read).
+        if last_mark_check.elapsed() >= mark_check_period {
+            last_mark_check = std::time::Instant::now();
+            if n_filesystems > 0 {
+                let already_lost = matches!(
+                    engine.lock().expect("engine").continuity,
+                    enforce::ProtectionContinuity::Lost { .. }
+                );
+                if !already_lost {
+                    if let Ok(observed) = group.filesystem_mark_count() {
+                        if observed < n_filesystems {
+                            tracing::error!(
+                                observed,
+                                required = n_filesystems,
+                                "required filesystem mark lost (autonomous detection); continuity LOST, all authority revoked"
+                            );
+                            let mut engine = engine.lock().expect("engine");
+                            engine.lose_continuity(enforce::ContinuityLossReason::RequiredMarkLoss);
+                            pending_migrations
+                                .lock()
+                                .expect("pending migration mutex poisoned")
+                                .deny_all();
+                            pending_ssh_reads
+                                .lock()
+                                .expect("pending SSH read mutex poisoned")
+                                .deny_all();
+                            drop(engine);
+                            audit.record(engine_continuity_audit(
+                                "required_filesystem_mark_lost",
+                                "required filesystem mark lost; all leases and pending confirmations revoked (autonomous)",
+                            ));
+                        }
+                    }
+                }
+            }
+        }
         if signal::is_shutdown() {
             let eng = engine.lock().expect("engine");
             tracing::info!(
@@ -604,41 +664,64 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                 continue;
             }
 
-            // LFH1: validate the pidfd before any decision. On a pidfd-enabled
-            // group the kernel pins the event's process instance; a missing or
-            // mismatched pidfd is unexpected and protected candidates fail
-            // closed (legacy fallback is reserved for kernels without
-            // FAN_REPORT_PIDFD, reported separately).
-            let mut pidfd_ok = true;
-            if pidfd_enabled {
-                match ev.pidfd {
-                    Some(pidfd) => {
-                        if !platform_linux::proc::pidfd_matches(pidfd, ev.pid) {
-                            pidfd_ok = false;
-                            backend_metrics
-                                .pidfd_missing_events
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            tracing::error!(
-                                pid = ev.pid,
-                                pidfd,
-                                "fanotify event pidfd does not match its pid; failing closed"
-                            );
-                        }
-                    }
-                    None => {
-                        pidfd_ok = false;
-                        backend_metrics
-                            .pidfd_missing_events
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        tracing::error!(
-                            pid = ev.pid,
-                            "pidfd-enabled group delivered an event without a pidfd; failing closed"
-                        );
-                    }
+            // LFH1 / review P1: validate the pidfd BEFORE any decision or
+            // authority mutation. On a pidfd-enabled group the kernel pins the
+            // event's process instance; a missing or mismatched pidfd means the
+            // numeric PID can no longer be trusted (PID reuse). This is
+            // TERMINAL fail-closed: no process resolve for authorization, no
+            // lease/grace/pending/confirmation mutation, no identity-cache
+            // writes — only a DENY and an audit record built WITHOUT resolving
+            // the (untrusted) process. decide_protected() is NOT called, so
+            // refresh_migration_states() cannot bind an armed lease to a
+            // reused-PID impostor.
+            let pidfd_terminal_deny: Option<guard_audit::AuditRecord> = if pidfd_enabled
+                && ev.pid != daemon_pid
+            {
+                let pidfd_ok = match ev.pidfd {
+                    Some(pidfd) => platform_linux::proc::pidfd_matches(pidfd, ev.pid),
+                    None => false,
+                };
+                if pidfd_ok {
+                    None
+                } else {
+                    backend_metrics
+                        .pidfd_missing_events
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    tracing::error!(
+                        pid = ev.pid,
+                        "fanotify event pidfd missing/mismatched; terminal fail-closed, no authority mutation"
+                    );
+                    // Authority-state-neutral audit: NO process resolve.
+                    Some(crate::enforce::build_audit_record(
+                        &guard_core::resource::ProtectedResource {
+                            id: guard_core::resource::ProtectedResourceId(
+                                "pidfd-validation-failure".into(),
+                            ),
+                            kind: guard_core::resource::ProtectedResourceKind::Other,
+                            owner_uid: 0,
+                            browser: None,
+                            profile: None,
+                            path: std::path::PathBuf::from("/proc/<pid>/exe"),
+                        },
+                        None,
+                        guard_core::policy::Decision::Deny(
+                            guard_core::policy::DenyReason::UnknownProcess,
+                        ),
+                        "pidfd_missing_or_mismatched",
+                    ))
                 }
-            }
+            } else {
+                None
+            };
 
-            let (decision, audit_record) = if let Some(classifier) = &strict_classifier {
+            let (decision, audit_record) = if let Some(terminal_audit) = pidfd_terminal_deny {
+                (
+                    guard_core::policy::Decision::Deny(
+                        guard_core::policy::DenyReason::UnknownProcess,
+                    ),
+                    Some(terminal_audit),
+                )
+            } else if let Some(classifier) = &strict_classifier {
                 backend_metrics
                     .strict_events_total
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -656,20 +739,19 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                             backend_metrics
                                 .protected_events
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            // Strict's filesystem mark sees the SSH open as
-                            // well as the exact-file access mark. The actual
-                            // read remains the sole SSH mediation point.
-                            if resource.kind == guard_core::ProtectedResourceKind::SshPrivateKey
-                                && ev.is_open_perm()
-                            {
-                                (guard_core::policy::Decision::Allow, None)
-                            } else {
-                                engine.lock().expect("engine").decide_protected(
-                                    ev.pid,
-                                    resource,
-                                    "strict_inode_or_path",
-                                )
-                            }
+                            // P0 (review): OPEN_PERM is the SSH private-key
+                            // authorization boundary — FAN_ACCESS_PERM alone
+                            // cannot gate mmap() (kernel v7.1 pre-content only),
+                            // so an unauthorized open must be denied BEFORE any
+                            // readable fd exists. decide_protected denies
+                            // unknown processes; authorized flows (ssh-read /
+                            // ssh-load leases, own browser) still pass, with the
+                            // agent-socket binding check applied per event.
+                            engine.lock().expect("engine").decide_protected(
+                                ev.pid,
+                                resource,
+                                "strict_inode_or_path",
+                            )
                         }
                         strict::StrictClassification::Unrelated => {
                             backend_metrics
@@ -698,24 +780,7 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                     .expect("engine")
                     .decide_event(ev.pid, ev.fd, ev.is_access_perm())
             };
-            // LFH1: on a pidfd-enabled group, an unusable pidfd is unexpected
-            // kernel/group state; protected candidates fail closed BEFORE any
-            // confirmation can be enqueued (never a silent fallback while
-            // claiming Strong).
-            let mut decision = decision;
             let mut audit_record = audit_record;
-            if !pidfd_ok && ev.pid != daemon_pid {
-                decision = guard_core::policy::Decision::Deny(
-                    guard_core::policy::DenyReason::UnknownProcess,
-                );
-                let record = engine
-                    .lock()
-                    .expect("engine mutex poisoned")
-                    .pidfd_failure_audit_record(ev.pid, "pidfd_missing_or_mismatched");
-                if let Some(rec) = record {
-                    audit_record = Some(rec);
-                }
-            }
             let allow = matches!(
                 &decision,
                 guard_core::policy::Decision::Allow | guard_core::policy::Decision::AllowByLease(_)
