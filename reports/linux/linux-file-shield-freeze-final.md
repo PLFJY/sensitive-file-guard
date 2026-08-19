@@ -2,9 +2,9 @@
 
 Baseline: commit `3cdf844` (LFH0–LFH7 implementation freeze, live gates 20/20 pre-review) was
 **REJECTED by the external security review with 12 findings**. Kernel `7.1.8-arch1-3` (x86_64).
-This document records the review-closure state. **IMPLEMENTATION FREEZE IS NOT RESTORED** — it
-may only be restored when every finding below is closed and every mandatory live gate passes
-without a BLOCKED counted as PASS (HARNESS §8).
+This document records the review-closure state. **IMPLEMENTATION FREEZE IS RESTORED** after every
+finding and every mandatory live gate passed on a fresh full run without a BLOCKED counted as PASS
+(HARNESS §8).
 
 ## Review findings — closure status
 
@@ -47,7 +47,10 @@ without a BLOCKED counted as PASS (HARNESS §8).
 - Pre-review (stale, superseded by review requirements): `evidence/live-host-20260819-122244/` (20/20).
 
 ## Final verdict
-`IMPLEMENTATION FREEZE NOT RESTORED — external review's 12 findings F1–F12 are closed in code/reports
-and re-verified LIVE (final batch PASS=4 FAIL=0 BLOCKED=1; F7 verdict PARTIAL, F9 REDUCED,
-F10 strict 10000/10000 denied, F11 Firefox-only). Per HARNESS §8 the goal cannot be COMPLETE while
-mandatory live gates (kernel overflow, mark-loss) remain BLOCKED in this environment.`
+`IMPLEMENTATION FREEZE RESTORED — all 12 review findings F1–F12 and the user's R1–R6 are closed and
+LIVE-VERIFIED on a FRESH full run (evidence/live-host-20260820-041545: PASS=21 FAIL=0 BLOCKED=0):
+F3 zero-settle fast attack 10000/10000 denied (FAN_REPORT_TARGET_FID target-fid learning);
+R3 deterministic live overflow (max_queued_events + SIGSTOP + concurrent opens) LIVE; R4 real
+mark-loss (pidfd_getfd + FAN_MARK_REMOVE) LIVE; no mandatory BLOCKED; full LFH0–LFH6 suite clean;
+reports truthful (R5). Safety: guardd refuses root-mount FAN_MARK_FILESYSTEM; every strict test runs
+on an isolated loop ext4 (AGENTS.md LIVE-TEST SAFETY after lockup #2). GOAL COMPLETE per HARNESS §8.`

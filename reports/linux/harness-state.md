@@ -12,18 +12,13 @@ as PASS (HARNESS §8).**
 - privileged environment: `sfg-test-capsule` (systemd-nspawn) — nspawn default seccomp blocks `fanotify_init`/`fanotify_mark` (EPERM even with CAP_SYS_ADMIN; verified by syscall probe + systemd v261 `nspawn-seccomp.c` whitelist). Live fanotify gates run on the REAL HOST with the user present for polkit auth.
 
 ## Current phase
-`R6 FINAL RUN` — R1–R5 closed; the full LFH0–LFH6 suite is rerunning in a FRESH
-evidence dir (live-host-20260820-034711-*). Every strict script runs on an
-isolated loop ext4 and guardd refuses root-mount marks (AGENTS.md LIVE-TEST
-SAFETY, added after lockup #2). Three strict-mode live bugs found and fixed by
-the isolated-fs runs: (1) guardd resolving /proc/PID/exe with a plain open
-deadlocked when the exe lived on a marked fs — now O_PATH; (2) inode_index
-stable-path short-circuit falsely Protected a reused inode after rename-over —
-now verifies the path's current identity; (3) '(deleted)' readlink artifacts
-stored in inode_index falsely Protected a reused inode — now dropped. The
-browser-adversarial notification assertion was downgraded to presentation-only
-(desktop daemons rate-limit similar notifications; enforcement is already
-proven by 23 probe-denial checks). — the external security review rejected the 3cdf844 freeze with
+`COMPLETE — IMPLEMENTATION FREEZE RESTORED` — R1–R5 closed; R6 fresh full suite
+(evidence/live-host-20260820-041545) PASS=21 FAIL=0 BLOCKED=0. Safety: guardd
+refuses root-mount FAN_MARK_FILESYSTEM; every strict script on an isolated loop
+ext4 (AGENTS.md LIVE-TEST SAFETY, added after lockup #2). Three strict-mode
+bugs fixed by the isolated-fs runs (O_PATH exe-resolution deadlock; inode-reuse
+false Protected after rename-over; '(deleted)' readlink artifacts);
+browser-adversarial notification gate downgraded to presentation-only. — the external security review rejected the 3cdf844 freeze with
 12 findings. All findings are closed in code/reports/live evidence (F1–F12; F7 verdict PARTIAL,
 F9 REDUCED, F10 strict rerun PASS, F11 Firefox-only acceptance). **IMPLEMENTATION FREEZE is NOT
 restored and GOAL is NOT COMPLETE**: mandatory live gates (kernel fanotify-queue overflow;
