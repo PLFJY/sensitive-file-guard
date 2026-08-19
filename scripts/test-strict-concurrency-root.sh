@@ -31,7 +31,7 @@ select_test_fs() {
     return
   fi
   LOOP_IMG="$(mktemp /tmp/guard-img-XXXXXX.img)"
-  truncate -s 128M "$LOOP_IMG"
+  truncate -s 512M "$LOOP_IMG"
   LOOP_DEV="$(losetup -f)"
   losetup "$LOOP_DEV" "$LOOP_IMG"
   mkfs.ext4 -q -F "$LOOP_DEV"
@@ -42,10 +42,15 @@ select_test_fs() {
 }
 select_test_fs
 DAEMON_PID=""
+KEEP_WORK="${KEEP_WORK:-0}"
 PIDS=()
 cleanup() {
   for pid in "${PIDS[@]}"; do kill -TERM "$pid" 2>/dev/null || true; done
   if [ -n "$DAEMON_PID" ]; then kill -TERM "$DAEMON_PID" 2>/dev/null || true; wait "$DAEMON_PID" 2>/dev/null || true; fi
+  if [ "$KEEP_WORK" = 1 ]; then
+    echo "KEPT diagnostics at: $WORK (loop $LOOP_DEV still mounted)"
+    return 0
+  fi
   if [ -n "$LOOP_DEV" ]; then
     umount "$LOOP_DEV" 2>/dev/null || true
     losetup -d "$LOOP_DEV" 2>/dev/null || true
@@ -80,8 +85,8 @@ json.dump({"config_version":1,"enforcement_mode":"strict-filesystem","browsers":
 PY
 
 SOCKET="$WORK/guardd.sock"
-"$GUARDD" --enforce-browser-config "$CONFIG" --ipc-socket "$SOCKET" \
-  --audit-db "$WORK/audit.db" >"$WORK/guardd.log" 2>&1 &
+RUST_LOG="${RUST_LOG:-guardd=debug}" "$GUARDD" --enforce-browser-config "$CONFIG" --ipc-socket "$SOCKET" \
+  --audit-db "$WORK/audit.db" --print-decisions >"$WORK/guardd.log" 2>&1 &
 DAEMON_PID=$!
 for _ in $(seq 1 200); do
   [ -S "$SOCKET" ] && "$GUARDCTL" --socket "$SOCKET" --json status >"$WORK/status.json" 2>/dev/null && break

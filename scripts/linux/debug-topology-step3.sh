@@ -9,7 +9,7 @@ OUT="/tmp/objid-debug-$$"
 mkdir -p "$OUT"
 
 LOOP_IMG="$OUT/img.img"; LOOP_MNT="$OUT/mnt"; LOOP_DEV=""
-truncate -s 128M "$LOOP_IMG"
+truncate -s 512M "$LOOP_IMG"
 LOOP_DEV="$(losetup -f)"
 losetup "$LOOP_DEV" "$LOOP_IMG"
 mkfs.ext4 -q -F "$LOOP_DEV"

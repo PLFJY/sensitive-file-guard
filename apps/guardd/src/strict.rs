@@ -362,20 +362,53 @@ impl StrictClassifier {
             index.get(&identity).cloned()
         };
         if let Some(resource) = indexed_resource {
-            if self.identity_index_is_stable(&resource.path)
-                || path_identity(&resource.path).ok() == Some(identity)
-            {
-                return StrictClassification::Protected(resource);
+            // Verify the indexed path's CURRENT identity. The old code
+            // short-circuited on `identity_index_is_stable`, assuming a
+            // "stable" path always points at the indexed object — but a
+            // rename-over replaces the object and frees its inode, and a later
+            // unrelated file can REUSE that inode and be falsely Protected
+            // (observed in strict-concurrency's topology-race: a staging file
+            // reused the replaced cookies inode and was wrongly denied).
+            //
+            // Precise semantics:
+            //   path still resolves to identity  -> Protected (the object)
+            //   path exists but different object -> inode reuse -> drop entry
+            //   path gone (renamed away / deleted)-> keep LFH2 stable-object
+            //     semantics: the inode was indexed under a protected path, an
+            //     open of the same inode elsewhere stays Protected.
+            match path_identity(&resource.path) {
+                Ok(current) if current == identity => {
+                    tracing::debug!(fd_path = %path.display(), ?identity, "classify: inode-index -> Protected");
+                    return StrictClassification::Protected(resource);
+                }
+                Ok(_) => {
+                    // The protected path now names a different object: a
+                    // reused inode must not look protected. Drop the stale
+                    // entry before considering aliases so a reused inode
+                    // cannot poison unrelated applications.
+                    self.inode_index
+                        .write()
+                        .expect("inode index lock poisoned")
+                        .remove(&identity);
+                }
+                Err(_) => {
+                    // Path disappeared. Distinguish two cases:
+                    //  - the indexed path was a "(deleted)" readlink artifact:
+                    //    the REAL path was rename-over replaced and the inode
+                    //    freed — a later file may reuse it, so drop the entry
+                    //    (inode reuse must not look Protected).
+                    //  - a real path vanished: the stable object was renamed
+                    //    away — keep it Protected by inode (LFH2 semantics).
+                    if resource.path.to_string_lossy().ends_with("(deleted)") {
+                        self.inode_index
+                            .write()
+                            .expect("inode index lock poisoned")
+                            .remove(&identity);
+                    } else {
+                        return StrictClassification::Protected(resource);
+                    }
+                }
             }
-
-            // The protected path was a transient tree descendant and has
-            // since disappeared or changed identity.  Drop the stale inode
-            // entry before considering aliases so a reused inode cannot
-            // poison unrelated applications (for example a clipboard DB).
-            self.inode_index
-                .write()
-                .expect("inode index lock poisoned")
-                .remove(&identity);
         }
 
         match fanotify::fd_link_count(fd) {

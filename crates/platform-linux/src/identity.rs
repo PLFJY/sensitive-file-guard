@@ -26,6 +26,7 @@
 //! 4. `Unknown` — anything else (fail closed).
 
 use std::fs;
+use std::os::fd::FromRawFd;
 use std::path::{Path, PathBuf};
 
 use crate::enrollment::EnrollmentStore;
@@ -190,9 +191,34 @@ pub fn resolve(
 /// Open the actual executed image of `pid` (`/proc/<pid>/exe`) and return the
 /// fd. The fd describes the object the process is running, immune to pathname
 /// replacement or unlinking after exec.
+///
+/// Uses `O_PATH` (not a plain `open`): `/proc/<pid>/exe` is a magic link, and
+/// a plain open resolves it to the image on ITS filesystem. If that
+/// filesystem carries a fanotify `FAN_MARK_FILESYSTEM | FAN_OPEN_PERM` mark
+/// (strict mode), the open generates a permission event that only guardd's
+/// own event loop can answer — while guardd is inside that very open, so the
+/// event is never consumed: the daemon wedges in `D` state and every open on
+/// that filesystem blocks (observed full-system lockup in testing). `O_PATH`
+/// opens never fire `FAN_OPEN_PERM` (the kernel skips permission checks for
+/// `O_PATH`), and `fstat` on the `O_PATH` fd still yields the image's
+/// `(dev, ino, mode, uid)`.
 fn executed_image_fd(pid: i32) -> Result<std::fs::File, ResolveError> {
-    std::fs::File::open(format!("/proc/{pid}/exe"))
-        .map_err(|err| ResolveError::ExeRead { pid, err })
+    let c_path =
+        std::ffi::CString::new(format!("/proc/{pid}/exe")).map_err(|_| ResolveError::ExeRead {
+            pid,
+            err: std::io::Error::from(std::io::ErrorKind::InvalidInput),
+        })?;
+    // SAFETY: O_PATH open of /proc/<pid>/exe; not gated by permission marks;
+    // c_path outlives the call.
+    let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return Err(ResolveError::ExeRead {
+            pid,
+            err: std::io::Error::last_os_error(),
+        });
+    }
+    // SAFETY: fd is owned; File::from_raw_fd takes ownership and closes it.
+    Ok(unsafe { std::fs::File::from_raw_fd(fd) })
 }
 
 /// `fstat` an executed-image fd for `(dev, ino, mode, owner_uid)`.

@@ -71,7 +71,7 @@ select_test_fs() {
     return
   fi
   LOOP_IMG="$(mktemp /tmp/guard-objectid-img-XXXXXX.img)"
-  truncate -s 128M "$LOOP_IMG"
+  truncate -s 512M "$LOOP_IMG"
   LOOP_DEV="$(losetup -f)"
   losetup "$LOOP_DEV" "$LOOP_IMG"
   mkfs.ext4 -q -F "$LOOP_DEV"

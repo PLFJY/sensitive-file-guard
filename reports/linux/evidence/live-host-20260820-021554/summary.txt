@@ -1,0 +1,103 @@
+=== [test-pidfd-root] 02:15:54 START ===
+=== [test-pidfd-root] PASS ===
+
+==> LFH1 pidfd root integration summary: PASS=5 FAIL=0 BLOCKED=0
+    (see /tmp/guard-pidfd-6dbeRJ/guardd.log for daemon decision log)
+=== [test-object-identity-root] 02:15:54 START ===
+=== [test-object-identity-root] PASS ===
+
+==> LFH2 object-identity root summary: PASS=8 FAIL=0 BLOCKED=0
+    (see /tmp/guard-objectid-mnt-mndLYU/guardd.log for daemon decision log)
+=== [test-step3-zero-settle-root] 02:15:59 START ===
+=== [test-step3-zero-settle-root] PASS ===
+PASS: guardd exited on SIGTERM
+
+==> LFH2 Step 3 zero-settle summary: PASS=8 FAIL=0 BLOCKED=0
+=== [test-continuity-root] 02:16:02 START ===
+=== [test-continuity-root] PASS ===
+
+==> LFH3 continuity root summary: PASS=14 FAIL=0 BLOCKED=0 MANDATORY_BLOCKED=0
+    (see /tmp/guard-continuity-mnt-BXN6CY/guardd.log for daemon decision log)
+=== [experiment-fdstore-root] 02:16:03 START ===
+=== [experiment-fdstore-root] PASS ===
+VERDICT: PARTIAL (A proven: fdstore preserves the group and queued events;
+         B not recoverable via public UAPI: the read-but-unanswered
+         permission stays pending after restart → crash continuity REDUCED)
+=== [test-browser-enforcement-root] 02:16:11 START ===
+=== [test-browser-enforcement-root] PASS ===
+NOTE: open-before-daemon limitation is documented in reports/phase-06.md:
+      an fd opened BEFORE guardd protection begins cannot be retroactively
+      prevented; fanotify only gates new opens. This is a known V1 boundary.
+=== [test-ssh-enforcement-root] 02:18:11 START ===
+=== [test-ssh-enforcement-root] PASS ===
+      key moves the SAME inode so protection follows the rename. A key
+      re-created at the original path after deletion is NOT protected until
+      re-enrolled (documented in reports/phase-10.md).
+=== [test-fanotify-root] 02:19:12 START ===
+=== [test-fanotify-root] PASS ===
+
+==> Phase 02 root integration summary: PASS=6 FAIL=0 BLOCKED=0
+    (see /tmp/guard-fanotify-rw1QNV/guardd.log for daemon decision log)
+=== [test-bypass-root] 02:19:13 START ===
+=== [test-bypass-root] PASS ===
+==> Phase 13 root bypass summary: PASS=18 FAIL=0 BLOCKED=2
+    （BLOCKED 项是 fanotify 已知限制，详见 docs/安全模型.md）
+    (see /tmp/guard-bypass-UhWHsC/guardd.log for daemon decision log)
+=== [test-hardening-root] 02:20:15 START ===
+=== [test-hardening-root] PASS ===
+PASS: browser replacements converge to denial; SSH replacement remains protected
+=== [test-agent-compat-root] 02:21:16 START ===
+=== [test-agent-compat-root] PASS ===
+NOTE: filesystem denial uses ordinary EPERM/EACCES from the OS. guardd does NOT
+      inject custom text into open(2) errors. Tools use 'guardctl explain --json'
+      + the stable 'reason_code' field to understand denials.
+=== [test-ssh-broker-adversarial-root] 02:22:16 START ===
+=== [test-ssh-broker-adversarial-root] PASS ===
+PASS: daemon/audit/stdout artifacts contain no private-key bytes
+
+==> SSH broker adversarial summary: PASS=29 FAIL=0 BLOCKED=0
+=== [test-ssh-load-root] 02:31:52 START ===
+=== [test-ssh-load-root] PASS ===
+NOTE: documented limitation — once a key is loaded into ssh-agent, same-user
+      malware that can reach SSH_AUTH_SOCK may request signatures. V1 mediates
+      raw private-key file access; it does not fully mediate agent signing.
+=== [test-strict-concurrency-root] 02:38:53 START ===
+=== [test-strict-concurrency-root] FAIL rc=1 ===
+/home/plfjy/sensitive-file-guard/scripts/test-strict-concurrency-root.sh: line 111: 14068 Killed                     "$PROBE" open-bench "$ORDINARY" 20000 > "$WORK/unprotected-$i.json"
+/home/plfjy/sensitive-file-guard/scripts/test-strict-concurrency-root.sh: line 112: 14046 Killed                     "$GUARDD" --enforce-browser-config "$CONFIG" --ipc-socket "$SOCKET" --audit-db "$WORK/audit.db" > "$WORK/guardd.log" 2>&1
+FAIL: 10 concurrent workers failed
+=== [test-topology-race-stress-root] 03:33:23 START ===
+=== [test-topology-race-stress-root] PASS ===
+  time-to-protection p50/p95/p99/max (us): 65/160/238/2410
+PASS: empirical topology-race measurement completed and final inode converged
+NOTE: successful_unauthorized_reads is a measured known gap, not a test PASS claim.
+=== [test-systemd-root] 03:33:25 START ===
+=== [test-systemd-root] PASS ===
+    Removed: /etc/systemd/system/guardd.service, /usr/local/lib/systemd/user/guard-notify.service, /usr/share/polkit-1/actions/org.guardd.policy, /usr/local/share/guardd/guardd-config.example.json, /usr/local/bin/guardd, /usr/local/bin/guardctl, /usr/local/bin/guard-notify (and any obsolete terminal UI binary)
+    Preserved: /etc/guardd (edit to remove), /var/lib/guardd (audit DB)
+==> Uninstall complete
+=== [test-installed-auth-root] 03:34:37 START ===
+=== [test-installed-auth-root] PASS ===
+PASS: guard-notify delivered installed DENY event to the user session
+
+==> Installed authorization summary: PASS=14 FAIL=0 BLOCKED=0
+=== [test-browser-adversarial-root] 03:36:42 START ===
+=== [test-browser-adversarial-root] FAIL rc=1 ===
+Enforcement PASS always means: probe failed + canary absent + new audit DENY.
+Notification delivery is reported independently and cannot make enforcement pass.
+Use KEEP_WORK=1 to retain synthetic logs under: /tmp/guard-mnt-G9O0kk
+=== [test-strict-filesystem-root] 03:37:02 START ===
+=== [test-strict-filesystem-root] FAIL rc=1 ===
+grep: /tmp/guard-mnt-m6zzSw/runtime/probe.out: Operation not permitted
+PASS: Firefox cookies.sqlite denied on the first unauthorized open
+/home/plfjy/sensitive-file-guard/scripts/test-strict-filesystem-root.sh: line 165: /tmp/guard-mnt-m6zzSw/staging/replacement-8-0: Operation not permitted
+=== [test-native-browser-compat-root] 03:37:03 START ===
+=== [test-native-browser-compat-root] PASS ===
+
+==> LFH6 native browser compat summary: PASS=8 FAIL=0 NOT_INSTALLED=5
+    logs: /tmp/guard-lfh6-A6OVzG
+=== [benchmark-strict-filesystem-root] 03:37:27 START ===
+=== [benchmark-strict-filesystem-root] PASS ===
+  strict_alias_scans: 0
+  strict_alias_matches: 0
+PASS: performance benchmark completed with no fanotify overflow or classifier failure

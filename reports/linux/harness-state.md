@@ -12,7 +12,10 @@ as PASS (HARNESS §8).**
 - privileged environment: `sfg-test-capsule` (systemd-nspawn) — nspawn default seccomp blocks `fanotify_init`/`fanotify_mark` (EPERM even with CAP_SYS_ADMIN; verified by syscall probe + systemd v261 `nspawn-seccomp.c` whitelist). Live fanotify gates run on the REAL HOST with the user present for polkit auth.
 
 ## Current phase
-`REVIEW CLOSURE — LIVE RERUN DONE` — the external security review rejected the 3cdf844 freeze with
+`R6 IN FLIGHT` — R1–R5 closed and live-verified; the full LFH0–LFH6 privileged suite
+is rerunning in a fresh evidence dir (live-host-20260820-021554) with every strict
+script on an isolated loop ext4 and guardd refusing root-mount marks (AGENTS.md
+LIVE-TEST SAFETY, added after lockup #2). — the external security review rejected the 3cdf844 freeze with
 12 findings. All findings are closed in code/reports/live evidence (F1–F12; F7 verdict PARTIAL,
 F9 REDUCED, F10 strict rerun PASS, F11 Firefox-only acceptance). **IMPLEMENTATION FREEZE is NOT
 restored and GOAL is NOT COMPLETE**: mandatory live gates (kernel fanotify-queue overflow;

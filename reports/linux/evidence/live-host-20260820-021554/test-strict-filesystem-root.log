@@ -1,0 +1,25 @@
+isolated loop-backed ext4: /dev/loop0 at /tmp/guard-mnt-m6zzSw (never touches root/tmpfs)
+PASS: status exposes ACTIVE strict-filesystem with one deduplicated filesystem mark
+==> Strict namespace first-open matrix (no convergence waits)
+/home/plfjy/sensitive-file-guard/scripts/test-strict-filesystem-root.sh: line 170: /tmp/guard-mnt-m6zzSw/runtime/probe.out: Operation not permitted
+grep: /tmp/guard-mnt-m6zzSw/runtime/probe.out: Operation not permitted
+PASS: Chromium Network/Cookies denied on the first unauthorized open
+/home/plfjy/sensitive-file-guard/scripts/test-strict-filesystem-root.sh: line 170: /tmp/guard-mnt-m6zzSw/runtime/probe.out: Operation not permitted
+grep: /tmp/guard-mnt-m6zzSw/runtime/probe.out: Operation not permitted
+PASS: Chromium Cookies-wal denied on the first unauthorized open
+/home/plfjy/sensitive-file-guard/scripts/test-strict-filesystem-root.sh: line 170: /tmp/guard-mnt-m6zzSw/runtime/probe.out: Operation not permitted
+grep: /tmp/guard-mnt-m6zzSw/runtime/probe.out: Operation not permitted
+PASS: Chromium Cookies-shm denied on the first unauthorized open
+/home/plfjy/sensitive-file-guard/scripts/test-strict-filesystem-root.sh: line 170: /tmp/guard-mnt-m6zzSw/runtime/probe.out: Operation not permitted
+grep: /tmp/guard-mnt-m6zzSw/runtime/probe.out: Operation not permitted
+PASS: Chromium Local State denied on the first unauthorized open
+/home/plfjy/sensitive-file-guard/scripts/test-strict-filesystem-root.sh: line 170: /tmp/guard-mnt-m6zzSw/runtime/probe.out: Operation not permitted
+grep: /tmp/guard-mnt-m6zzSw/runtime/probe.out: Operation not permitted
+PASS: Chromium Session descendant denied on the first unauthorized open
+/home/plfjy/sensitive-file-guard/scripts/test-strict-filesystem-root.sh: line 170: /tmp/guard-mnt-m6zzSw/runtime/probe.out: Operation not permitted
+grep: /tmp/guard-mnt-m6zzSw/runtime/probe.out: Operation not permitted
+PASS: Chromium new-profile Cookies denied on the first unauthorized open
+/home/plfjy/sensitive-file-guard/scripts/test-strict-filesystem-root.sh: line 170: /tmp/guard-mnt-m6zzSw/runtime/probe.out: Operation not permitted
+grep: /tmp/guard-mnt-m6zzSw/runtime/probe.out: Operation not permitted
+PASS: Firefox cookies.sqlite denied on the first unauthorized open
+/home/plfjy/sensitive-file-guard/scripts/test-strict-filesystem-root.sh: line 165: /tmp/guard-mnt-m6zzSw/staging/replacement-8-0: Operation not permitted

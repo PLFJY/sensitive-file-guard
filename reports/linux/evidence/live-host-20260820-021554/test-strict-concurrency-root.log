@@ -1,0 +1,12 @@
+isolated loop-backed ext4: /dev/loop0 at /tmp/guard-mnt-vWQsKG (never touches root/tmpfs)
+==> Concurrent unrelated, allowed, denied, topology, and IPC traffic
+/home/plfjy/sensitive-file-guard/scripts/test-strict-concurrency-root.sh: line 111: 14061 Killed                     "$PROBE" open-bench "$ORDINARY" 20000 > "$WORK/unprotected-$i.json"
+/home/plfjy/sensitive-file-guard/scripts/test-strict-concurrency-root.sh: line 111: 14062 Killed                     "$PROBE" open-bench "$ORDINARY" 20000 > "$WORK/unprotected-$i.json"
+/home/plfjy/sensitive-file-guard/scripts/test-strict-concurrency-root.sh: line 111: 14063 Killed                     "$PROBE" open-bench "$ORDINARY" 20000 > "$WORK/unprotected-$i.json"
+/home/plfjy/sensitive-file-guard/scripts/test-strict-concurrency-root.sh: line 111: 14064 Killed                     "$PROBE" open-bench "$ORDINARY" 20000 > "$WORK/unprotected-$i.json"
+/home/plfjy/sensitive-file-guard/scripts/test-strict-concurrency-root.sh: line 111: 14065 Killed                     "$PROBE" open-bench "$ORDINARY" 20000 > "$WORK/unprotected-$i.json"
+/home/plfjy/sensitive-file-guard/scripts/test-strict-concurrency-root.sh: line 111: 14066 Killed                     "$PROBE" open-bench "$ORDINARY" 20000 > "$WORK/unprotected-$i.json"
+/home/plfjy/sensitive-file-guard/scripts/test-strict-concurrency-root.sh: line 111: 14067 Killed                     "$PROBE" open-bench "$ORDINARY" 20000 > "$WORK/unprotected-$i.json"
+/home/plfjy/sensitive-file-guard/scripts/test-strict-concurrency-root.sh: line 111: 14068 Killed                     "$PROBE" open-bench "$ORDINARY" 20000 > "$WORK/unprotected-$i.json"
+/home/plfjy/sensitive-file-guard/scripts/test-strict-concurrency-root.sh: line 112: 14046 Killed                     "$GUARDD" --enforce-browser-config "$CONFIG" --ipc-socket "$SOCKET" --audit-db "$WORK/audit.db" > "$WORK/guardd.log" 2>&1
+FAIL: 10 concurrent workers failed
