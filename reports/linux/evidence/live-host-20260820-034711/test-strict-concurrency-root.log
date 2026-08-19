@@ -1,0 +1,14 @@
+isolated loop-backed ext4: /dev/loop0 at /tmp/guard-mnt-dvNRdN (never touches root/tmpfs)
+==> Concurrent unrelated, allowed, denied, topology, and IPC traffic
+Concurrent strict health:
+  status: ACTIVE
+  strict_events_total: 180624
+  strict_fast_allowed: 160324
+  protected_events: 20300
+  allowed: 20000
+  denied: 300
+  fanotify_overflows: 0
+  audit_dropped: 0
+  classifier_failures: 0
+  topology_degraded: False
+PASS: bounded concurrent stress completed without deadlock, overflow, or audit loss

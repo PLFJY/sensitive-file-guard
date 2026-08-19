@@ -1,0 +1,69 @@
+isolated loop-backed ext4: /dev/loop0 at /tmp/guard-mnt-DCLIxu (never touches root/tmpfs)
+==> Starting guardd against disposable profiles only
+==> Unauthorized recovery probes
+PASS: ordinary read: open denied, canary absent, audit DENY recorded
+PASS: mmap recovery: open denied, canary absent, audit DENY recorded
+PASS: SQLite query: open denied, canary absent, audit DENY recorded
+PASS: copy then read: open denied, canary absent, audit DENY recorded
+PASS: copy then read: no destination contains the canary
+PASS: symlink: open denied, canary absent, audit DENY recorded
+PASS: hardlink: open denied, canary absent, audit DENY recorded
+PASS: child process: open denied, canary absent, audit DENY recorded
+PASS: Firefox SQLite: open denied, canary absent, audit DENY recorded
+PASS: session-store read: open denied, canary absent, audit DENY recorded
+PASS: renamed protected inode: open denied, canary absent, audit DENY recorded
+==> /proc/PID/fd reopen probe
+PASS: /proc fd: reopen denied and audit DENY proves firewall enforcement
+==> Local-only synthetic exfiltration sink
+PASS: SQLite-to-local-sink: open denied, canary absent, audit DENY recorded
+PASS: unauthorized local sink received zero canary bytes
+PASS: session-to-local-sink: open denied, canary absent, audit DENY recorded
+PASS: unauthorized session sink received zero canary bytes
+==> Explicitly enrolled browser probes
+PASS: explicitly enrolled Chromium probe recovered its own synthetic canary
+PASS: explicitly enrolled Firefox probe recovered its own synthetic canary
+PASS: explicitly enrolled probe sent the canary to the AF_UNIX test sink
+==> Replacement-inode and new nested-resource protection
+PASS: atomic replacement inode: open denied, canary absent, audit DENY recorded
+PASS: new nested session resource: open denied, canary absent, audit DENY recorded
+==> Audit content safety
+PASS: audit and daemon logs contain metadata only, not canary contents
+PASS: guardctl events exposes denied browser-data theft attempts
+==> Desktop notification presentation (separate from enforcement)
+FAIL: desktop delivered 6/15 DENY notifications (errors=9)
+guard-notify: ready baseline_event_id=0
+guard-notify: delivered event_id=1
+guard-notify: desktop notification failed: notify-send exited exit status: 1: Failed to show notification: GDBus.Error:org.freedesktop.Notifications.Error.ExcessNotificationGeneration: Created too many similar notifications in quick succession
+guard-notify: desktop notification failed: notify-send exited exit status: 1: Failed to show notification: GDBus.Error:org.freedesktop.Notifications.Error.ExcessNotificationGeneration: Created too many similar notifications in quick succession
+guard-notify: desktop notification failed: notify-send exited exit status: 1: Failed to show notification: GDBus.Error:org.freedesktop.Notifications.Error.ExcessNotificationGeneration: Created too many similar notifications in quick succession
+guard-notify: desktop notification failed: notify-send exited exit status: 1: Failed to show notification: GDBus.Error:org.freedesktop.Notifications.Error.ExcessNotificationGeneration: Created too many similar notifications in quick succession
+guard-notify: desktop notification failed: notify-send exited exit status: 1: Failed to show notification: GDBus.Error:org.freedesktop.Notifications.Error.ExcessNotificationGeneration: Created too many similar notifications in quick succession
+guard-notify: desktop notification failed: notify-send exited exit status: 1: Failed to show notification: GDBus.Error:org.freedesktop.Notifications.Error.ExcessNotificationGeneration: Created too many similar notifications in quick succession
+guard-notify: desktop notification failed: notify-send exited exit status: 1: Failed to show notification: GDBus.Error:org.freedesktop.Notifications.Error.ExcessNotificationGeneration: Created too many similar notifications in quick succession
+guard-notify: delivered event_id=9
+guard-notify: delivered event_id=10
+guard-notify: desktop notification failed: notify-send exited exit status: 1: Failed to show notification: GDBus.Error:org.freedesktop.Notifications.Error.ExcessNotificationGeneration: Created too many similar notifications in quick succession
+guard-notify: desktop notification failed: notify-send exited exit status: 1: Failed to show notification: GDBus.Error:org.freedesktop.Notifications.Error.ExcessNotificationGeneration: Created too many similar notifications in quick succession
+guard-notify: delivered event_id=13
+guard-notify: delivered event_id=14
+guard-notify: delivered event_id=15
+
+==> Recent audit events (synthetic paths and decision metadata only)
+ID     DECISION       UID    PID      KIND                     BROWSER    PATH
+15     DENY           1000   64689    SessionStore             synthetic-chromium /tmp/guard-mnt-DCLIxu/disposable-chromium/Default/Sessions/new/nested/Session_2
+14     DENY           1000   64662    CookieStore              synthetic-chromium /tmp/guard-mnt-DCLIxu/disposable-chromium/Default/Network/Cookies
+13     DENY           1000   64615    SessionStore             synthetic-chromium /tmp/guard-mnt-DCLIxu/disposable-chromium/Default/Sessions/Session_1
+12     DENY           1000   64572    CookieStore              synthetic-chromium /tmp/guard-mnt-DCLIxu/disposable-chromium/Default/Network/Cookies
+11     DENY           1000   64545    CookieStore              synthetic-chromium /tmp/guard-mnt-DCLIxu/disposable-chromium/Default/Network/Cookies
+10     DENY           1000   64518    CookieStore              synthetic-chromium /tmp/guard-mnt-DCLIxu/disposable-chromium/Default/Network/Cookies
+9      DENY           1000   64495    SessionStore             synthetic-chromium /tmp/guard-mnt-DCLIxu/disposable-chromium/Default/Sessions/Session_1
+8      DENY           1000   64476    CookieStore              synthetic-firefox /tmp/guard-mnt-DCLIxu/disposable-firefox/profile.synthetic/cookies.sqlite
+7      DENY           1000   64455    CookieStore              synthetic-chromium /tmp/guard-mnt-DCLIxu/disposable-chromium/Default/Network/Cookies
+6      DENY           1000   64434    CookieStore              synthetic-chromium /tmp/guard-mnt-DCLIxu/disposable-chromium/Default/Network/Cookies
+5      DENY           1000   64411    CookieStore              synthetic-chromium /tmp/guard-mnt-DCLIxu/disposable-chromium/Default/Network/Cookies
+4      DENY           1000   64389    CookieStore              synthetic-chromium /tmp/guard-mnt-DCLIxu/disposable-chromium/Default/Network/Cookies
+
+==> Defensive adversarial summary: PASS=23 FAIL=1 BLOCKED=0
+Enforcement PASS always means: probe failed + canary absent + new audit DENY.
+Notification delivery is reported independently and cannot make enforcement pass.
+Use KEEP_WORK=1 to retain synthetic logs under: /tmp/guard-mnt-DCLIxu
