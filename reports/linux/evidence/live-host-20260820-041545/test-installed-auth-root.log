@@ -1,0 +1,24 @@
+isolated loop-backed ext4: /dev/loop0 at /tmp/guard-mnt-FX44L1 (never touches root/tmpfs)
+==> Installing real systemd/polkit configuration
+PASS: installed socket is root:guardd-users mode 0660
+PASS: ordinary guardd-users member can query ACTIVE status
+==> Per-UID event isolation
+PASS: ordinary-user installed probe denied
+PASS: ordinary user sees own events and no root events
+PASS: another UID cannot query the test user's/root events
+==> Real polkit denial and authorization
+PASS: explicit real polkit denial prevents owner-valid mutation
+PASS: real polkit accepts a kernel-bound test-user process subject
+PASS: real polkit authorization allows intended owner mutation
+Terminated
+PASS: authorized mutation installed live FAN_OPEN_PERM protection
+==> Installed non-root SSH broker with real polkit authorization
+PASS: ordinary user completed polkit-authorized brokered SSH load
+PASS: disposable trusted agent lists the brokered ephemeral key
+PASS: private-key file remains denied after brokered agent load
+==> Installed user notification service
+Created symlink '/home/plfjy/.config/systemd/user/default.target.wants/guard-notify.service' → '/usr/local/lib/systemd/user/guard-notify.service'.
+PASS: guard-notify user service is active
+PASS: guard-notify delivered installed DENY event to the user session
+
+==> Installed authorization summary: PASS=14 FAIL=0 BLOCKED=0

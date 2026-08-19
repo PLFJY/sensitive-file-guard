@@ -1,0 +1,29 @@
+isolated loop-backed ext4: /dev/loop0 at /tmp/guard-perf-mnt-BpIKVq (never touches the root fs)
+==> A. guardd absent
+==> B. conservative mode
+==> C. strict-filesystem mode
+Performance results:
+state | workload | iterations | wall_ms | opens/sec | p50/p95/p99/max_us | overhead
+absent | unprotected | 100000 | 94.976 | 1052898 | 0.7/0.8/1.0/67.0 | 1.00x
+absent | browser | 10000 | 9.266 | 1079188 | 0.7/0.8/1.0/6.5 | 1.00x
+absent | denied | 2000 | 3.619 | 552580 | 1.4/1.5/1.6/7.5 | 1.00x
+conservative | unprotected | 100000 | 97.602 | 1024571 | 0.8/0.9/1.3/23.1 | 1.03x
+conservative | browser | 10000 | 381.370 | 26221 | 34.9/45.7/86.4/1079.1 | 41.16x
+conservative | denied | 2000 | 85.066 | 23511 | 34.8/81.5/103.7/1401.0 | 23.50x
+strict | unprotected | 100000 | 2074.951 | 48193 | 18.7/25.3/43.2/2157.9 | 21.85x
+strict | browser | 10000 | 398.386 | 25101 | 37.1/47.3/90.8/768.4 | 42.99x
+strict | denied | 2000 | 79.423 | 25181 | 38.4/46.5/74.5/292.9 | 21.94x
+cargo check wall seconds:
+  absent: not measured (SKIP_BUILD)
+  conservative: not measured (SKIP_BUILD)
+  strict: not measured (SKIP_BUILD)
+Strict queue health:
+  strict_events_total: 112006
+  strict_fast_allowed: 100006
+  protected_events: 12000
+  fanotify_overflows: 0
+  audit_dropped: 0
+  classifier_failures: 0
+  strict_alias_scans: 0
+  strict_alias_matches: 0
+PASS: performance benchmark completed with no fanotify overflow or classifier failure

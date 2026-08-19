@@ -1,0 +1,47 @@
+==> Raw private-key access (exact-reader model: denied without a lease)
+PASS: direct private-key read denied without a lease
+PASS: copy private key denied without a lease
+PASS: Rust probe read denied without a lease
+PASS: Python probe read denied without a lease
+PASS: public key remains readable
+==> Kernel-observed stopped-child validation
+PASS: wrong child PID rejected
+PASS: non-child PID rejected
+PASS: running/not-stopped child rejected
+PASS: client-declared fake identity rejected
+PASS: IPC disconnect cannot leave a live SSH load capability
+==> Executable trust and lease identity
+PASS: fake/user-writable ssh-add rejected by guardctl
+cat: /tmp/guard-ssh-broker-adversarial-yjCdZ8/home/.ssh/id_ed25519: Operation not permitted
+PASS: altered executable cannot consume the lease (read denied)
+==> Same-UID malicious agent endpoint
+PASS: malicious same-UID fake agent endpoint rejected
+PASS: fake agent received zero private-key bytes
+==> Minimal execve environment
+PASS: hostile LD_PRELOAD reached guardctl only, not brokered ssh-add
+==> Trusted agent and one-shot lease
+PASS: brokered trusted ssh-agent load is visible in ssh-add -l
+PASS: first ssh-add private-key open recorded ALLOW_BY_LEASE
+PASS: raw read denied after ssh-add exit (fail-closed)
+Identity added: /tmp/guard-ssh-broker-adversarial-yjCdZ8/home/.ssh/id_ed25519 (guard-hardening-pass-2-ephemeral)
+Identity added: /tmp/guard-ssh-broker-adversarial-yjCdZ8/home/.ssh/id_ed25519 (guard-hardening-pass-2-ephemeral)
+PASS: double-open process completed; only first open can consume the lease
+PASS: first open in double-open scenario loaded the ephemeral key
+==> Lease expiration (31 seconds)
+Error loading key "/tmp/guard-ssh-broker-adversarial-yjCdZ8/home/.ssh/id_ed25519": Operation not permitted
+PASS: expired lease denies the read (fail-closed)
+PASS: no key load after lease expiry
+==> Malicious client ignores daemon-pinned endpoint
+Error loading key "/tmp/guard-ssh-broker-adversarial-yjCdZ8/home/.ssh/id_ed25519": Operation not permitted
+PASS: real ssh-add cannot use a lease with an unpinned agent environment
+PASS: non-cooperative post-authorization fake agent received zero private-key bytes
+PASS: trusted agent remained empty after the non-cooperative swap
+==> Post-authorization socket pathname replacement
+Identity added: /tmp/guard-ssh-broker-adversarial-yjCdZ8/home/.ssh/id_ed25519 (guard-hardening-pass-2-ephemeral)
+PASS: root-pinned socket survives original pathname replacement
+PASS: post-swap key reached the preverified system ssh-agent
+PASS: post-authorization fake socket received zero private-key bytes
+==> Audit/log secret-content scan
+PASS: daemon/audit/stdout artifacts contain no private-key bytes
+
+==> SSH broker adversarial summary: PASS=29 FAIL=0 BLOCKED=0

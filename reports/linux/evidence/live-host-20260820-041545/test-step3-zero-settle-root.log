@@ -1,0 +1,24 @@
+isolated loop-backed ext4: /dev/loop0 at /tmp/guard-step3-mnt-iPz8lB
+==> Starting guardd (strict-filesystem, isolated loop fs)
+==> 1. fast attack (rename-in -> immediate rename-out -> immediate open, 10k)
+    FAN_REPORT_TARGET_FID: move events carry the moved file's OWN fid
+    (the last plain-FID record), so the learner learns it directly with
+    no resolution race. Zero-settle, zero recovery is enforceable.
+{"iterations":10000,"successful_unauthorized_reads":0,"denied_reads":10000,"other_errors":0}
+  fast-attack measurement: recovered=0 denied=10000 other=0
+PASS: fast attack: 0 successful unauthorized reads across 10000 iterations (no settle)
+==> 2. SETTLED move-in -> later rename-out -> open (the enforceable guarantee)
+PASS: learner resolved+learned the settled moved object's handle
+  1000 iterations: recovered=0 denied=1000 other=0
+PASS: settled: zero successful unauthorized reads (1000 iterations, no settle)
+==> 3. runtime-created subdirectory becomes marked and the settled attack inside it is denied
+PASS: learner refresh marked the runtime-created subdirectory
+PASS: learner learned the object moved into the runtime-created subdir
+  200 iterations: recovered=0 denied=200 other=0
+PASS: subdir: zero successful unauthorized reads (200 iterations, no settle)
+==> 3. unknown probe denied while enforcement is active (sanity)
+PASS: sanity: unknown probe denied
+==> 4. daemon exits cleanly on SIGTERM
+PASS: guardd exited on SIGTERM
+
+==> LFH2 Step 3 zero-settle summary: PASS=8 FAIL=0 BLOCKED=0

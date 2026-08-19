@@ -1,0 +1,12 @@
+isolated loop-backed ext4: /dev/loop0 at /tmp/guard-mnt-xJCYSr (never touches root/tmpfs)
+==> Building topology race probe and daemon
+==> Running 10000 atomic-replacement/read iterations
+Topology race measurement:
+  iterations                    : 10000
+  successful unauthorized reads : 9971
+  denied reads                  : 29
+  other errors                  : 0
+  time-to-protection samples    : 9971
+  time-to-protection p50/p95/p99/max (us): 63/119/179/1443
+PASS: empirical topology-race measurement completed and final inode converged
+NOTE: successful_unauthorized_reads is a measured known gap, not a test PASS claim.

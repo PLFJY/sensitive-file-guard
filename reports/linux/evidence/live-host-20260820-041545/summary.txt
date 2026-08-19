@@ -1,0 +1,104 @@
+=== [test-pidfd-root] 04:15:45 START ===
+=== [test-pidfd-root] PASS ===
+
+==> LFH1 pidfd root integration summary: PASS=5 FAIL=0 BLOCKED=0
+    (see /tmp/guard-pidfd-Hd4l6L/guardd.log for daemon decision log)
+=== [test-object-identity-root] 04:15:45 START ===
+=== [test-object-identity-root] PASS ===
+
+==> LFH2 object-identity root summary: PASS=8 FAIL=0 BLOCKED=0
+    (see /tmp/guard-objectid-mnt-r4yk9K/guardd.log for daemon decision log)
+=== [test-step3-zero-settle-root] 04:15:51 START ===
+=== [test-step3-zero-settle-root] PASS ===
+PASS: guardd exited on SIGTERM
+
+==> LFH2 Step 3 zero-settle summary: PASS=8 FAIL=0 BLOCKED=0
+=== [test-continuity-root] 04:15:53 START ===
+=== [test-continuity-root] PASS ===
+
+==> LFH3 continuity root summary: PASS=14 FAIL=0 BLOCKED=0 MANDATORY_BLOCKED=0
+    (see /tmp/guard-continuity-mnt-xMKAER/guardd.log for daemon decision log)
+=== [experiment-fdstore-root] 04:15:55 START ===
+=== [experiment-fdstore-root] PASS ===
+VERDICT: PARTIAL (A proven: fdstore preserves the group and queued events;
+         B not recoverable via public UAPI: the read-but-unanswered
+         permission stays pending after restart → crash continuity REDUCED)
+=== [test-browser-enforcement-root] 04:16:02 START ===
+=== [test-browser-enforcement-root] PASS ===
+NOTE: open-before-daemon limitation is documented in reports/phase-06.md:
+      an fd opened BEFORE guardd protection begins cannot be retroactively
+      prevented; fanotify only gates new opens. This is a known V1 boundary.
+=== [test-ssh-enforcement-root] 04:18:02 START ===
+=== [test-ssh-enforcement-root] PASS ===
+      key moves the SAME inode so protection follows the rename. A key
+      re-created at the original path after deletion is NOT protected until
+      re-enrolled (documented in reports/phase-10.md).
+=== [test-fanotify-root] 04:19:02 START ===
+=== [test-fanotify-root] PASS ===
+
+==> Phase 02 root integration summary: PASS=6 FAIL=0 BLOCKED=0
+    (see /tmp/guard-fanotify-8zTBT8/guardd.log for daemon decision log)
+=== [test-bypass-root] 04:19:03 START ===
+=== [test-bypass-root] PASS ===
+==> Phase 13 root bypass summary: PASS=18 FAIL=0 BLOCKED=2
+    （BLOCKED 项是 fanotify 已知限制，详见 docs/安全模型.md）
+    (see /tmp/guard-bypass-SOt4mO/guardd.log for daemon decision log)
+=== [test-hardening-root] 04:20:04 START ===
+=== [test-hardening-root] PASS ===
+PASS: browser replacements converge to denial; SSH replacement remains protected
+=== [test-agent-compat-root] 04:21:05 START ===
+=== [test-agent-compat-root] PASS ===
+NOTE: filesystem denial uses ordinary EPERM/EACCES from the OS. guardd does NOT
+      inject custom text into open(2) errors. Tools use 'guardctl explain --json'
+      + the stable 'reason_code' field to understand denials.
+=== [test-ssh-broker-adversarial-root] 04:22:05 START ===
+=== [test-ssh-broker-adversarial-root] PASS ===
+PASS: daemon/audit/stdout artifacts contain no private-key bytes
+
+==> SSH broker adversarial summary: PASS=29 FAIL=0 BLOCKED=0
+=== [test-ssh-load-root] 04:31:41 START ===
+=== [test-ssh-load-root] PASS ===
+NOTE: documented limitation — once a key is loaded into ssh-agent, same-user
+      malware that can reach SSH_AUTH_SOCK may request signatures. V1 mediates
+      raw private-key file access; it does not fully mediate agent signing.
+=== [test-strict-concurrency-root] 04:38:42 START ===
+=== [test-strict-concurrency-root] PASS ===
+  classifier_failures: 0
+  topology_degraded: False
+PASS: bounded concurrent stress completed without deadlock, overflow, or audit loss
+=== [test-topology-race-stress-root] 04:38:48 START ===
+=== [test-topology-race-stress-root] PASS ===
+  time-to-protection p50/p95/p99/max (us): 63/119/179/1443
+PASS: empirical topology-race measurement completed and final inode converged
+NOTE: successful_unauthorized_reads is a measured known gap, not a test PASS claim.
+=== [test-systemd-root] 04:38:49 START ===
+=== [test-systemd-root] PASS ===
+    Removed: /etc/systemd/system/guardd.service, /usr/local/lib/systemd/user/guard-notify.service, /usr/share/polkit-1/actions/org.guardd.policy, /usr/local/share/guardd/guardd-config.example.json, /usr/local/bin/guardd, /usr/local/bin/guardctl, /usr/local/bin/guard-notify (and any obsolete terminal UI binary)
+    Preserved: /etc/guardd (edit to remove), /var/lib/guardd (audit DB)
+==> Uninstall complete
+=== [test-installed-auth-root] 04:40:01 START ===
+=== [test-installed-auth-root] PASS ===
+PASS: guard-notify delivered installed DENY event to the user session
+
+==> Installed authorization summary: PASS=14 FAIL=0 BLOCKED=0
+=== [test-browser-adversarial-root] 04:42:05 START ===
+=== [test-browser-adversarial-root] PASS ===
+Enforcement PASS always means: probe failed + canary absent + new audit DENY.
+Notification delivery is reported independently and cannot make enforcement pass.
+Use KEEP_WORK=1 to retain synthetic logs under: /tmp/guard-mnt-x2IL1h
+=== [test-strict-filesystem-root] 04:42:25 START ===
+=== [test-strict-filesystem-root] PASS ===
+PASS: strict startup fails closed when a required protected root cannot be marked
+
+Strict filesystem summary: PASS=25 FAIL=0 BLOCKED=0 OBSERVED=1
+=== [test-native-browser-compat-root] 04:42:29 START ===
+=== [test-native-browser-compat-root] PASS ===
+
+==> LFH6 native browser compat summary: PASS=8 FAIL=0 NOT_INSTALLED=5
+    logs: /tmp/guard-lfh6-uWNcEI
+=== [benchmark-strict-filesystem-root] 04:42:53 START ===
+=== [benchmark-strict-filesystem-root] PASS ===
+  strict_alias_scans: 0
+  strict_alias_matches: 0
+PASS: performance benchmark completed with no fanotify overflow or classifier failure
+=== LIVE HOST GATE SUMMARY: PASS=21 FAIL=0 BLOCKED=0 ===
