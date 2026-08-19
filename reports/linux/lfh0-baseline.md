@@ -94,8 +94,8 @@
 | 能力清单真实（本机） | DETECTED (inventory) | guardctl capabilities 输出 |
 | 未知进程读 protected 文件被拒（host fanotify） | PREVENTED | fanotify/browser/strict/bypass suites 全 PASS |
 | `guardctl ssh load` 可用 | PREVENTED | ssh-load 10/10 + ssh-enforcement 27/27 |
-| rename-away 未 open 对象立即受保护 | NOT ACCEPTED | strict suite OBSERVED（LFH2） |
-| 新 inode topology 间隙为零 | NOT ACCEPTED | topology-race measured gap |
+| rename-away 未 open 对象立即受保护 | NOT ACCEPTED @baseline → **CLOSED by review round (F3)** | strict suite OBSERVED（LFH2）；后由启动快照 + topology 组关闭，`test-object-identity-root.sh` live 8/8 含 Step 3 |
+| 新 inode topology 间隙为零 | NOT ACCEPTED @baseline → **CLOSED by review round (F10)** | topology-race measured gap；strict 模式重跑 10000/10000 拒绝、0 未授权读取（evidence/live-host-review-batch-20260819-231529/） |
 | Flatpak/Snap/network FS 受保护 | NOT ACCEPTED | 无 live acceptance |
 | Capsule 内 fanotify 可用 | BLOCKED | nspawn seccomp EPERM（syscall 300/301） |
 
