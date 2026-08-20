@@ -46,9 +46,9 @@ cleanup_stale_test_loops() {
   # mounted. Never touch any other backing device.
   for loop in /dev/loop0 /dev/loop1 /dev/loop2; do
     [ -b "$loop" ] || continue
-    backing="$(losetup "$loop" 2>/dev/null || true)"
+    backing="$(losetup -n -O BACK-FILE "$loop" 2>/dev/null || true)"
     case "$backing" in
-      *'/guard-'*|*'/p0-ssh-'*|*'/p1b-'*|*'/p1c-'*|*'/dac-'*) ;;
+      /guard-*.img*|/p0-ssh-*.img*|/p1b-*.img*|/p1c-*.img*|/dac-*.img*) ;;
       *) continue ;;
     esac
     if findmnt -rn -S "$loop" >/dev/null 2>&1; then
@@ -59,12 +59,12 @@ cleanup_stale_test_loops() {
     # known, unmounted test loop before the next gate instead of letting
     # losetup select an invisible loop3 and misreport an environment failure.
     detached=0
-    for _ in $(seq 1 20); do
+    for _ in $(seq 1 100); do
       if losetup -d "$loop" 2>/dev/null; then
         detached=1
         break
       fi
-      sleep 0.05
+      sleep 0.1
     done
     if [ "$detached" -ne 1 ]; then
       echo "ERROR: could not detach stale synthetic loop $loop: $backing" >&2
