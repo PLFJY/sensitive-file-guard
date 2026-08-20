@@ -26,6 +26,8 @@ goals/LINUX_PLATFORM_FREEZE.md
   - 先完整完成 `LINUX_FILE_SHIELD_FREEZE`；
   - 再完整完成 `LINUX_PROCESS_SHIELD_FREEZE`；
   - 最后做跨层 acceptance。
-  - **当前默认；第一个未完成 sub-goal 是 `RE-CLOSE LINUX_FILE_SHIELD_FREEZE`。**
+  - File Shield 已在 `77dcd75edc3a10b95e4aa3051cd48fe29654e407` 重新 freeze；
+    当前第一个未完成 sub-goal 是 `LINUX_PROCESS_SHIELD_FREEZE` 的 LPS2
+    SecretAuthority evidence collection。
 
 如果用户修改了这里的 Goal，按新的 Goal 执行；不要继续旧 Goal。

@@ -226,30 +226,35 @@ fn do_shield_target(
     seconds: Option<u64>,
     protected_file: Option<&Path>,
 ) -> ExitCode {
-    let mut canary = [0u8; SHIELD_CANARY_LEN];
+    // Heap allocation gives the Linux same-UID ptrace oracle a stable address
+    // for the target's complete lifetime. It is synthetic test metadata only.
+    let mut canary = Box::new([0u8; SHIELD_CANARY_LEN]);
     // Fresh random canary per invocation from the system entropy source.
     if let Ok(mut random) = File::open("/dev/urandom") {
         use std::io::Read as _;
-        let _ = random.read_exact(&mut canary);
+        let _ = random.read_exact(&mut *canary);
     }
     let hex = canary
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     let pid = std::process::id();
-    let ready = format!("{pid} {hex}\n");
+    // The LPS1 parent-only ptrace oracle needs an exact synthetic address to
+    // prove its OFF baseline. This is metadata about a random test canary, not
+    // a browser secret; the oracle reports only match/no-match, never bytes.
+    let ready = format!("{pid} {hex} 0x{:x}\n", canary.as_ptr() as usize);
     if let Err(error) = std::fs::write(ready_file, ready) {
         eprintln!("guard-test-probe: cannot write shield-target ready file: {error}");
         return ExitCode::from(2);
     }
-    println!("SHIELD_TARGET pid={pid} canary={hex}");
+    println!("SHIELD_TARGET pid={pid} ready");
     let _ = std::io::stdout().flush();
     let seconds = seconds.unwrap_or(30);
     let deadline = Instant::now() + Duration::from_secs(seconds);
     while Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(200));
         // Keep the canary reachable so a successful vm_read would find it.
-        let _ = std::hint::black_box(canary);
+        let _ = std::hint::black_box(&*canary);
         if let Some(protected) = protected_file {
             match std::fs::read(protected) {
                 Ok(bytes) => {

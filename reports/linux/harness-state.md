@@ -4,8 +4,10 @@
 
 `LINUX_PLATFORM_FREEZE` is the active goal. The first sub-goal,
 `RE-CLOSE LINUX_FILE_SHIELD_FREEZE`, is **restored at commit
-`77dcd75edc3a10b95e4aa3051cd48fe29654e407`**. Process Shield work has not
-started; Linux Platform Freeze is therefore not complete.
+`77dcd75edc3a10b95e4aa3051cd48fe29654e407`**. Process Shield LPS0 capability
+and LPS1's narrow synthetic ptrace causality oracle are complete; product
+enforcement remains unimplemented. Linux Platform Freeze is therefore not
+complete.
 
 ## Current File Shield verdict
 
@@ -63,9 +65,9 @@ filesystems, or untested browser variants.
   fail-open after stop. The fdstore experiment's stored-group recovery works,
   but a permission event read before a daemon crash cannot be recovered through
   public UAPI. Do not describe this as accepted crash continuity.
-- Process Shield is optional and still inventory-only. Its unsupported or
-  disabled state must never weaken File Shield; its LPS0 probe is the next
-  phase.
+- Process Shield is optional. LPS0 capability and its LPS1 synthetic ptrace
+  oracle are complete, but product enforcement is still disabled. Its
+  unsupported or disabled state must never weaken File Shield.
 - Capsule fanotify results remain container-scoped evidence. The prior capsule
   formal run could not be used as final full evidence because nspawn exposes
   only loop0--2; later synthetic loop allocation selected an invisible loop3.
@@ -88,6 +90,7 @@ user and staged separately. SHA-256:
 
 ## Next action
 
-Start `LINUX_PROCESS_SHIELD_FREEZE` at LPS0: probe actual host and capsule BPF
-LSM capabilities and report supported, disabled, reduced, or blocked status
-without degrading File Shield.
+Continue `LINUX_PROCESS_SHIELD_FREEZE` at LPS2: derive Firefox SecretAuthority
+from real File Shield ALLOW events on disposable profiles. LPS0 already probed
+actual host and capsule BPF LSM capabilities and recorded supported, disabled,
+reduced, or blocked status without degrading File Shield.
