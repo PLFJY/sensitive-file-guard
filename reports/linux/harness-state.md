@@ -11,14 +11,49 @@ live gate BLOCKED counted as PASS (HARNESS §8).** This goal is **COMPLETE** (se
   the fresh full suite passed (HISTORICAL: rejection superseded).
 - kernel: 7.1.8-arch1-3 (x86_64, Arch Linux), fs: / ext4
 - installed browsers: firefox only (chromium/google-chrome/zen NOT installed)
-- privileged environment: `sfg-test-capsule` (systemd-nspawn) — nspawn seccomp blocks fanotify;
-  live fanotify gates run on the REAL HOST via polkit/pkexec.
+- privileged environment: `sfg-test-capsule` (systemd-nspawn) — nspawn seccomp now allows
+  fanotify + pidfd_getfd via `--system-call-filter` (installed 2026-08-20); strict-filesystem
+  live gates mark only fresh capsule-internal tmpfs instances or the host's isolated loop ext4.
 
 ## Current phase
-`COMPLETE — IMPLEMENTATION FREEZE RESTORED, GOAL COMPLETE`.
+`REVIEW REOPENED — P0/P1 (user audit) IN LIVE VERIFICATION; FREEZE NOT RESTORED until closed`.
 
-- **Current authoritative live evidence**: `reports/linux/evidence/live-host-20260820-041545/`
-  — fresh full LFH0–LFH7 privileged suite: **PASS=21 FAIL=0 BLOCKED=0** (summary.txt).
+The user's own post-freeze audit rejected the freeze with one P0 (SSH private-key mmap
+authorization boundary) and five P1 findings (pidfd-invalid terminal no-mutation; topology group
+failure/overflow → persistent health + ambiguous fail-closed; autonomous mark-loss detection;
+topology identity keyed by fsid+handle; parser read_unaligned + unknown-info-type advance). All
+are **closed in code and unit-tested (d1ddd2e + e9380f8); capsule live verification in progress**:
+
+- **P0 SSH mmap — capsule LIVE VERIFIED (PASS=3/3)**: with the key marked
+  `FAN_OPEN_PERM|FAN_ACCESS_PERM`, unknown-process `mmap`/`read` of the private key are denied
+  at open (no readable fd granted); audit records the deny. OPEN_PERM is the authorization
+  boundary; mmap/splice/sendfile/copy_file_range/io_uring all require a readable fd.
+- **P1-a pidfd terminal — live group verified (PASS=5/5) + unit-tested**: FAN_REPORT_PIDFD
+  group accepted, unknown denied, enrolled allowed, `pidfd_missing_events=0`; terminal deny is
+  code-order-verified (before any authority mutation). The mismatch trigger itself (process-exit
+  race) is not deterministically live-testable — documented, not claimed.
+- **P1-b topology overflow — capsule LIVE VERIFIED (PASS=5/5)**: rename burst (44000 FAN_MOVE
+  events) overflows the topology queue (default 16384, no host sysctl mutation) while the daemon
+  is SIGSTOPped → `topology_uncertain` sticky → `file_shield=REDUCED`, and an ambiguous
+  outside-path open that was ALLOWED pre-overflow is DENIED post-overflow (fail-closed).
+- **P1-c autonomous mark-loss — capsule LIVE VERIFIED (PASS=8/8)**: real `FAN_MARK_REMOVE` on
+  the live permission group; the daemon detects it AUTONOMOUSLY (1s event-loop check, no status
+  query), continuity → `LOST(required_filesystem_mark_lost)`, `file_shield=REDUCED`, audit record
+  `required_filesystem_mark_lost` committed (immediate flush, e9380f8); restore keeps LOST sticky;
+  enforcement resumes.
+- **P1-d fsid-keyed topology identity — code + unit-tested; capsule UNAVAILABLE**: tmpfs has no
+  `name_to_handle_at`, so zero-settle/object-identity regressions under `TopologyKey=(fsid,
+  handle_type, handle_bytes)` need the host's isolated loop ext4 (BLOCKED in capsule; host rerun
+  pending).
+- **P1-e parser — unit-tested + live sanity**: `ptr::read_unaligned` + unknown-info-type
+  `off += len` (44000-event capsule burst parsed without looping).
+
+**Capsule caveat (AGENTS.md)**: capsule results are evidence only for what they prove; nspawn
+PID/mount namespaces and seccomp differences are downgraded where relevant (e.g. P1-d above).
+
+- **Previous freeze evidence (HISTORICAL, superseded by this reopened review)**: `evidence/
+  live-host-20260820-041545/` — fresh full LFH0–LFH7 privileged suite **PASS=21 FAIL=0
+  BLOCKED=0** under the pre-P0/P1 code.
   - LFH2 zero-settle (Step 3, R1): `10000` iterations, `successful_unauthorized_reads=0`,
     `denied_reads=10000` (`test-step3-zero-settle-root.sh`).
   - LFH3 continuity (R3/R4): `PASS=14 FAIL=0 BLOCKED=0 MANDATORY_BLOCKED=0`; real kernel
@@ -92,6 +127,8 @@ live gate BLOCKED counted as PASS (HARNESS §8).** This goal is **COMPLETE** (se
   legacy/unsupported); NOT ACCEPTED (Chromium-family, Flatpak/Snap/network FS).**
 
 ## Next exact action
-None — the freeze and review-closure work are complete and live-verified. Subsequent work is
-maintenance: keep the performance gate budget executed by `benchmark-strict-filesystem-root.sh`,
-and keep AGENTS.md LIVE-TEST SAFETY as hard rules.
+Freeze stays REJECTED until the P0/P1 review is closed: finish the remaining host-side live
+reruns (P1-d zero-settle/object-identity under fsid keys on the isolated loop ext4 — capsule
+cannot), then re-run the full suite, then update this file and the freeze report truthfully.
+Capsule fanotify now works (nspawn `--system-call-filter=fanotify_init fanotify_mark
+pidfd_getfd`, installed by the user on 2026-08-20).

@@ -1,0 +1,24 @@
+== super_block identities ==
+root=75 testfs=66314 p1cfs=92
+==> 1. continuity INTACT at startup
+PASS: INTACT|ACTIVE|marks_healthy=True at startup (INTACT|None|ACTIVE|True)
+==> 2. unknown probe denied while INTACT
+PASS: unknown probe denied
+==> 3. remove the REAL kernel filesystem mark on the live group
+    fsmark: pid=10 fanotify_fd=7 action=remove result=ok sdev_before=1 sdev_after=0
+PASS: kernel filesystem mark removed from the live group (sdev_after=0)
+==> 4. AUTONOMOUS detection: sleep 3s with NO status query, then check
+    health after autonomous window: LOST|required_filesystem_mark_lost|REDUCED|False
+PASS: continuity LOST(required_filesystem_mark_lost), file_shield REDUCED (autonomous)
+==> 5. audit DB has the AUTONOMOUS revocation record
+  audit: ('required_filesystem_mark_lost', 'required filesystem mark lost; all leases and pending confirmations revoked (autonomous)')
+PASS: audit records required_filesystem_mark_lost with '(autonomous)'
+==> 6. restore the mark; continuity STAYS LOST (sticky)
+    fsmark: pid=10 fanotify_fd=7 action=restore result=ok sdev_before=0 sdev_after=1
+PASS: kernel filesystem mark restored
+PASS: continuity STAYS LOST after restore (sticky)
+==> 7. enforcement resumed after mark restore (gating back)
+PASS: probe denied again after mark restore
+
+==> P1-c summary: PASS=8 FAIL=0 BLOCKED=0
+p1c rc=0

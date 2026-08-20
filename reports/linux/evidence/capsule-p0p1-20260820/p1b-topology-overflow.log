@@ -1,0 +1,20 @@
+root=75 testfs=66314 p1bfs=92
+==> 1. ACTIVE at startup with topology healthy
+PASS: file_shield ACTIVE, continuity INTACT (ACTIVE|INTACT|None)
+==> 2. ambiguous outside-path open ALLOWED while topology healthy
+PASS: outside-path open allowed pre-overflow (Unrelated)
+==> 3. pre-create 22000 burst files (opens while daemon runs)
+created 22000 files
+    burst files created
+==> 4. SIGSTOP daemon; rename burst -> topology queue overflow (16384)
+renamed 22000 files twice
+    SIGCONT; waiting for daemon to process overflow
+==> 5. topology_uncertain -> file_shield REDUCED (persistent health)
+PASS: file_shield REDUCED after topology overflow (REDUCED|INTACT|None)
+==> 6. ambiguous outside-path open DENIED while topology uncertain
+PASS: outside-path open denied (fail-closed) while topology uncertain
+==> 7. guardd log records the topology overflow (truthfulness)
+PASS: daemon log: topology group overflow recorded
+
+==> P1-b summary: PASS=5 FAIL=0 BLOCKED=0
+p1b rc=0

@@ -1,0 +1,14 @@
+== super_block identities ==
+root  st_dev=75
+testfs st_dev=66314
+p0fs  st_dev=92
+== P0 test ==
+==> P0: unknown process must NOT obtain a readable fd on the private key
+PASS: mmap denied at open (no readable fd granted)
+PASS: plain read denied at open
+==> audit records an SSH open denial with Guard attribution
+PASS: audit records the denied SSH open
+
+==> P0 SSH mmap summary: PASS=3 FAIL=0 BLOCKED=0
+P0 wrapper exit=0
+p0 rc=0

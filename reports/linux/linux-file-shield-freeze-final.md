@@ -1,11 +1,14 @@
 # Linux File Shield — Freeze Review Status (post external security review)
 
 Baseline: commit `3cdf844` (LFH0–LFH7 implementation freeze, live gates 20/20 pre-review) was
-**REJECTED by the external security review with 12 findings** plus the user's R1–R6 follow-up.
-Kernel `7.1.8-arch1-3` (x86_64). This document records the review-closure state. **IMPLEMENTATION
-FREEZE IS RESTORED** after every finding and every mandatory live gate passed on a FRESH full run
-(evidence/live-host-20260820-041545: PASS=21 FAIL=0 BLOCKED=0) without a BLOCKED counted as PASS
-(HARNESS §8).
+**REJECTED by the external security review with 12 findings** plus the user's R1–R6 follow-up,
+and then **REJECTED AGAIN by the user's own post-freeze audit with P0+P1 findings**. Kernel
+`7.1.8-arch1-3` (x86_64). This document records the review-closure state. **IMPLEMENTATION FREEZE
+IS NOT RESTORED** until the P0/P1 review is closed: P0 + P1-a..P1-e are closed in code and
+unit-tested (d1ddd2e, e9380f8); P0/P1-b/P1-c are capsule LIVE VERIFIED; P1-d needs the host
+isolated loop ext4 rerun (capsule tmpfs has no name_to_handle_at). The previous freeze evidence
+(`evidence/live-host-20260820-041545`: PASS=21 FAIL=0 BLOCKED=0) is HISTORICAL / superseded by
+this reopened review.
 
 ## Review findings — closure status
 
@@ -24,31 +27,55 @@ FREEZE IS RESTORED** after every finding and every mandatory live gate passed on
 | F11 | Chromium wording (accepted browser set = Firefox only; Chromium-family NOT ACCEPTED) | CLOSED | native-browser compat 8/8 covers ONLY Firefox; Chromium/Chrome/Zen NOT ACCEPTED |
 | F12 | final quality gates + rerun all affected live gates | CLOSED | **fresh full suite PASS=21 FAIL=0 BLOCKED=0** (live-host-20260820-041545); fmt/clippy/test/diff clean |
 
-## Current posture (FROZEN)
-- **Implementation freeze: RESTORED.** Conditions met: no P0/P1 open, no unexplained browser
-  regression, **no mandatory live gate BLOCKED counted as PASS**, no truthfulness mismatch.
+## Current posture (REVIEW REOPENED — P0/P1 IN LIVE VERIFICATION)
+- **Implementation freeze: NOT RESTORED.** The user's post-freeze audit (P0 SSH mmap boundary;
+  P1-a pidfd terminal no-mutation; P1-b topology fail-closed + persistent health; P1-c autonomous
+  mark-loss; P1-d fsid-keyed topology identity; P1-e parser fixes) is being closed with capsule
+  live verification:
+  - **P0 SSH mmap — capsule LIVE VERIFIED (3/3)**: `FAN_OPEN_PERM` is the authorization boundary;
+    unknown mmap/read of the private key denied at open; audit deny recorded.
+  - **P1-b topology overflow — capsule LIVE VERIFIED (5/5)**: rename burst → topology queue
+    overflow → sticky `topology_uncertain` → `file_shield=REDUCED`; ambiguous outside-path open
+    fails closed (denied) while uncertain.
+  - **P1-c autonomous mark-loss — capsule LIVE VERIFIED (8/8)**: real `FAN_MARK_REMOVE` on the
+    live group detected AUTONOMOUSLY (no status query) within 1s → continuity
+    `LOST(required_filesystem_mark_lost)` + REDUCED + audit committed (immediate flush); sticky;
+    enforcement resumes after mark restore.
+  - **P1-a pidfd terminal — live group verified (5/5) + unit/code-order verified** (mismatch
+    trigger not deterministically live-testable — documented).
+  - **P1-d fsid-keyed topology identity — code + unit-tested; capsule UNAVAILABLE** (tmpfs has
+    no `name_to_handle_at`); host isolated loop ext4 rerun of zero-settle/object-identity
+    regressions pending.
+  - **P1-e parser — unit-tested + live sanity** (44000-event capsule burst parsed cleanly).
 - Accepted browser set: **Firefox only** (`test-native-browser-compat-root.sh` PASS 8/8).
   **Chromium-family (chromium/google-chrome/zen) NOT ACCEPTED** (NOT INSTALLED on this host).
 - fdstore crash continuity: **PARTIAL — Experiment B not recoverable via public UAPI; crash
   continuity REDUCED; fdstore experimental hardening only.**
 - LFH2 never-opened-before rename-in gap: **CLOSED** (cross-group ordering + target-fid learning,
-  zero-settle 10000/10000 denied).
+  zero-settle 10000/10000 denied under the pre-P0/P1 code; fsid-key rerun pending per P1-d).
 - Safety: guardd REFUSES to start when strict-filesystem would mark the root mount (two real
   lockups; AGENTS.md LIVE-TEST SAFETY). This is a **SAFETY REFUSAL**, not fanotify unsupported.
+- Capsule: nspawn seccomp now allows fanotify + pidfd_getfd (`--system-call-filter=fanotify_init
+  fanotify_mark pidfd_getfd`); live gates mark only fresh capsule-internal tmpfs instances.
 
 ## Evidence
-- **Current (authoritative)**: `evidence/live-host-20260820-041545/` — fresh full LFH0–LFH7 suite,
-  **PASS=21 FAIL=0 BLOCKED=0** (continuity R3/R4 LIVE, zero-settle 0 recovery, fdstore PARTIAL).
+- **P0/P1 capsule live verification (2026-08-20)**: capsule runners in
+  `scripts/linux/capsule/` — `p0-capsule-run.sh` (P0 SSH mmap 3/3),
+  `p1b-capsule-run.sh` (topology overflow 5/5), `p1c-capsule-run.sh` (autonomous mark-loss 8/8),
+  plus `test-pidfd-root.sh` live (5/5) and the guardd-exact fanotify matrix probe.
+- **Previous (HISTORICAL / superseded by this reopened review)**: `evidence/live-host-20260820-041545/`
+  — fresh full LFH0–LFH7 suite, **PASS=21 FAIL=0 BLOCKED=0** (continuity R3/R4 LIVE, zero-settle
+  0 recovery, fdstore PARTIAL) under the pre-P0/P1 code.
 - **HISTORICAL / SUPERSEDED**: review batches 1–3 (`live-host-review-batch-20260819-222651`,
   `-231529`, and the R1/R3/R4 step3/continuity runs) and the pre-review 20/20
-  (`live-host-20260819-122244`). Their per-run results were accurate at the time but are superseded
-  by the fresh 041545 run; historical evidence files are unchanged.
+  (`live-host-20260819-122244`). Their per-run results were accurate at the time but are superseded;
+  historical evidence files are unchanged.
 
 ## Final verdict
-`IMPLEMENTATION FREEZE RESTORED, GOAL COMPLETE — all 12 review findings F1–F12 and the user's
-R1–R6 are closed and LIVE-VERIFIED on a FRESH full run (evidence/live-host-20260820-041545:
-PASS=21 FAIL=0 BLOCKED=0): F3 zero-settle fast attack 10000/10000 denied (target-fid);
-R3 deterministic live overflow + R4 real mark-loss LIVE; no mandatory BLOCKED; full suite clean;
-reports truthful. LFH4 remains PARTIAL / crash continuity REDUCED (experimental fdstore, not
-upgraded to ACCEPTED). Safety: guardd refuses root-mount FAN_MARK_FILESYSTEM; every strict test
-runs on an isolated loop ext4 (AGENTS.md LIVE-TEST SAFETY).`
+`FREEZE REJECTED / REVIEW REOPENED — P0 + P1-a..P1-e (user audit) are closed in code and
+unit-tested (d1ddd2e, e9380f8) with capsule live verification: P0 SSH mmap 3/3, P1-b topology
+overflow fail-closed 5/5, P1-c autonomous mark-loss 8/8, P1-a pidfd group 5/5. REMAINING before
+FREEZE: P1-d fsid-keyed zero-settle/object-identity rerun on the host isolated loop ext4
+(capsule tmpfs has no name_to_handle_at — honestly BLOCKED in capsule, not claimed PASS), then a
+fresh full suite, then truthful report update. LFH4 remains PARTIAL / crash continuity REDUCED.
+Safety: guardd refuses root-mount FAN_MARK_FILESYSTEM; capsule marks only fresh tmpfs instances.`
