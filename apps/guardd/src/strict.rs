@@ -1398,6 +1398,7 @@ mod tests {
             }],
             enrolled_exes: Vec::new(),
             ssh_keys: Vec::new(),
+            process_shield_enabled: false,
         }
     }
 

@@ -4,8 +4,19 @@
 //! kernel link; portable policy never sees a BPF map fd. A target entry is an
 //! exact PID plus `/proc` start-time instance, never a browser family or UID.
 
+use std::collections::HashSet;
 use std::ffi::{c_char, c_int, c_void, CString};
+use std::path::PathBuf;
 use std::ptr::NonNull;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::thread::JoinHandle;
+
+use guard_core::resource::BrowserFamily;
+use guard_core::TrustTier;
+use platform_linux::config::BrowserEnrollmentConfig;
 
 #[repr(C)]
 struct BpfObject(c_void);
@@ -44,6 +55,12 @@ unsafe extern "C" {
         value_size: usize,
         flags: u64,
     ) -> c_int;
+    fn bpf_map__delete_elem(
+        map: *const BpfMap,
+        key: *const c_void,
+        key_size: usize,
+        flags: u64,
+    ) -> c_int;
     fn bpf_program__attach_lsm(program: *const BpfProgram) -> *mut BpfLink;
     fn bpf_link__destroy(link: *mut BpfLink) -> c_int;
     fn libbpf_get_error(pointer: *const c_void) -> i64;
@@ -59,6 +76,17 @@ pub struct ProcessShield {
     targets: NonNull<BpfMap>,
     clock_ticks: u32,
 }
+
+pub struct ProcessShieldRuntime {
+    pub active: Arc<AtomicBool>,
+    #[allow(dead_code)] // joins only at teardown; keeping it owns the BPF link.
+    pub handle: JoinHandle<()>,
+}
+
+// libbpf object/link ownership moves once into the dedicated admission thread
+// and is never shared; this opaque C handle therefore has the same Send
+// contract as its owning thread.
+unsafe impl Send for ProcessShield {}
 
 impl ProcessShield {
     pub fn load() -> anyhow::Result<Self> {
@@ -142,6 +170,117 @@ impl ProcessShield {
         }
         Ok(())
     }
+
+    fn remove(&self, pid: u32) -> anyhow::Result<()> {
+        let rc = unsafe {
+            bpf_map__delete_elem(
+                self.targets.as_ptr(),
+                (&pid as *const u32).cast(),
+                std::mem::size_of::<u32>(),
+                0,
+            )
+        };
+        if rc != 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT) {
+            anyhow::bail!(
+                "removing stale Process Shield target: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct FirefoxMainCandidate {
+    uid: u32,
+    exe: PathBuf,
+}
+
+/// Attach LPS3 and maintain its map from kernel-observed executable instances.
+/// Only LPS2's accepted Firefox Main family is considered; unobserved children
+/// and all other families cannot become targets through this path.
+pub fn start_admission(
+    browsers: &[BrowserEnrollmentConfig],
+) -> anyhow::Result<ProcessShieldRuntime> {
+    let candidates = browsers
+        .iter()
+        .filter(|browser| browser.family == BrowserFamily::Firefox)
+        .filter_map(|browser| browser.owner_uid.map(|uid| (uid, &browser.exe_paths)))
+        .flat_map(|(uid, paths)| paths.iter().map(move |path| (uid, path)))
+        .filter_map(|(uid, path)| {
+            std::fs::canonicalize(path)
+                .ok()
+                .map(|exe| FirefoxMainCandidate { uid, exe })
+        })
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        anyhow::bail!("Process Shield enabled but no explicit Firefox Main executable/owner candidate is configured");
+    }
+    let shield = ProcessShield::load()?;
+    let active = Arc::new(AtomicBool::new(true));
+    let loop_active = Arc::clone(&active);
+    let handle = std::thread::Builder::new()
+        .name("guardd-process-shield".into())
+        .spawn(move || admission_loop(shield, candidates, loop_active))?;
+    Ok(ProcessShieldRuntime { active, handle })
+}
+
+fn admission_loop(
+    shield: ProcessShield,
+    candidates: Vec<FirefoxMainCandidate>,
+    active_state: Arc<AtomicBool>,
+) {
+    let mut enrolled = platform_linux::enrollment::EnrollmentStore::new();
+    let mut active = HashSet::new();
+    while !platform_linux::signal::is_shutdown() {
+        let mut current = HashSet::new();
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            tracing::error!("Process Shield cannot enumerate /proc; retaining no new admissions");
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(pid) = entry.file_name().to_string_lossy().parse::<i32>() else {
+                continue;
+            };
+            for candidate in &candidates {
+                let Ok(identity) =
+                    platform_linux::identity::resolve(pid, candidate.uid, &mut enrolled)
+                else {
+                    continue;
+                };
+                if identity.uid != candidate.uid
+                    || identity.stable.exe != candidate.exe
+                    || identity.trust_tier != TrustTier::SystemPackage
+                    || !is_firefox_main(&identity.cmdline)
+                {
+                    continue;
+                }
+                if let Err(error) = shield.admit(identity.stable.pid, identity.stable.start_time) {
+                    tracing::error!(pid = identity.stable.pid, err = %error, "Process Shield admission failed; refusing this target");
+                    continue;
+                }
+                current.insert(identity.stable.pid);
+            }
+        }
+        for pid in active.difference(&current) {
+            if let Err(error) = shield.remove(*pid) {
+                tracing::warn!(pid, err = %error, "Process Shield stale target cleanup failed");
+            }
+        }
+        active = current;
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    active_state.store(false, Ordering::Release);
+}
+
+fn is_firefox_main(argv: &[String]) -> bool {
+    !argv.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "-contentproc" | "-utility" | "-gpu" | "-extension"
+        )
+    })
 }
 
 impl Drop for ProcessShield {

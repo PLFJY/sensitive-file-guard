@@ -1242,6 +1242,7 @@ mod tests {
             browsers: vec![b],
             enrolled_exes: vec![],
             ssh_keys: vec![],
+            process_shield_enabled: false,
         }
     }
 
@@ -1273,6 +1274,7 @@ mod tests {
             ],
             enrolled_exes: vec![],
             ssh_keys: vec![],
+            process_shield_enabled: false,
         }
     }
 
@@ -1576,6 +1578,7 @@ mod tests {
             }],
             enrolled_exes: vec![firefox_elf.clone()],
             ssh_keys: vec![],
+            process_shield_enabled: false,
         };
         let mut engine = EnforcementEngine::from_config(&cfg).expect("engine");
 
@@ -1739,6 +1742,7 @@ mod tests {
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![],
+            process_shield_enabled: false,
         };
         let mut engine = EnforcementEngine::from_config(&cfg).unwrap();
         let (decision, event) = engine.decide_event(4242, -1, true);
@@ -1800,6 +1804,7 @@ mod tests {
             ],
             enrolled_exes: vec![ff_exe.to_path_buf()],
             ssh_keys: vec![],
+            process_shield_enabled: false,
         }
     }
 
@@ -2062,6 +2067,7 @@ mod tests {
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![ssh_key.to_path_buf()],
+            process_shield_enabled: false,
         }
     }
 
@@ -2086,6 +2092,7 @@ mod tests {
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![],
+            process_shield_enabled: false,
         };
         let mut engine = EnforcementEngine::from_config(&cfg).expect("engine");
         let res = engine.protect_ssh_key(&s.private_key).expect("protect");
@@ -2105,6 +2112,7 @@ mod tests {
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![],
+            process_shield_enabled: false,
         };
         let mut engine = EnforcementEngine::from_config(&cfg).expect("engine");
         let err = engine.protect_ssh_key(&s.public_key).unwrap_err();
@@ -2120,6 +2128,7 @@ mod tests {
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![],
+            process_shield_enabled: false,
         };
         let mut engine = EnforcementEngine::from_config(&cfg).expect("engine");
         let err = engine.protect_ssh_key(&s.known_hosts).unwrap_err();
@@ -2502,6 +2511,7 @@ mod tests {
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![],
+            process_shield_enabled: false,
         };
         let mut engine = EnforcementEngine::from_config(&cfg).expect("engine");
         let my_uid = unsafe { libc::getuid() };
@@ -2647,6 +2657,7 @@ mod tests {
             }],
             enrolled_exes: vec![],
             ssh_keys: vec![],
+            process_shield_enabled: false,
         };
         let engine = EnforcementEngine::from_config(&cfg).expect("engine");
 

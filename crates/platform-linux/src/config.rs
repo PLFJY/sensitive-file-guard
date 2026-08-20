@@ -53,6 +53,10 @@ pub struct EnforcementConfig {
     pub enrolled_exes: Vec<PathBuf>,
     #[serde(default)]
     pub ssh_keys: Vec<PathBuf>,
+    /// Optional LPS3 Process Shield. Default-off preserves File Shield-only
+    /// deployments; failure to activate this layer never disables fanotify.
+    #[serde(default)]
+    pub process_shield_enabled: bool,
 }
 
 impl EnforcementConfig {
@@ -276,6 +280,7 @@ mod tests {
             browsers: Vec::new(),
             enrolled_exes: vec![PathBuf::from("/synthetic/exe")],
             ssh_keys: Vec::new(),
+            process_shield_enabled: false,
         }
     }
 
@@ -316,6 +321,7 @@ mod tests {
             browsers: Vec::new(),
             enrolled_exes: vec![PathBuf::from("/synthetic/exe")],
             ssh_keys: Vec::new(),
+            process_shield_enabled: false,
         };
         let error = config.validate().unwrap_err().to_string();
         assert!(

@@ -289,6 +289,21 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
         platform_linux::enrollment::EnrollmentStore::new(),
     );
 
+    // LPS3 admission is deliberately opt-in. If enabled, attach/load failure
+    // aborts startup rather than silently leaving a requested Process Shield
+    // disabled; File Shield-only configurations never enter this path.
+    let process_shield = if cfg.process_shield_enabled {
+        Some(process_shield::start_admission(&cfg.browsers)?)
+    } else {
+        None
+    };
+    let process_shield_active = process_shield
+        .as_ref()
+        .map(|runtime| Arc::clone(&runtime.active))
+        .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    // Keep the thread and its BPF link alive for the daemon lifetime.
+    let _process_shield_handle = process_shield;
+
     // A startup-only fanotify snapshot is not sufficient: browser databases
     // are routinely replaced with new inodes and profiles gain directories at
     // runtime. Refuse ACTIVE startup if the persistent topology watcher cannot
@@ -476,6 +491,7 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
             backend_metrics: Arc::clone(&backend_metrics),
             pending_migrations: Arc::clone(&pending_migrations),
             pending_ssh_reads: Arc::clone(&pending_ssh_reads),
+            process_shield_active: Arc::clone(&process_shield_active),
         };
         Some(
             std::thread::Builder::new()

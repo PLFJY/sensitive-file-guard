@@ -60,6 +60,8 @@ pub struct IpcState {
     pub backend_metrics: Arc<crate::strict::BackendMetrics>,
     pub pending_migrations: Arc<Mutex<PendingMigrationStore>>,
     pub pending_ssh_reads: Arc<Mutex<PendingSshReadStore>>,
+    /// True only after LPS3 attached its temporary BPF LSM link successfully.
+    pub process_shield_active: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -282,7 +284,13 @@ fn handle_status(state: &IpcState, creds: PeerCreds) -> Response {
             // but LPS3 product enforcement has not been installed yet. Keep
             // the optional Process Shield axis truthful without degrading the
             // independent File Shield posture.
-            process_shield: "DISABLED".to_owned(),
+            process_shield: if state.process_shield_active.load(Ordering::Acquire) {
+                // Current LPS3 protects only ptrace and does not yet consume
+                // the BPF audit ring, so it is never advertised as complete.
+                "REDUCED".to_owned()
+            } else {
+                "DISABLED".to_owned()
+            },
             pidfd_enabled: backend.pidfd_enabled,
             pidfd_missing_events: backend.pidfd_missing_events,
         })),
@@ -413,8 +421,7 @@ fn handle_configuration_get(state: &IpcState, _creds: PeerCreds) -> Response {
     Response::ok(ResponseBody::Configuration(ConfigurationInfo {
         enforcement_mode: Some(cfg.enforcement_mode.as_str().to_owned()),
         policy_enabled: None,
-        // Linux has no Process Shield; the toggle is macOS-only (MCH0).
-        process_shield_enabled: None,
+        process_shield_enabled: Some(cfg.process_shield_enabled),
         browsers: cfg
             .browsers
             .iter()
@@ -1678,6 +1685,7 @@ mod tests {
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![fixture.private_key.clone()],
+            process_shield_enabled: false,
         };
         let engine = Arc::new(Mutex::new(
             EnforcementEngine::from_config(&config).expect("engine"),
