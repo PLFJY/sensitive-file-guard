@@ -196,6 +196,47 @@ run_unleased_read() {
   fi
 }
 
+run_scenario_with_blocked_pending() {
+  # Some negative SSH-load cases are recognized ssh-add instances. Their
+  # correct first decision is a fresh confirmation, not an implicit allow or
+  # an artificial synchronous denial. Drive that pending request to a
+  # deterministic BLOCK so this noninteractive gate proves fail-closed
+  # behavior without waiting for a UI timeout.
+  local label="$1"
+  local delay_secs="$2"
+  local output="$3"
+  shift 3
+  local pid_file="$WORK/$label-child.pid"
+  "$@" --child-pid-file "$pid_file" > "$output" &
+  local scenario_pid=$!
+  for _ in $(seq 1 50); do
+    [ -s "$pid_file" ] && break
+    sleep 0.1
+  done
+  if [ ! -s "$pid_file" ]; then
+    fail "$label did not create a stopped ssh-add child"
+    kill -TERM "$scenario_pid" 2>/dev/null || true
+    wait "$scenario_pid" 2>/dev/null || true
+    return 1
+  fi
+  local reader_pid
+  reader_pid="$(cat "$pid_file")"
+  sleep "$delay_secs"
+  if ! wait_for_pending "$reader_pid"; then
+    fail "$label did not enter a fresh SSH-read pending request"
+    kill -TERM "$reader_pid" "$scenario_pid" 2>/dev/null || true
+    wait "$scenario_pid" 2>/dev/null || true
+    return 1
+  fi
+  if ! ipc_request "{\"kind\":\"ssh_read_resolve\",\"id\":\"$PENDING_ID\",\"action\":\"block\"}"; then
+    fail "$label pending read could not be explicitly denied"
+    kill -TERM "$reader_pid" "$scenario_pid" 2>/dev/null || true
+    wait "$scenario_pid" 2>/dev/null || true
+    return 1
+  fi
+  wait "$scenario_pid"
+}
+
 echo "==> Raw private-key access (exact-reader model: denied without a lease)"
 # No SSH-read lease has been granted to any of these unverified readers.
 run_unleased_read direct-private-key-read cat "$KEY"
@@ -333,16 +374,20 @@ fi
 
 echo "==> Lease expiration (31 seconds)"
 ssh-add -D >/dev/null 2>&1 || true
-python3 "$SCENARIOS" expired --socket "$SOCKET" --key "$KEY" \
-  --agent "$AGENT_SOCKET" > "$WORK/expired.json"
+if run_scenario_with_blocked_pending expired-lease 32 "$WORK/expired.json" \
+  python3 "$SCENARIOS" expired --socket "$SOCKET" --key "$KEY" --agent "$AGENT_SOCKET"; then
+  pass "expired lease required a fresh SSH-read confirmation"
+else
+  fail "expired-lease pending scenario failed"
+fi
 if python3 - "$WORK/expired.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1], encoding="utf-8"))
-# After the lease expires, the read must be DENIED (fail-closed): no
-# fallback to an ordinary allowance.
+# After the lease expires, the old lease must not allow the read. The fresh
+# confirmation above was explicitly blocked, so ssh-add exits without key data.
 raise SystemExit(0 if d["response"].get("ok") and d["child_exit"] != 0 else 1)
 PY
-then pass "expired lease denies the read (fail-closed)"; else fail "expired-lease scenario failed"; fi
+then pass "expired lease did not retain read authority"; else fail "expired-lease scenario failed"; fi
 if ssh-add -l >/dev/null 2>&1; then fail "key loaded after lease expiry (should be denied)"; else pass "no key load after lease expiry"; fi
 
 echo "==> Malicious client ignores daemon-pinned endpoint"
@@ -363,9 +408,11 @@ open(sys.argv[2], "wb").write(data)
 PY
 FAKE_AGENT_PID=$!
 for _ in $(seq 1 100); do [ -S "$IGNORE_FAKE_SOCKET" ] && break; sleep 0.01; done
-python3 "$SCENARIOS" ignore-pin-swap --socket "$SOCKET" --key "$KEY" \
-  --agent "$AGENT_SOCKET" --replacement-socket "$IGNORE_FAKE_SOCKET" \
-  > "$WORK/ignore-pin-swap.json"
+if ! run_scenario_with_blocked_pending ignore-pin-swap 0 "$WORK/ignore-pin-swap.json" \
+  python3 "$SCENARIOS" ignore-pin-swap --socket "$SOCKET" --key "$KEY" \
+  --agent "$AGENT_SOCKET" --replacement-socket "$IGNORE_FAKE_SOCKET"; then
+  fail "non-cooperative agent swap pending scenario failed"
+fi
 IGNORE_PINNED_SOCKET="$(python3 - "$WORK/ignore-pin-swap.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1], encoding="utf-8"))

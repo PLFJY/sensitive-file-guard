@@ -132,6 +132,7 @@ def main():
     parser.add_argument("--ssh-add", default="/usr/bin/ssh-add")
     parser.add_argument("--other-pid", type=int)
     parser.add_argument("--replacement-socket")
+    parser.add_argument("--child-pid-file")
     args = parser.parse_args()
     os.environ["SSH_AUTH_SOCK"] = args.agent
 
@@ -213,6 +214,9 @@ def main():
     else:
         pid, writer = stopped_child(args.ssh_add, [args.ssh_add, args.key])
         try:
+            if args.child_pid_file:
+                with open(args.child_pid_file, "w", encoding="ascii") as output:
+                    output.write(str(pid))
             response = authorize(args.socket, args.key, pid)
             pinned_path = authorized_agent(response)
             if args.mode in ("swap-after-authorize", "ignore-pin-swap"):
