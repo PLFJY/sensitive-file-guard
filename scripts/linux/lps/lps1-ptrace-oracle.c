@@ -157,7 +157,10 @@ int main(int argc, char **argv) {
                     strerror(errno), map ? bpf_map__fd(map) : -1, map ? bpf_map__type(map) : -1,
                     (unsigned long long)value.start_jiffies, value.hz); goto done;
         }
-        struct bpf_program *program = bpf_object__find_program_by_name(object, "lps1_ptrace_guard");
+        const char *program_name = getenv("LPS_BPF_PROGRAM");
+        if (!program_name || !program_name[0]) program_name = "lps1_ptrace_guard";
+        struct bpf_program *program = bpf_object__find_program_by_name(object, program_name);
+        if (!program) { fprintf(stderr, "BPF program %s missing\n", program_name); goto done; }
         link = bpf_program__attach_lsm(program);
         if (libbpf_get_error(link)) { fprintf(stderr, "BPF attach failed\n"); goto done; }
         struct bpf_map *events = bpf_object__find_map_by_name(object, "audit");

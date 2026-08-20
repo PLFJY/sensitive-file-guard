@@ -4,11 +4,11 @@
 
 `LINUX_PLATFORM_FREEZE` is the active goal. The first sub-goal,
 `RE-CLOSE LINUX_FILE_SHIELD_FREEZE`, is **restored at commit
-`77dcd75edc3a10b95e4aa3051cd48fe29654e407`**. Process Shield LPS0 capability
-and LPS1's narrow synthetic ptrace causality oracle are complete. LPS2 proves
-only a disposable Firefox Main / Web Storage SecretAuthority candidate; product
-enforcement remains unimplemented. Linux Platform Freeze is therefore not
-complete.
+`77dcd75edc3a10b95e4aa3051cd48fe29654e407`**. Process Shield LPS0 through
+LPS3 are implemented: LPS3 binds only an LPS2-proven disposable Firefox Main
+instance to the ptrace-only BPF map while its File Shield WebStorage open is
+still withheld. The Process Shield remains REDUCED, and Linux Platform Freeze
+is therefore not complete.
 
 ## Current File Shield verdict
 
@@ -66,9 +66,12 @@ filesystems, or untested browser variants.
   fail-open after stop. The fdstore experiment's stored-group recovery works,
   but a permission event read before a daemon crash cannot be recovered through
   public UAPI. Do not describe this as accepted crash continuity.
-- Process Shield is optional. LPS0 capability and its LPS1 synthetic ptrace
-  oracle are complete, but product enforcement is still disabled. Its
-  unsupported or disabled state must never weaken File Shield.
+- Process Shield is optional. With `process_shield_enabled: true`, LPS3
+  attaches a ptrace-only BPF LSM policy and admits an exact Firefox Main only
+  from a pre-response File Shield WebStorage event. The host synthetic oracle
+  proves product-object ptrace causality; `process_vm_*` and `/proc/PID/mem`
+  remain NOT ACCEPTED. Its unsupported or disabled state never weakens File
+  Shield. See `reports/linux/lps3-policy.md`.
 - Capsule fanotify results remain container-scoped evidence. The prior capsule
   formal run could not be used as final full evidence because nspawn exposes
   only loop0--2; later synthetic loop allocation selected an invisible loop3.
@@ -91,7 +94,8 @@ user and staged separately. SHA-256:
 
 ## Next action
 
-Continue `LINUX_PROCESS_SHIELD_FREEZE` at LPS3: implement the narrow lifecycle
-admission and BPF LSM policy only for evidence-proven Firefox Main instances.
-LPS0 already probed actual host and capsule BPF LSM capabilities and recorded
-supported, disabled, reduced, or blocked status without degrading File Shield.
+Continue `LINUX_PROCESS_SHIELD_FREEZE` at LPS4: run the disposable Firefox
+compatibility workload with LPS3 enabled, then proceed to LPS5's per-primitive
+adversarial matrix. LPS0 already probed actual host and capsule BPF LSM
+capabilities and recorded supported, disabled, reduced, or blocked status
+without degrading File Shield.

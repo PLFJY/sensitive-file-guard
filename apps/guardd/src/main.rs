@@ -18,7 +18,6 @@ mod ipc;
 #[cfg(target_os = "linux")]
 mod pending;
 #[cfg(target_os = "linux")]
-#[allow(dead_code)] // LPS3 loader is staged until exact-instance admission is wired.
 mod process_shield;
 #[cfg(target_os = "linux")]
 mod strict;
@@ -293,7 +292,10 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
     // aborts startup rather than silently leaving a requested Process Shield
     // disabled; File Shield-only configurations never enter this path.
     let process_shield = if cfg.process_shield_enabled {
-        Some(process_shield::start_admission(&cfg.browsers)?)
+        Some(process_shield::start_admission(
+            &cfg.browsers,
+            Arc::clone(&audit),
+        )?)
     } else {
         None
     };
@@ -301,6 +303,9 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
         .as_ref()
         .map(|runtime| Arc::clone(&runtime.active))
         .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    let process_shield_admission = process_shield
+        .as_ref()
+        .map(|runtime| runtime.admission.clone());
     // Keep the thread and its BPF link alive for the daemon lifetime.
     let _process_shield_handle = process_shield;
 
@@ -761,7 +766,7 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                 None
             };
 
-            let (decision, audit_record) = if let Some(terminal_audit) = pidfd_terminal_deny {
+            let (mut decision, audit_record) = if let Some(terminal_audit) = pidfd_terminal_deny {
                 (
                     guard_core::policy::Decision::Deny(
                         guard_core::policy::DenyReason::UnknownProcess,
@@ -828,6 +833,36 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                     .decide_event(ev.pid, ev.fd, ev.is_access_perm())
             };
             let mut audit_record = audit_record;
+            // LPS3: admit the exact LPS2 authority while this File Shield
+            // WebStorage OPEN_PERM fd is still withheld. A periodic /proc
+            // scan is deliberately not an admission mechanism: it would
+            // leave a launch-time attack window before the first secret open.
+            if matches!(
+                decision,
+                guard_core::policy::Decision::Allow | guard_core::policy::Decision::AllowByLease(_)
+            ) && ev.has_fd()
+            {
+                if let Some(admission) = process_shield_admission.as_ref() {
+                    let resource = engine
+                        .lock()
+                        .expect("engine mutex poisoned")
+                        .web_storage_resource(ev.fd);
+                    if let Some(resource) = resource {
+                        if let Err(error) = admission.admit_from_file_shield(ev.pid) {
+                            tracing::error!(pid = ev.pid, err = %error, "Process Shield target admission failed before WebStorage open; denying this open");
+                            decision = guard_core::policy::Decision::Deny(
+                                guard_core::policy::DenyReason::UnknownProcess,
+                            );
+                            audit_record = Some(crate::enforce::build_audit_record(
+                                &resource,
+                                None,
+                                decision.clone(),
+                                "process_shield_admission_failed_before_web_storage_open",
+                            ));
+                        }
+                    }
+                }
+            }
             let allow = matches!(
                 &decision,
                 guard_core::policy::Decision::Allow | guard_core::policy::Decision::AllowByLease(_)

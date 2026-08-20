@@ -789,6 +789,16 @@ impl EnforcementEngine {
         self.decide_protected(pid, resource, classify_diag(fd))
     }
 
+    /// Return the exact WebStorage resource represented by an already-open
+    /// fanotify event fd. LPS3 uses this only before responding to an allowed
+    /// OPEN_PERM event, to bind the BPF target before the browser receives a
+    /// readable descriptor. Classification is identity-based and does not
+    /// read file contents.
+    pub fn web_storage_resource(&self, fd: RawFd) -> Option<ProtectedResource> {
+        self.classify_fd(fd)
+            .filter(|resource| resource.kind == ProtectedResourceKind::WebStorage)
+    }
+
     pub fn decide_protected(
         &mut self,
         pid: i32,

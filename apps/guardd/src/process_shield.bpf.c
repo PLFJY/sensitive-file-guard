@@ -51,7 +51,8 @@ int BPF_PROG(guardd_process_shield_ptrace, struct task_struct *child,
 
     // The target itself and root are outside this same-user threat boundary.
     // Unknown same-UID requesters reach the denial below; no browser-tree or
-    // browser-family exemption exists.
+    // browser-family exemption exists. Root is also the daemon's /proc
+    // observer, so denying it here would make its own identity scans recurse.
     unsigned int requester_pid = (unsigned int)bpf_get_current_pid_tgid();
     if (requester_pid == target_pid || (unsigned int)bpf_get_current_uid_gid() == 0)
         return ret;

@@ -188,8 +188,8 @@ if [ "$PROCESS_SHIELD_ENABLED" = true ]; then
     echo "FAIL: requested LPS3 BPF link did not report REDUCED ptrace-only state"
     exit 1
   fi
-  if ! grep -q 'Process Shield admitted exact Firefox Main instance' "$WORK/guardd.log"; then
-    echo "FAIL: LPS3 BPF link was live but no exact Firefox Main instance entered the target map"
+  if ! grep -q 'Process Shield admitted exact Firefox Main from File Shield WebStorage allow' "$WORK/guardd.log"; then
+    echo "FAIL: LPS3 did not admit Firefox from a pre-response File Shield WebStorage allow"
     exit 1
   fi
   echo "LPS3_FIREFOX_MAIN_BPF_ADMISSION_RUNTIME=PASS"
