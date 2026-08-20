@@ -5,13 +5,12 @@
 `LINUX_PLATFORM_FREEZE` is the active goal. The first sub-goal,
 `RE-CLOSE LINUX_FILE_SHIELD_FREEZE`, is **restored at commit
 `77dcd75edc3a10b95e4aa3051cd48fe29654e407`**. Process Shield LPS0 through
-LPS0 through LPS4 are accepted, while LPS5/LPS6 are reopened: an LPS2-proven
+LPS0 through LPS6 are frozen at `4eb6f8059cc19e9be52d32b9dfc724d147ff1118`: an LPS2-proven
 disposable Firefox Main is bound to the exact-instance BPF map before its File
 Shield WebStorage fd is released; LPS4 has zero unexplained Process Shield
-denials; but the fresh physical-host LPS5/LPS6 4/4 manifest proves a
-product-object oracle rather than daemon-integrated attack causality. Process
-Shield remains truthfully REDUCED/optional, and Linux Platform Freeze is not
-complete.
+denials; and the fresh physical-host LPS5/LPS6 5/5 manifest includes a
+daemon-integrated adversarial oracle. Process Shield remains truthfully
+REDUCED/optional, and Linux Platform Freeze is not complete.
 
 ## Current File Shield verdict
 
@@ -98,6 +97,6 @@ user and staged separately. SHA-256:
 
 ## Next action
 
-Continue at LPS5: establish daemon-integrated same-UID attack causality for an
-admitted disposable SecretAuthority, then repeat LPS6 and cross-layer
-acceptance. See `linux-platform-freeze-final.md`.
+Re-run fresh File Shield and cross-layer acceptance at this current HEAD; the
+new test-probe artifact means the earlier File Shield manifest is not itself
+current-head evidence. See `linux-platform-freeze-final.md`.

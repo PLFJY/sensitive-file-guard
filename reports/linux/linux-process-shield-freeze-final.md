@@ -1,17 +1,16 @@
 # Linux Process Shield — Implementation Freeze
 
-Verdict: **REOPENED — product-object scope is proven, but daemon-integrated
-attack causality is not yet accepted.**
+Verdict: **IMPLEMENTATION FREEZE (REDUCED, optional current-host scope).**
 
-The reviewed implementation is commit
-`8bb2213b026dba367138aa4bd28f35517a3ae7a0`. Its fresh physical-host formal
+The frozen implementation is commit
+`4eb6f8059cc19e9be52d32b9dfc724d147ff1118`. Its fresh physical-host formal
 manifest is:
 
 ```text
-/tmp/sfg-process-shield-final-8bb2213b026d
+/tmp/sfg-process-shield-final-4eb6f8059cc1
 ```
 
-It records **4 mandatory PASS, 0 FAIL, 0 BLOCKED** on host kernel
+It records **5 mandatory PASS, 0 FAIL, 0 BLOCKED** on host kernel
 `7.1.8-arch1-3`. Normal-user-built release artifacts were used for the product
 and compatibility gates; the LPS2 authority gate explicitly used normal-user
 built debug `guardd`/`guardctl`, because release audit intentionally does not
@@ -56,6 +55,9 @@ persist ordinary ALLOW events. The manifest records SHA-256 for both sets.
   Shield. Requesting it on an unsupported environment fails daemon startup
   rather than silently claiming it is enabled.
 
-Required next work: a daemon-integrated same-UID adversarial oracle against a
-live File-Shield-admitted disposable SecretAuthority. Only after that causal
-proof can LPS5/LPS6 and cross-layer `LINUX_PLATFORM_FREEZE` close.
+The daemon-integrated adversarial gate now supplies that causal proof: its
+disposable root-owned synthetic Firefox Main completes a real classified
+WebStorage File Shield admission before its same-UID parent attacks it. Every
+claimed primitive has OFF success, ON daemon denial, persisted exact audit, and
+zero canary recovery. The remaining work is fresh current-head File Shield and
+cross-layer platform acceptance.
