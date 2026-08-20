@@ -33,9 +33,14 @@ successfully opened. This is an access firewall, not an antivirus/EDR/DLP.
 A dedicated unattended privileged `systemd-nspawn` test capsule runs on the
 host. It is the ONLY authorized way to run privileged/live Linux tests now.
 
-- **Never use interactive `sudo`, `sudo -S`, `pkexec`, password caching, or
-  any other privileged host command while the capsule is available.** The only
-  host-side privileged entrypoint is `sudo -n /usr/local/sbin/sfg-test-capsule`.
+- **Default to the capsule for every privileged live test.** A physical-host
+  privileged test is permitted only when the user explicitly authorizes it
+  because a capsule namespace/seccomp/capability difference prevents a final
+  conclusion. Use `pkexec`/polkit for that one reviewed command; never ask for,
+  receive, cache, or pipe a password, and never use `sudo -S`. Record the exact
+  host command, the capsule limitation that required it, and keep host and
+  capsule evidence separate. The normal host-side privileged entrypoint remains
+  `sudo -n /usr/local/sbin/sfg-test-capsule`.
 - **Development stays on the host as the normal user**: source editing, `cargo
   build`, normal unit tests, and repository operations never move into the
   capsule.

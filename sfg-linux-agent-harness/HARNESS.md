@@ -82,8 +82,11 @@ sudo -n /usr/local/sbin/sfg-test-capsule exec CMD [ARGS...]
 sudo -n /usr/local/sbin/sfg-test-capsule stop
 ```
 
-- 禁止 interactive `sudo`、`sudo -S`、`pkexec`、密码缓存和任何其它
-  host-side privileged entrypoint。
+- 默认禁止 interactive `sudo`、`sudo -S`、`pkexec`、密码缓存和任何其它
+  host-side privileged entrypoint。仅当用户明确授权且 capsule 的
+  namespace/seccomp/capability 差异阻止最终结论时，才可用 polkit 为一个已审查的
+  最小 host gate 授权；不得请求、接收、缓存或管道传递密码，并必须将 host/capsule
+  证据与精确差异分开记录。
 - 先在 host 以普通用户构建，再向 staging 复制最小 runtime artifact、脚本、
   config 和 synthetic fixture；绝不复制真实 profile、key、cookie 或 token。
 - `/stage` 是只读；破坏性/live workspace 只能在 `/testfs`。测试脚本应接受

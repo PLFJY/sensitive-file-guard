@@ -50,7 +50,9 @@ Guard causality NOT VERIFIED
 - root 只执行 kernel-dependent harness；
 - root harness 使用 synthetic temp directories；
 - root harness 不读取用户真实 `$HOME` 下的 secrets；
-- privilege 仅通过 `sudo -n /usr/local/sbin/sfg-test-capsule`；
+- privilege 默认仅通过 `sudo -n /usr/local/sbin/sfg-test-capsule`；若用户明确
+  授权且 capsule 差异阻止最终结论，可对单一已审查 host gate 使用 polkit，且不得
+  请求、接收、缓存或管道传递密码；
 - `/stage` 只读，破坏性 fixture/evidence 只在 `/testfs`；
 - 不得使用 interactive sudo、`sudo -S`、`pkexec` 或密码缓存；
 - root test exit code 非 0 时必须输出 stage + evidence dir。
