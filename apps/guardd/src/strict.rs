@@ -868,30 +868,51 @@ impl StrictClassifier {
     }
 
     /// handles can be resolved back to paths. Called by the topology learner
-    /// when it marks a directory (startup walk + periodic refresh).
-    pub(crate) fn record_marked_dir(&self, path: &Path) {
-        let c_path = match std::ffi::CString::new(path.to_string_lossy().as_bytes()) {
-            Ok(c) => c,
-            Err(_) => return,
-        };
+    /// when it marks a directory (startup walk + periodic refresh). The
+    /// returned handle is the identity observed *after* the kernel accepted
+    /// the directory mark, so a pathname recreated with a new inode cannot
+    /// inherit bookkeeping for its deleted predecessor.
+    pub(crate) fn record_marked_dir(
+        &self,
+        path: &Path,
+    ) -> std::io::Result<platform_linux::object_handle::ObjectHandle> {
+        let c_path = std::ffi::CString::new(path.to_string_lossy().as_bytes())
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
         // SAFETY: O_PATH open of our own tree; not gated by permission marks.
         let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
         if fd < 0 {
-            return;
+            return Err(std::io::Error::last_os_error());
         }
         let handle = platform_linux::object_handle::ObjectHandle::from_fd(fd);
         let fsid = fsid_of_fd(fd);
         unsafe { libc::close(fd) };
-        let (Ok(handle), Some(fsid)) = (handle, fsid) else {
-            return;
-        };
+        let handle = handle?;
+        let fsid = fsid.ok_or_else(|| {
+            std::io::Error::other("could not determine filesystem id for marked directory")
+        })?;
+        let mut marked = self
+            .marked_dir_handles
+            .write()
+            .expect("marked dir handle map lock poisoned");
+        // Do not let a stale handle from a deleted/recreated pathname resolve
+        // a future topology event to the new directory.
+        marked.retain(|_, recorded_path| recorded_path != path);
+        marked.insert(
+            (fsid, handle.handle_type, handle.handle_bytes.clone()),
+            path.to_path_buf(),
+        );
+        Ok(handle)
+    }
+
+    /// Drop topology parent-handle mappings for directories no longer in the
+    /// live protected tree. The kernel may retain an unlinked directory mark
+    /// briefly; its old identity must never be associated with a recreated
+    /// pathname.
+    pub(crate) fn forget_marked_dir(&self, path: &Path) {
         self.marked_dir_handles
             .write()
             .expect("marked dir handle map lock poisoned")
-            .insert(
-                (fsid, handle.handle_type, handle.handle_bytes.clone()),
-                path.to_path_buf(),
-            );
+            .retain(|_, recorded_path| recorded_path != path);
     }
 
     /// R2: the final "unrelated" verdict for a NON-path-classified open.

@@ -157,4 +157,4 @@ fi
 echo
 echo "==> LFH1 pidfd root integration summary: PASS=$PASS FAIL=$FAIL BLOCKED=$BLOCKED"
 echo "    (see $WORK/guardd.log for daemon decision log)"
-exit $FAIL
+if [ "$FAIL" -gt 0 ]; then exit 1; elif [ "$BLOCKED" -gt 0 ]; then exit 2; else exit 0; fi

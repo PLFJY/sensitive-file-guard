@@ -19,6 +19,7 @@ GUARDD="${GUARDD:-$BIN_DIR/guardd}"
 GUARDCTL="${GUARDCTL:-$BIN_DIR/guardctl}"
 PROBE="${PROBE:-$BIN_DIR/guard-test-probe}"
 SCENARIOS="$REPO/scripts/helpers/ssh-broker-scenarios.py"
+IPC_HELPER="$REPO/scripts/helpers/ipc-request.py"
 WORK="$(mktemp -d -t guard-ssh-broker-adversarial-XXXXXX)"
 GUARDD_PID=""
 AGENT_PID=""
@@ -118,22 +119,93 @@ PY
   then pass "$description"; else fail "$description"; fi
 }
 
+IPC_SEQ=0
+IPC_OUTPUT=""
+ipc_request() {
+  local operation="$1"
+  IPC_SEQ=$((IPC_SEQ + 1))
+  IPC_OUTPUT="$WORK/ipc-$IPC_SEQ.json"
+  timeout 5s python3 "$IPC_HELPER" \
+    --socket "$SOCKET" \
+    --operation-json "$operation" \
+    --output "$IPC_OUTPUT" \
+    --pid-file "$WORK/ipc-$IPC_SEQ.pid"
+}
+
+PENDING_ID=""
+wait_for_pending() {
+  local reader_pid="$1"
+  PENDING_ID=""
+  for _ in $(seq 1 50); do
+    ipc_request '{"kind":"ssh_pending_list"}' || return 1
+    PENDING_ID="$(python3 - "$IPC_OUTPUT" "$reader_pid" <<'PY'
+import json, sys
+document = json.load(open(sys.argv[1], encoding="utf-8"))
+body = document.get("body") or {}
+items = body.get("data", []) if body.get("kind") == "ssh_pending" else []
+pid = int(sys.argv[2])
+print(next((item["id"] for item in items if item.get("pid") == pid), ""))
+PY
+)"
+    [ -n "$PENDING_ID" ] && return 0
+    sleep 0.1
+  done
+  return 1
+}
+
+run_unleased_read() {
+  # An unleased read must be observed at the OPEN_PERM boundary, then denied
+  # explicitly by the test authority. This is both faster and stronger than
+  # mistaking the UI timeout for an authorization decision.
+  local label="$1"
+  shift
+  local output="$WORK/$label.out"
+  local error="$WORK/$label.err"
+  "$@" >"$output" 2>"$error" &
+  local reader_pid=$!
+  if ! wait_for_pending "$reader_pid"; then
+    fail "$label did not enter the pending SSH-read queue"
+    kill -TERM "$reader_pid" 2>/dev/null || true
+    wait "$reader_pid" 2>/dev/null || true
+    return
+  fi
+  if ! ipc_request "{\"kind\":\"ssh_read_resolve\",\"id\":\"$PENDING_ID\",\"action\":\"block\"}"; then
+    fail "$label pending read could not be explicitly denied"
+    kill -TERM "$reader_pid" 2>/dev/null || true
+    wait "$reader_pid" 2>/dev/null || true
+    return
+  fi
+  for _ in $(seq 1 50); do
+    ! kill -0 "$reader_pid" 2>/dev/null && break
+    sleep 0.1
+  done
+  if kill -0 "$reader_pid" 2>/dev/null; then
+    fail "$label remained blocked after explicit denial"
+    kill -TERM "$reader_pid" 2>/dev/null || true
+    wait "$reader_pid" 2>/dev/null || true
+    return
+  fi
+  set +e
+  wait "$reader_pid"
+  local status=$?
+  set -e
+  if [ "$status" -ne 0 ] && [ ! -s "$output" ]; then
+    pass "$label was explicitly denied before returning private-key data"
+  else
+    fail "$label was not denied cleanly (status=$status)"
+  fi
+}
+
 echo "==> Raw private-key access (exact-reader model: denied without a lease)"
-# No SSH-read lease has been granted to any of these unverified readers, so the
-# exact-reader model denies each read (confirmation required, headless deny).
-if cat "$KEY" >/dev/null 2>&1; then fail "direct private-key read allowed without a lease"; else pass "direct private-key read denied without a lease"; fi
-if cp "$KEY" "$WORK/copied-key" 2>/dev/null; then
-  fail "copy private key allowed without a lease"
+# No SSH-read lease has been granted to any of these unverified readers.
+run_unleased_read direct-private-key-read cat "$KEY"
+run_unleased_read private-key-copy cp "$KEY" "$WORK/copied-key"
+if [ -s "$WORK/copied-key" ]; then
+  fail "copy denial still left private-key bytes in the destination"
   rm -f "$WORK/copied-key"
-else
-  pass "copy private key denied without a lease"
 fi
-if "$PROBE" read "$KEY" >/dev/null 2>&1; then fail "Rust probe read allowed without a lease"; else pass "Rust probe read denied without a lease"; fi
-if python3 -c 'import sys; open(sys.argv[1], "rb").read()' "$KEY" 2>/dev/null; then
-  fail "Python probe read allowed without a lease"
-else
-  pass "Python probe read denied without a lease"
-fi
+run_unleased_read rust-probe-private-key-read "$PROBE" read "$KEY"
+run_unleased_read python-private-key-read python3 -c 'import sys; open(sys.argv[1], "rb").read()' "$KEY"
 if [ -s "$PUB" ] && cat "$PUB" >/dev/null; then pass "public key remains readable"; else fail "public key was blocked"; fi
 
 echo "==> Kernel-observed stopped-child validation"
@@ -242,7 +314,7 @@ if grep -q 'AllowByLease' "$WORK/after-load-events.json"; then
 else
   fail "successful broker load has no ALLOW_BY_LEASE audit evidence"
 fi
-if cat "$KEY" >/dev/null 2>&1; then fail "raw read succeeded after ssh-add exit (fail-closed boundary missing)"; else pass "raw read denied after ssh-add exit (fail-closed)"; fi
+run_unleased_read post-lease-raw-private-key-read cat "$KEY"
 
 ssh-add -D >/dev/null 2>&1 || true
 python3 "$SCENARIOS" double-open --socket "$SOCKET" --key "$KEY" \
@@ -380,4 +452,4 @@ fi
 
 echo
 echo "==> SSH broker adversarial summary: PASS=$PASS FAIL=$FAIL BLOCKED=$BLOCKED"
-exit "$FAIL"
+if [ "$FAIL" -gt 0 ]; then exit 1; elif [ "$BLOCKED" -gt 0 ]; then exit 2; else exit 0; fi

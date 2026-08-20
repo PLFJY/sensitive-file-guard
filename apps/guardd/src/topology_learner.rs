@@ -40,7 +40,8 @@
 //! subdirectories are marked; the window between creation and the next refresh
 //! is a documented REDUCED gap for objects moving through a brand-new dir.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use platform_linux::fanotify;
@@ -52,9 +53,10 @@ pub struct TopologyLearner {
     /// The `FAN_CLASS_NOTIF | FAN_REPORT_FID` group (notifications only).
     topology: Arc<fanotify::FanotifyGroup>,
     classifier: Arc<StrictClassifier>,
-    /// Directories already marked for `FAN_MOVE` (avoids re-marking on every
-    /// refresh cycle). Includes the startup recursive walk.
-    marked: std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
+    /// Live directory marks keyed by path and the opaque identity present when
+    /// the mark was installed. A path alone is not stable: an intentionally
+    /// deleted runtime directory can later be recreated with a new inode.
+    marked: std::sync::Mutex<HashMap<PathBuf, platform_linux::object_handle::ObjectHandle>>,
 }
 
 impl TopologyLearner {
@@ -72,7 +74,7 @@ impl TopologyLearner {
         Ok(Self {
             topology,
             classifier,
-            marked: std::sync::Mutex::new(std::collections::HashSet::new()),
+            marked: std::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -82,22 +84,20 @@ impl TopologyLearner {
         self.classifier.snapshot_dynamic_handles()
     }
 
-    /// Recursively mark every directory under each browser root with
-    /// `FAN_MOVE | FAN_EVENT_ON_CHILD` so moves/renames of any child file
-    /// (at any depth) generate a FID event. Records the marked set so the
-    /// periodic refresh only marks NEW directories.
+    /// Mark every live directory under each browser root with `FAN_MOVE |
+    /// FAN_EVENT_ON_CHILD`. Initial setup has no prior live mark set to audit;
+    /// later refreshes reconcile path *and object identity* before marking new
+    /// or recreated directories.
     pub fn mark_trees(&self) -> std::io::Result<usize> {
-        let mut n = 0;
+        let desired = self.desired_live_dirs()?;
         let mut marked = self.marked.lock().expect("marked set lock poisoned");
-        for root in self.classifier.topology_roots() {
-            n += mark_dir_recursive(
-                self.topology.as_ref(),
-                self.classifier.as_ref(),
-                &root,
-                &mut marked,
-            )?;
-        }
-        Ok(n)
+        reconcile_tree_marks(
+            self.topology.as_ref(),
+            self.classifier.as_ref(),
+            &desired,
+            &mut marked,
+            None,
+        )
     }
 
     /// Drain the topology group (shared mutex with the permission hot path)
@@ -130,31 +130,22 @@ impl TopologyLearner {
         }
     }
 
-    /// R1: re-walk the protected trees and mark any directory created since
-    /// the last refresh (or the startup walk). Bounded REDUCED window between
-    /// a subdirectory's creation and its mark is inherent to the cadence.
+    /// Reconcile kernel topology marks with the desired live directory set.
+    /// Intentionally deleted directories are removed from the expected live
+    /// set, while a same-path/new-object directory is marked anew. A count
+    /// shortfall for still-live identities is an unexpected mark loss and is
+    /// returned to the caller to make topology UNCERTAIN sticky.
     fn refresh_tree_marks(&self) -> std::io::Result<usize> {
-        let mut n = 0;
+        let desired = self.desired_live_dirs()?;
         let mut marked = self.marked.lock().expect("marked set lock poisoned");
-        // This group owns only directory move marks. If the kernel no longer
-        // reports every mark we installed, a move may have been missed; do
-        // not silently trust the bookkeeping set or classify outside objects
-        // as unrelated.
         let observed = self.topology.mark_count()?;
-        if observed < marked.len() {
-            return Err(std::io::Error::other(format!(
-                "topology mark loss: observed {observed} live marks, expected at least {}",
-                marked.len()
-            )));
-        }
-        for root in self.classifier.topology_roots() {
-            n += mark_dir_recursive(
-                self.topology.as_ref(),
-                self.classifier.as_ref(),
-                &root,
-                &mut marked,
-            )?;
-        }
+        let n = reconcile_tree_marks(
+            self.topology.as_ref(),
+            self.classifier.as_ref(),
+            &desired,
+            &mut marked,
+            Some(observed),
+        )?;
         if n > 0 {
             tracing::info!(
                 new_dirs = n,
@@ -163,31 +154,169 @@ impl TopologyLearner {
         }
         Ok(n)
     }
+
+    fn desired_live_dirs(
+        &self,
+    ) -> std::io::Result<HashMap<PathBuf, platform_linux::object_handle::ObjectHandle>> {
+        let mut desired = HashMap::new();
+        for root in self.classifier.topology_roots() {
+            collect_live_dirs(&root, &mut desired)?;
+        }
+        Ok(desired)
+    }
 }
 
-fn mark_dir_recursive(
+/// Reconcile directory mark intent with live directory identities. `observed`
+/// is absent during startup, when no prior mark can have been lost.
+fn reconcile_tree_marks(
     group: &fanotify::FanotifyGroup,
     classifier: &StrictClassifier,
-    dir: &Path,
-    marked: &mut std::collections::HashSet<std::path::PathBuf>,
+    desired: &HashMap<PathBuf, platform_linux::object_handle::ObjectHandle>,
+    marked: &mut HashMap<PathBuf, platform_linux::object_handle::ObjectHandle>,
+    observed: Option<usize>,
 ) -> std::io::Result<usize> {
-    let mut n = 0;
-    if !marked.contains(dir) {
-        group.mark_dir_move(dir)?;
-        // Record the dir's handle so move events' parent handles (the fid is
-        // the parent dir on kernel 7.1, never the moved file) resolve back
-        // to a path for `parent/name` identity resolution.
-        classifier.record_marked_dir(dir);
-        // Insert only after the kernel accepted the mark. Otherwise a retry
-        // would be skipped even though this directory was never covered.
-        marked.insert(dir.to_path_buf());
-        n += 1;
+    let (retained, stale_paths, missing_paths) = mark_intent_delta(desired, marked);
+    if let Some(observed) = observed {
+        // The topology group owns only these directory marks. Removed paths
+        // are deliberately excluded: their kernel marks may have disappeared
+        // normally with the directory, and must not make uncertainty sticky.
+        if observed_mark_count_is_insufficient(observed, retained) {
+            return Err(std::io::Error::other(format!(
+                "topology mark loss: observed {observed} marks, expected at least {retained} for live directory identities"
+            )));
+        }
     }
+
+    for path in stale_paths {
+        marked.remove(&path);
+        classifier.forget_marked_dir(&path);
+    }
+
+    let mut added = 0;
+    for path in missing_paths {
+        let expected_identity = desired
+            .get(&path)
+            .expect("missing path must have a desired identity");
+        let installed_identity = mark_live_dir(group, classifier, &path, expected_identity)?;
+        marked.insert(path, installed_identity);
+        added += 1;
+    }
+    Ok(added)
+}
+
+/// Mark a directory and confirm that the marked object is still the object at
+/// the pathname. If an unlink/recreate race occurs between enumeration and
+/// `fanotify_mark`, repeat once for the newly observed identity. This keeps a
+/// normal delete/recreate lifecycle from becoming a false permanent topology
+/// loss while still failing closed if the path will not stabilize.
+fn mark_live_dir(
+    group: &fanotify::FanotifyGroup,
+    classifier: &StrictClassifier,
+    path: &Path,
+    expected_identity: &platform_linux::object_handle::ObjectHandle,
+) -> std::io::Result<platform_linux::object_handle::ObjectHandle> {
+    let mut expected_identity = expected_identity.clone();
+    for attempt in 0..2 {
+        group.mark_dir_move(path)?;
+        let installed_identity = classifier.record_marked_dir(path)?;
+        if installed_identity == expected_identity {
+            return Ok(installed_identity);
+        }
+        // The mark just installed may belong to the old object; retry against
+        // the newly observed object rather than recording a false live mark.
+        expected_identity = installed_identity;
+        if attempt == 1 {
+            return Err(std::io::Error::other(format!(
+                "directory identity kept changing while installing topology mark: {}",
+                path.display()
+            )));
+        }
+    }
+    unreachable!("two attempts either return or fail")
+}
+
+/// Compute which prior marks are still evidence for the current live tree.
+/// A recreated pathname is deliberately both stale (its old identity must be
+/// forgotten) and missing (the new identity needs a fresh kernel mark).
+fn mark_intent_delta(
+    desired: &HashMap<PathBuf, platform_linux::object_handle::ObjectHandle>,
+    marked: &HashMap<PathBuf, platform_linux::object_handle::ObjectHandle>,
+) -> (usize, Vec<PathBuf>, Vec<PathBuf>) {
+    let retained = marked
+        .iter()
+        .filter(|(path, identity)| desired.get(*path) == Some(*identity))
+        .count();
+    let stale = marked
+        .iter()
+        .filter(|(path, identity)| desired.get(*path) != Some(*identity))
+        .map(|(path, _)| path.clone())
+        .collect();
+    let missing = desired
+        .iter()
+        .filter(|(path, identity)| marked.get(*path) != Some(*identity))
+        .map(|(path, _)| path.clone())
+        .collect();
+    (retained, stale, missing)
+}
+
+fn observed_mark_count_is_insufficient(observed: usize, retained: usize) -> bool {
+    observed < retained
+}
+
+fn collect_live_dirs(
+    dir: &Path,
+    desired: &mut HashMap<PathBuf, platform_linux::object_handle::ObjectHandle>,
+) -> std::io::Result<()> {
+    let c_path = std::ffi::CString::new(dir.to_string_lossy().as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    // SAFETY: O_PATH observes directory identity without reading its contents.
+    let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let identity = platform_linux::object_handle::ObjectHandle::from_fd(fd);
+    unsafe { libc::close(fd) };
+    desired.insert(dir.to_path_buf(), identity?);
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         if entry.file_type()?.is_dir() {
-            n += mark_dir_recursive(group, classifier, &entry.path(), marked)?;
+            collect_live_dirs(&entry.path(), desired)?;
         }
     }
-    Ok(n)
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn handle(byte: u8) -> platform_linux::object_handle::ObjectHandle {
+        platform_linux::object_handle::ObjectHandle {
+            mount_id: 1,
+            handle_type: 1,
+            handle_bytes: vec![byte],
+        }
+    }
+
+    #[test]
+    fn recreated_path_is_not_treated_as_the_deleted_directory() {
+        let old_path = PathBuf::from("/synthetic/profile/runtime");
+        let marked = HashMap::from([(old_path.clone(), handle(1))]);
+        let desired = HashMap::from([(old_path.clone(), handle(2))]);
+
+        let (retained, stale, missing) = mark_intent_delta(&desired, &marked);
+        assert_eq!(retained, 0, "new object must not inherit old mark intent");
+        assert_eq!(stale, vec![old_path.clone()]);
+        assert_eq!(missing, vec![old_path]);
+    }
+
+    #[test]
+    fn missing_mark_for_a_live_identity_is_detectable() {
+        let retained_live_marks = 3usize;
+        let observed = 2usize;
+        assert!(observed_mark_count_is_insufficient(
+            observed,
+            retained_live_marks
+        ));
+    }
 }

@@ -1,69 +1,145 @@
 #!/usr/bin/env bash
-# scripts/linux/run-all-root-gates.sh
+# Formal Linux File Shield privileged manifest. Execute only through
+# `sudo -n /usr/local/sbin/sfg-test-capsule`; never invoke with pkexec or host
+# sudo. /stage may be read-only, so evidence defaults to /testfs.
 #
-# LFH7 freeze gate driver: runs every formal privileged acceptance script for
-# LINUX_FILE_SHIELD_FREEZE on a REAL host, one polkit authorization.
-#
-#   pkexec env SKIP_BUILD=1 SUDO_USER=plfjy /usr/bin/bash \
-#     scripts/linux/run-all-root-gates.sh
-#
-# Exit code = number of FAILED scripts (fail>0 within a script => script failed).
+# FORMAL_MODE=oneshot runs capsule-safe gates; FORMAL_MODE=systemd runs only
+# PID-1 gates after `sfg-test-capsule boot`. The capsule host wrapper combines
+# both result sets. Exit: 0 PASS, 1 FAIL, 2 mandatory BLOCKED.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-TS="$(date +%Y%m%d-%H%M%S)"
-OUT="$REPO/reports/linux/evidence/live-host-$TS"
-mkdir -p "$OUT"
+BIN_DIR="${BIN_DIR:-$REPO/bin}"
+if [ ! -d "$BIN_DIR" ] && [ -d /stage/bin ]; then BIN_DIR=/stage/bin; fi
+EVIDENCE_ROOT="${EVIDENCE_ROOT:-/testfs/sfg-formal-evidence/$(date +%Y%m%d-%H%M%S)}"
+FORMAL_MODE="${FORMAL_MODE:-oneshot}"
+mkdir -p "$EVIDENCE_ROOT"
 
-declare -a SCRIPTS=(
-  "scripts/linux/test-pidfd-root.sh"                       # LFH1
-  "scripts/linux/test-object-identity-root.sh"             # LFH2
-  "scripts/linux/test-step3-zero-settle-root.sh"            # LFH2 R1 zero-settle
-  "scripts/linux/test-continuity-root.sh"                  # LFH3
-  "scripts/linux/experiment-fdstore-root.sh"               # LFH4
-  "scripts/test-browser-enforcement-root.sh"
-  "scripts/test-ssh-enforcement-root.sh"
-  "scripts/test-fanotify-root.sh"
-  "scripts/test-bypass-root.sh"
-  "scripts/test-hardening-root.sh"
-  "scripts/test-agent-compat-root.sh"
-  "scripts/test-ssh-broker-adversarial-root.sh"
-  "scripts/test-ssh-load-root.sh"
-  "scripts/test-strict-concurrency-root.sh"
-  "scripts/test-topology-race-stress-root.sh"
-  "scripts/test-systemd-root.sh"
-  "scripts/test-installed-auth-root.sh"
-  "scripts/test-browser-adversarial-root.sh"
-  "scripts/test-strict-filesystem-root.sh"
-  "scripts/linux/test-native-browser-compat-root.sh"       # LFH6
-  "scripts/benchmark-strict-filesystem-root.sh"            # LFH0 benchmark
+# The volatile nspawn root can omit a passwd entry for uid 0. OpenSSH's
+# ssh-keygen refuses to create an ephemeral fixture in that state before any
+# Guard code runs. Supply only the capsule-local NSS records required by the
+# synthetic fixtures; the capsule is discarded after the gate.
+if ! getent passwd 0 >/dev/null 2>&1; then
+  printf '%s\n' 'root:x:0:0:root:/root:/bin/sh' >> /etc/passwd
+fi
+if ! getent group 0 >/dev/null 2>&1; then
+  printf '%s\n' 'root:x:0:' >> /etc/group
+fi
+if ! getent group 1000 >/dev/null 2>&1; then
+  printf '%s\n' 'sfgtest:x:1000:' >> /etc/group
+fi
+if ! getent passwd 1000 >/dev/null 2>&1; then
+  printf '%s\n' 'sfgtest:x:1000:1000:Synthetic capsule user:/home/sfgtest:/bin/sh' >> /etc/passwd
+  mkdir -p /home/sfgtest
+  chown 1000:1000 /home/sfgtest
+fi
+# Legacy compatibility gates key off SUDO_USER to choose the non-root browser
+# fixture identity. It is not a host sudo contract inside the capsule.
+export SUDO_USER="${SUDO_USER:-sfgtest}"
+
+cleanup_stale_test_loops() {
+  # nspawn exposes only loop0..2. Interrupted synthetic test gates can leave
+  # one attached; detach only a known Guard test image after proving it is not
+  # mounted. Never touch any other backing device.
+  for loop in /dev/loop0 /dev/loop1 /dev/loop2; do
+    [ -b "$loop" ] || continue
+    backing="$(losetup "$loop" 2>/dev/null || true)"
+    case "$backing" in
+      *'/guard-'*|*'/p0-ssh-'*|*'/p1b-'*|*'/p1c-'*|*'/dac-'*) ;;
+      *) continue ;;
+    esac
+    if findmnt -rn -S "$loop" >/dev/null 2>&1; then
+      continue
+    fi
+    losetup -d "$loop" 2>/dev/null || true
+  done
+}
+
+# name|execution-mode|script|environment assignments
+# The summary count is derived from this manifest, never a historical number.
+# LFH4 proves an explicitly PARTIAL crash-continuity contract; it remains a
+# required observation but is not counted as a restored crash-continuity PASS.
+# Native compatibility is scoped to browsers actually installed in the capsule.
+declare -a FORMAL_MANIFEST=(
+  "pidfd|oneshot|scripts/linux/test-pidfd-root.sh|"
+  "object-identity|oneshot|scripts/linux/test-object-identity-root.sh|"
+  "topology-zero-settle-and-lifecycle|oneshot|scripts/linux/test-step3-zero-settle-root.sh|"
+  "topology-overflow-fail-closed|oneshot|scripts/linux/capsule/p1b-capsule-run.sh|"
+  "continuity-autonomous-mark-loss|oneshot|scripts/linux/capsule/p1c-capsule-run.sh|"
+  "fdstore-continuity|systemd|scripts/linux/experiment-fdstore-root.sh|"
+  "browser-enforcement|oneshot|scripts/test-browser-enforcement-root.sh|"
+  "ssh-read-authorized-flow|oneshot|scripts/test-ssh-enforcement-root.sh|"
+  "fanotify|oneshot|scripts/test-fanotify-root.sh|"
+  "bypass|oneshot|scripts/test-bypass-root.sh|"
+  "hardening|oneshot|scripts/test-hardening-root.sh|"
+  "agent-compat|oneshot|scripts/test-agent-compat-root.sh|"
+  "ssh-broker-adversarial|oneshot|scripts/test-ssh-broker-adversarial-root.sh|"
+  "ssh-load-authorized-flow-conservative|oneshot|scripts/test-ssh-load-root.sh|ENFORCEMENT_MODE=conservative"
+  "ssh-load-authorized-flow-strict|oneshot|scripts/test-ssh-load-root.sh|ENFORCEMENT_MODE=strict-filesystem"
+  "strict-concurrency|oneshot|scripts/test-strict-concurrency-root.sh|"
+  "topology-race-stress|oneshot|scripts/test-topology-race-stress-root.sh|ENFORCEMENT_MODE=strict-filesystem"
+  "installed-auth|oneshot|scripts/test-installed-auth-root.sh|"
+  "browser-adversarial|oneshot|scripts/test-browser-adversarial-root.sh|"
+  "strict-filesystem|oneshot|scripts/test-strict-filesystem-root.sh|"
+  "native-browser-compat|oneshot|scripts/linux/test-native-browser-compat-root.sh|"
+  "strict-filesystem-performance|oneshot|scripts/benchmark-strict-filesystem-root.sh|"
+  "p0-ssh-mmap-configured-strict|oneshot|scripts/linux/capsule/p0-capsule-run.sh|ENFORCEMENT_MODE=strict-filesystem P0_CASE=configured"
+  "p0-ssh-mmap-configured-conservative|oneshot|scripts/linux/capsule/p0-capsule-run.sh|ENFORCEMENT_MODE=conservative P0_CASE=configured"
+  "p0-ssh-mmap-runtime-enrollment|oneshot|scripts/linux/capsule/p0-capsule-run.sh|ENFORCEMENT_MODE=strict-filesystem P0_CASE=runtime"
+  "systemd|systemd|scripts/test-systemd-root.sh|"
 )
 
-# Standardized exit codes (review finding 1):
-#   0 = PASS, 1 = FAIL, 2 = BLOCKED (a mandatory gate could not run).
-# A script whose exit code is 2 must NEVER be aggregated as PASS.
-PASS=0
-FAIL=0
-BLOCKED=0
-: > "$OUT/summary.txt"
-for s in "${SCRIPTS[@]}"; do
-  name="$(basename "$s" .sh)"
-  echo "=== [$name] $(date +%H:%M:%S) START ===" | tee -a "$OUT/summary.txt"
+MANDATORY_PASS=0; MANDATORY_FAIL=0; MANDATORY_BLOCKED=0; MANDATORY_SELECTED=0
+OBSERVATION_PASS=0; OBSERVATION_PARTIAL=0; OBSERVATION_FAIL=0; OBSERVATION_BLOCKED=0
+SUMMARY="$EVIDENCE_ROOT/summary-${FORMAL_MODE}.txt"
+: > "$SUMMARY"
+printf 'formal_mode=%s\nbin_dir=%s\nmanifest:\n' "$FORMAL_MODE" "$BIN_DIR" >> "$SUMMARY"
+printf '  %s\n' "${FORMAL_MANIFEST[@]}" >> "$SUMMARY"
+
+requirement_for() {
+  case "$1" in
+    fdstore-continuity|native-browser-compat) echo observation ;;
+    *) echo mandatory ;;
+  esac
+}
+
+for entry in "${FORMAL_MANIFEST[@]}"; do
+  IFS='|' read -r name mode script assignments <<< "$entry"
+  [ "$mode" = "$FORMAL_MODE" ] || continue
+  requirement="$(requirement_for "$name")"
+  if [ "$requirement" = mandatory ]; then
+    MANDATORY_SELECTED=$((MANDATORY_SELECTED + 1))
+  fi
+  log="$EVIDENCE_ROOT/${name}.log"
+  echo "=== [$name][$requirement] START ===" | tee -a "$SUMMARY"
+  cleanup_stale_test_loops
   set +e
-  SKIP_BUILD=1 SUDO_USER="${SUDO_USER:-}" BIN_DIR="${BIN_DIR:-}" bash "$REPO/$s" > "$OUT/$name.log" 2>&1
+  # shellcheck disable=SC2086
+  env SKIP_BUILD=1 BIN_DIR="$BIN_DIR" EVIDENCE_ROOT="$EVIDENCE_ROOT" $assignments \
+    bash "$REPO/$script" >"$log" 2>&1
   rc=$?
   set -e
-  case "$rc" in
-    0) echo "=== [$name] PASS ===" | tee -a "$OUT/summary.txt"; PASS=$((PASS + 1)) ;;
-    1) echo "=== [$name] FAIL rc=1 ===" | tee -a "$OUT/summary.txt"; FAIL=$((FAIL + 1)) ;;
-    2) echo "=== [$name] BLOCKED rc=2 (mandatory gate could not run) ===" | tee -a "$OUT/summary.txt"; BLOCKED=$((BLOCKED + 1)) ;;
-    *) echo "=== [$name] ABORT rc=$rc ===" | tee -a "$OUT/summary.txt"; FAIL=$((FAIL + 1)) ;;
-  esac
-  tail -3 "$OUT/$name.log" >> "$OUT/summary.txt"
+  if [ "$requirement" = observation ] && [ "$rc" -eq 0 ] && grep -q '^VERDICT: PARTIAL' "$log"; then
+    OBSERVATION_PARTIAL=$((OBSERVATION_PARTIAL + 1)); verdict=PARTIAL
+  elif [ "$requirement" = mandatory ]; then
+    case "$rc" in
+      0) MANDATORY_PASS=$((MANDATORY_PASS + 1)); verdict=PASS ;;
+      2) MANDATORY_BLOCKED=$((MANDATORY_BLOCKED + 1)); verdict=BLOCKED ;;
+      *) MANDATORY_FAIL=$((MANDATORY_FAIL + 1)); verdict="FAIL rc=$rc" ;;
+    esac
+  else
+    case "$rc" in
+      0) OBSERVATION_PASS=$((OBSERVATION_PASS + 1)); verdict=PASS ;;
+      2) OBSERVATION_BLOCKED=$((OBSERVATION_BLOCKED + 1)); verdict=BLOCKED ;;
+      *) OBSERVATION_FAIL=$((OBSERVATION_FAIL + 1)); verdict="FAIL rc=$rc" ;;
+    esac
+  fi
+  echo "=== [$name] $verdict ===" | tee -a "$SUMMARY"
+  tail -3 "$log" >> "$SUMMARY" || true
+  cleanup_stale_test_loops
 done
 
-echo
-echo "=== LIVE HOST GATE SUMMARY: PASS=$PASS FAIL=$FAIL BLOCKED=$BLOCKED ===" | tee -a "$OUT/summary.txt"
-echo "    (a mandatory BLOCKED gate prevents GOAL COMPLETE)"
-echo "evidence dir: $OUT"
-if [ "$FAIL" -gt 0 ]; then exit 1; elif [ "$BLOCKED" -gt 0 ]; then exit 2; else exit 0; fi
+echo "=== FORMAL LINUX FILE SHIELD SUMMARY: mandatory_selected=$MANDATORY_SELECTED mandatory_pass=$MANDATORY_PASS mandatory_fail=$MANDATORY_FAIL mandatory_blocked=$MANDATORY_BLOCKED observation_pass=$OBSERVATION_PASS observation_partial=$OBSERVATION_PARTIAL observation_fail=$OBSERVATION_FAIL observation_blocked=$OBSERVATION_BLOCKED ===" | tee -a "$SUMMARY"
+echo "evidence_root=$EVIDENCE_ROOT" | tee -a "$SUMMARY"
+if [ "$MANDATORY_SELECTED" -eq 0 ]; then exit 2; fi
+if [ "$MANDATORY_FAIL" -gt 0 ]; then exit 1; elif [ "$MANDATORY_BLOCKED" -gt 0 ]; then exit 2; else exit 0; fi

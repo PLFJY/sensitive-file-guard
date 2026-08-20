@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # scripts/linux/rerun-review-batch.sh
-# One-polkit batch: re-verify the review-affected live gates on the real host.
+# Historical batch: re-verify review-affected live gates only inside capsule.
 # Each script is a standalone gate; results are aggregated by exit code
 # (0=PASS, 1=FAIL, 2=BLOCKED).
 set -euo pipefail
@@ -11,7 +11,7 @@ PASS=0; FAIL=0; BLOCKED=0
 : > "$OUT/summary.txt"
 
 # --- pre-flight: drop leftover loop mounts from interrupted runs ---
-# (a killed pkexec batch can leave a debug loop ext4 mounted; a fresh batch
+# (an interrupted capsule batch can leave a debug loop ext4 mounted; a fresh batch
 # must start clean so losetup -f picks a free device)
 for m in /tmp/guard-objectid-mnt-* /tmp/fdn-mnt /tmp/objid-debug-*/mnt /tmp/guard-continuity-mnt-* /tmp/guard-step3-mnt-*; do
   if mountpoint -q "$m" 2>/dev/null; then

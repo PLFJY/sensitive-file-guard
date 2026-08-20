@@ -3,7 +3,7 @@
 #
 # Phase 02 privileged integration test for the fanotify FAN_OPEN_PERM PoC.
 #
-# RUN AS ROOT:   sudo bash scripts/test-fanotify-root.sh
+# RUN AS ROOT only inside `sudo -n /usr/local/sbin/sfg-test-capsule run ...`.
 #
 # Why root: fanotify permission-event enforcement (FAN_CLASS_CONTENT) requires
 # CAP_SYS_ADMIN. The non-interactive build agent cannot obtain it, so the
@@ -26,7 +26,7 @@ note_fail() { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "ERROR: this script must be run as root (needs CAP_SYS_ADMIN for fanotify)."
-  echo "       try: sudo bash $0"
+  echo "       run this script through sfg-test-capsule; never host sudo"
   exit 2
 fi
 
@@ -144,4 +144,4 @@ fi
 echo
 echo "==> Phase 02 root integration summary: PASS=$PASS FAIL=$FAIL BLOCKED=$BLOCKED"
 echo "    (see $WORK/guardd.log for daemon decision log)"
-exit $FAIL
+if [ "$FAIL" -gt 0 ]; then exit 1; elif [ "$BLOCKED" -gt 0 ]; then exit 2; else exit 0; fi

@@ -119,9 +119,13 @@ impl EnrollmentStore {
         }
     }
 
-    /// Verify an **actual executed image** by its open fd (LFH1). The hash and
-    /// file identity come from the object the process is really running, never
+    /// Verify an **actual executed image** by its open fd (LFH1). The file
+    /// identity comes from the object the process is really running, never
     /// from re-opening the pathname (which an attacker may have replaced).
+    ///
+    /// The resolver supplies an `O_PATH` fd to avoid self-deadlock on strict
+    /// fanotify marks. It cannot be read for a SHA-256 retry, so an identity
+    /// mismatch fails closed and requires explicit re-enrollment.
     ///
     /// `display_path` is the readlink of `/proc/PID/exe` (may carry a
     /// `" (deleted)"` suffix when the original path was unlinked). The lookup
@@ -139,19 +143,14 @@ impl EnrollmentStore {
         if current_identity == record.identity {
             return true;
         }
-        // Executed-object identity changed: rehash from the fd itself.
-        let Ok(current_sha) = hash_fd(fd) else {
-            return false;
-        };
-        if current_sha == record.sha256 {
-            if let Some(r) = self.by_path.get_mut(&lookup) {
-                r.identity = current_identity;
-            }
-            true
-        } else {
-            self.by_path.remove(&lookup);
-            false
-        }
+        // `identity::executed_image_fd` deliberately uses O_PATH so resolving
+        // /proc/PID/exe cannot deadlock guardd on its own strict filesystem
+        // permission mark. O_PATH fds cannot be read, therefore this branch
+        // cannot truthfully rehash the executed object. An identity change is
+        // fail-closed and requires explicit re-enrollment; never retain a
+        // stale "hash was rechecked" promise.
+        self.by_path.remove(&lookup);
+        false
     }
 
     pub fn records(&self) -> impl Iterator<Item = &EnrollmentRecord> {
@@ -208,15 +207,6 @@ fn fd_identity(fd: &File) -> io::Result<FileIdentity> {
 
 fn hash_file(path: &Path) -> io::Result<Sha256Digest> {
     let mut f = File::open(path)?;
-    hash_read(&mut f)
-}
-
-/// SHA-256 of an open executed image, read from the fd (LFH1). Rewinds first
-/// so a caller can hash the same fd repeatedly.
-fn hash_fd(fd: &File) -> io::Result<Sha256Digest> {
-    use std::io::Seek;
-    let mut f = fd.try_clone()?;
-    f.seek(std::io::SeekFrom::Start(0))?;
     hash_read(&mut f)
 }
 
@@ -325,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_fd_hashes_the_fd_not_the_pathname() {
+    fn verify_fd_uses_the_executed_fd_identity_not_the_pathname() {
         // LFH1: the pathname is replaced by a different inode; the fd still
         // refers to the enrolled executed object, so trust must survive.
         let dir = tempdir().unwrap();
@@ -379,5 +369,33 @@ mod tests {
         drop(f);
         let fd = File::open(&exe).unwrap();
         assert!(!store.verify_fd(&fd, &exe), "changed bytes must invalidate");
+    }
+
+    #[test]
+    fn verify_fd_o_path_identity_change_requires_reenrollment() {
+        use std::os::fd::FromRawFd;
+
+        let dir = tempdir().unwrap();
+        let exe = write_exe(dir.path(), "mybrowser", b"original-bytes-here");
+        let mut store = EnrollmentStore::new();
+        store.enroll(&exe).unwrap();
+        let replacement = write_exe(dir.path(), "replacement", b"tampered-bytes-here");
+        std::fs::rename(&replacement, &exe).unwrap();
+
+        let c_path = std::ffi::CString::new(exe.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: O_PATH fd is owned by this test File and closed on drop.
+        let raw_fd = unsafe { libc::open(c_path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+        assert!(
+            raw_fd >= 0,
+            "open O_PATH: {}",
+            std::io::Error::last_os_error()
+        );
+        let fd = unsafe { File::from_raw_fd(raw_fd) };
+
+        assert!(
+            !store.verify_fd(&fd, &exe),
+            "an O_PATH identity mismatch cannot be rehashed and must fail closed"
+        );
+        assert_eq!(store.records().count(), 0, "stale enrollment is removed");
     }
 }

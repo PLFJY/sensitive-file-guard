@@ -1,33 +1,32 @@
-#!/bin/bash
-# Capsule P0 live test wrapper.
-# Marks ONLY a fresh capsule-internal tmpfs (independent super_block).
-# NEVER marks /testfs (host root bind) or /.
+#!/usr/bin/env bash
+# Capsule P0 wrapper. The strict mark is confined to an isolated loop-backed
+# ext4 filesystem; /, /testfs, and tmpfs are never marked.
 set -euo pipefail
 
-mkdir -p /p0fs
-mount -t tmpfs p0-fs /p0fs || { echo "BLOCKED: tmpfs mount failed"; exit 2; }
+IMG="/testfs/p0-ssh-$$.img"
+MNT="/testfs/p0-ssh-mnt-$$"
+LOOP=""
+cleanup() {
+  if mountpoint -q "$MNT" 2>/dev/null; then umount "$MNT" || true; fi
+  if [ -n "$LOOP" ]; then losetup -d "$LOOP" || true; fi
+  rm -f -- "$IMG"
+  rmdir "$MNT" 2>/dev/null || true
+}
+trap cleanup EXIT
 
-ROOT_DEV=$(stat -c %d /)
-TESTFS_DEV=$(stat -c %d /testfs)
-P0_DEV=$(stat -c %d /p0fs)
-echo "== super_block identities =="
-echo "root  st_dev=$ROOT_DEV"
-echo "testfs st_dev=$TESTFS_DEV"
-echo "p0fs  st_dev=$P0_DEV"
+truncate -s 256M "$IMG"
+LOOP="$(losetup --find --show "$IMG")"
+mkfs.ext4 -q -F "$LOOP"
+mkdir -p "$MNT"
+mount "$LOOP" "$MNT"
+ROOT_DEV="$(stat -c %d /)"; TESTFS_DEV="$(stat -c %d /testfs)"; P0_DEV="$(stat -c %d "$MNT")"
+echo "root=$ROOT_DEV testfs=$TESTFS_DEV p0fs=$P0_DEV loop=$LOOP"
 if [ "$P0_DEV" = "$ROOT_DEV" ] || [ "$P0_DEV" = "$TESTFS_DEV" ]; then
-    echo "REFUSING: p0fs shares a super_block with root or testfs"
-    umount /p0fs; exit 3
+  echo "BLOCKED: loop ext4 does not have an isolated superblock"
+  exit 2
 fi
 
-echo "== P0 test =="
-set +e
-TEST_FS_ROOT=/p0fs \
-PRESET_SSH_KEY=/stage/fixtures/synthetic-test-key \
-BIN_DIR=/stage/bin \
-ENFORCEMENT_MODE="${ENFORCEMENT_MODE:-strict-filesystem}" \
-/stage/scripts/test-p0-ssh-mmap-root.sh
-RC=$?
-set -e
-umount /p0fs 2>/dev/null || true
-echo "P0 wrapper exit=$RC"
-exit $RC
+TEST_FS_ROOT="$MNT" BIN_DIR=/stage/bin \
+  ENFORCEMENT_MODE="${ENFORCEMENT_MODE:-strict-filesystem}" \
+  P0_CASE="${P0_CASE:-configured}" \
+  /stage/scripts/linux/test-p0-ssh-mmap-root.sh

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # scripts/linux/rerun-fixed-root-gates.sh
 # Re-runs the 5 scripts that failed in the first live-host gate run, after
-# their fixes. One polkit authorization.
+# their fixes. Historical helper; execute only inside the test capsule.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

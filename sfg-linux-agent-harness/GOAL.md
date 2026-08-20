@@ -3,20 +3,19 @@
 当前 Goal：
 
 ```text
-LINUX_FILE_SHIELD_FREEZE
+LINUX_PLATFORM_FREEZE
 ```
 
 Agent 只从 `HARNESS.md` 进入，然后读取：
 
 ```text
-goals/LINUX_FILE_SHIELD_FREEZE.md
+goals/LINUX_PLATFORM_FREEZE.md
 ```
 
 ## 可选 Goal
 
 - `LINUX_FILE_SHIELD_FREEZE`
   - 完成 LFH0 → LFH7。
-  - **当前默认。**
   - Process Shield 只做 capability inventory，不进入实现。
 
 - `LINUX_PROCESS_SHIELD_FREEZE`
@@ -27,5 +26,6 @@ goals/LINUX_FILE_SHIELD_FREEZE.md
   - 先完整完成 `LINUX_FILE_SHIELD_FREEZE`；
   - 再完整完成 `LINUX_PROCESS_SHIELD_FREEZE`；
   - 最后做跨层 acceptance。
+  - **当前默认；第一个未完成 sub-goal 是 `RE-CLOSE LINUX_FILE_SHIELD_FREEZE`。**
 
 如果用户修改了这里的 Goal，按新的 Goal 执行；不要继续旧 Goal。

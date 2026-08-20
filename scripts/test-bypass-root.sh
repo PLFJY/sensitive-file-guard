@@ -3,7 +3,7 @@
 #
 # Phase 13 privileged integration test for hardening and bypass scenarios.
 #
-# RUN AS ROOT:   sudo bash scripts/test-bypass-root.sh
+# RUN AS ROOT only inside `sudo -n /usr/local/sbin/sfg-test-capsule run ...`.
 #
 # Why root: fanotify permission-event enforcement (FAN_CLASS_CONTENT) requires
 # CAP_SYS_ADMIN. The non-interactive build agent cannot obtain it, so the
@@ -38,16 +38,15 @@ PROBE="${PROBE:-$BIN_DIR/guard-test-probe}"
 PASS=0
 FAIL=0
 BLOCKED=0
+OBSERVED=0
 note_pass() { echo "PASS: $1"; PASS=$((PASS+1)); }
 note_fail() { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
 note_blocked() { echo "BLOCKED: $1"; BLOCKED=$((BLOCKED+1)); }
-# A MANDATORY blocked gate is a required acceptance test that could not run;
-# it forces exit code 2 and must never be aggregated as PASS.
-note_mandatory_blocked() { echo "BLOCKED(mandatory): $1"; MANDATORY_BLOCKED=$((MANDATORY_BLOCKED + 1)); }
+note_observed() { echo "OBSERVED: $1"; OBSERVED=$((OBSERVED+1)); }
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "ERROR: this script must be run as root (needs CAP_SYS_ADMIN for fanotify)."
-  echo "       try: sudo bash $0"
+  echo "       run this script through sfg-test-capsule; never host sudo"
   exit 2
 fi
 
@@ -275,7 +274,7 @@ echo "==> Test 12: open-before-mark race (documented limitation)"
 # An fd opened BEFORE the daemon applies the fanotify mark is not intercepted.
 # This is a fundamental fanotify limitation (it intercepts future opens, not
 # already-open fds). We document it rather than claim race-free coverage.
-note_blocked "open-before-mark：fanotify 的已知限制（详见 docs/安全模型.md）"
+note_observed "open-before-mark is outside the pre-open protection contract（详见 docs/安全模型.md）"
 
 # ===========================================================================
 # Test 13: inherited fd => DOCUMENTED limitation
@@ -284,7 +283,7 @@ echo "==> Test 13: inherited fd (documented limitation)"
 # A child process that inherits an already-open fd from a parent that opened
 # it before the mark was applied can read via the inherited fd. This is the
 # same fundamental limitation as Test 12.
-note_blocked "inherited fd：fanotify 的已知限制（详见 docs/安全模型.md）"
+note_observed "inherited fd predates the pre-open protection boundary（详见 docs/安全模型.md）"
 
 # ===========================================================================
 # Test 14: FAN_Q_OVERFLOW => logged, no crash
@@ -365,7 +364,7 @@ if [ -n "${GUARDD_PID:-}" ]; then
 fi
 
 echo
-echo "==> Phase 13 root bypass summary: PASS=$PASS FAIL=$FAIL BLOCKED=$BLOCKED"
-echo "    （BLOCKED 项是 fanotify 已知限制，详见 docs/安全模型.md）"
+echo "==> Phase 13 root bypass summary: PASS=$PASS FAIL=$FAIL BLOCKED=$BLOCKED OBSERVED=$OBSERVED"
+echo "    （OBSERVED 项是 pre-open contract 之外的已知 fanotify 限制，详见 docs/安全模型.md）"
 echo "    (see $WORK/guardd.log for daemon decision log)"
-exit $FAIL
+if [ "$FAIL" -gt 0 ]; then exit 1; elif [ "$BLOCKED" -gt 0 ]; then exit 2; else exit 0; fi

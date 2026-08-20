@@ -3,7 +3,7 @@
 #
 # Phase 12 privileged integration test for AI/coding-agent compatibility.
 #
-# RUN AS ROOT:   sudo bash scripts/test-agent-compat-root.sh
+# RUN AS ROOT only inside `sudo -n /usr/local/sbin/sfg-test-capsule run ...`.
 #
 # Why root: fanotify permission-event enforcement (FAN_CLASS_CONTENT) requires
 # CAP_SYS_ADMIN. The non-interactive build agent cannot obtain it, so the
@@ -38,7 +38,7 @@ note_blocked() { echo "BLOCKED: $1"; BLOCKED=$((BLOCKED+1)); }
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "ERROR: this script must be run as root (needs CAP_SYS_ADMIN for fanotify)."
-  echo "       try: sudo bash $0"
+  echo "       run this script through sfg-test-capsule; never host sudo"
   exit 2
 fi
 
@@ -273,4 +273,4 @@ echo
 echo "NOTE: filesystem denial uses ordinary EPERM/EACCES from the OS. guardd does NOT"
 echo "      inject custom text into open(2) errors. Tools use 'guardctl explain --json'"
 echo "      + the stable 'reason_code' field to understand denials."
-exit $FAIL
+if [ "$FAIL" -gt 0 ]; then exit 1; elif [ "$BLOCKED" -gt 0 ]; then exit 2; else exit 0; fi

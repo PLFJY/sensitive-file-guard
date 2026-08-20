@@ -209,23 +209,6 @@ fn handle_status(state: &IpcState, creds: PeerCreds) -> Response {
     let conservative_mode =
         state.backend_metrics.mode == crate::enforce::EnforcementMode::Conservative;
 
-    let file_shield = if !enforcing {
-        "NOT_ENFORCING".to_owned()
-    } else if conservative_mode
-        || engine.topology_degraded
-        || backend.classifier_failures > 0
-        || !filesystem_marks_healthy
-        // P1-b (review): topology identity UNCERTAIN (group creation failed,
-        // marks incomplete, learner dead, queue overflow, parse/read failure)
-        // makes ambiguous outside-path opens fail closed — posture is REDUCED
-        // until restart, mirroring continuity-loss philosophy.
-        || backend.topology_uncertain
-    {
-        "REDUCED".to_owned()
-    } else {
-        "ACTIVE".to_owned()
-    };
-
     // LFH3: continuity is the engine's STICKY state — current enforcement
     // recovering never erases a historical loss. The engine is the authority;
     // the backend counter and mark health are cross-checks that also drive the
@@ -254,27 +237,20 @@ fn handle_status(state: &IpcState, creds: PeerCreds) -> Response {
         "HEALTHY".to_owned()
     };
 
-    // Overall posture is the most conservative axis; Conservative mode can
-    // never report formal ACTIVE.
-    let status = if !enforcing {
-        "NOT_ENFORCING".to_owned()
-    } else if conservative_mode {
-        "REDUCED".to_owned()
-    } else if continuity != "INTACT"
-        || audit == "DEGRADED"
-        || engine.unclassified > 0
-        || engine.topology_degraded
-        || backend.classifier_failures > 0
-        // LFH5 review: a full dynamic-object handle index means new dynamic
-        // objects are no longer learned; that is a fail-closed degradation,
-        // not a silent loss of existing protections.
-        || backend.handle_index_exhausted
-        || !filesystem_marks_healthy
-    {
-        "DEGRADED".to_owned()
-    } else {
-        "ACTIVE".to_owned()
+    let posture = StatusPostureInputs {
+        enforcing,
+        conservative_mode,
+        topology_degraded: engine.topology_degraded,
+        topology_uncertain: backend.topology_uncertain,
+        classifier_failures: backend.classifier_failures,
+        handle_index_exhausted: backend.handle_index_exhausted,
+        filesystem_marks_healthy,
+        continuity_intact: continuity == "INTACT",
+        audit_healthy: audit == "HEALTHY",
+        unclassified: engine.unclassified,
     };
+    let file_shield = posture.file_shield().to_owned();
+    let status = posture.overall().to_owned();
     let body = StatusInfo {
         version: state.version.clone(),
         backend_kind: "linux-fanotify".to_owned(),
@@ -322,6 +298,60 @@ fn handle_status(state: &IpcState, creds: PeerCreds) -> Response {
         peer_uid: creds.uid,
     };
     Response::ok(ResponseBody::Status(Box::new(body)))
+}
+
+/// The status endpoint must describe one coherent posture: an unhealthy File
+/// Shield axis can never be paired with a top-level ACTIVE status. Keeping the
+/// derivation pure makes that invariant deterministic and independently tested.
+#[derive(Clone, Copy)]
+struct StatusPostureInputs {
+    enforcing: bool,
+    conservative_mode: bool,
+    topology_degraded: bool,
+    topology_uncertain: bool,
+    classifier_failures: u64,
+    handle_index_exhausted: bool,
+    filesystem_marks_healthy: bool,
+    continuity_intact: bool,
+    audit_healthy: bool,
+    unclassified: u64,
+}
+
+impl StatusPostureInputs {
+    fn file_shield(self) -> &'static str {
+        if !self.enforcing {
+            "NOT_ENFORCING"
+        } else if self.conservative_mode
+            || self.topology_degraded
+            || self.topology_uncertain
+            || self.classifier_failures > 0
+            || self.handle_index_exhausted
+            || !self.filesystem_marks_healthy
+        {
+            // A full dynamic-handle index means new dynamic identities cannot
+            // be learned. The classifier fails closed, but File Shield is no
+            // longer formally complete and must say so on its own axis.
+            "REDUCED"
+        } else {
+            "ACTIVE"
+        }
+    }
+
+    fn overall(self) -> &'static str {
+        if !self.enforcing {
+            "NOT_ENFORCING"
+        } else if self.conservative_mode {
+            "REDUCED"
+        } else if self.file_shield() != "ACTIVE"
+            || !self.continuity_intact
+            || !self.audit_healthy
+            || self.unclassified > 0
+        {
+            "DEGRADED"
+        } else {
+            "ACTIVE"
+        }
+    }
 }
 
 fn handle_resources_list(state: &IpcState, _creds: PeerCreds) -> Response {
@@ -1722,5 +1752,50 @@ mod tests {
         assert!(!peer_connection_closed(server.as_raw_fd()));
         drop(client);
         assert!(peer_connection_closed(server.as_raw_fd()));
+    }
+
+    fn healthy_status_inputs() -> StatusPostureInputs {
+        StatusPostureInputs {
+            enforcing: true,
+            conservative_mode: false,
+            topology_degraded: false,
+            topology_uncertain: false,
+            classifier_failures: 0,
+            handle_index_exhausted: false,
+            filesystem_marks_healthy: true,
+            continuity_intact: true,
+            audit_healthy: true,
+            unclassified: 0,
+        }
+    }
+
+    #[test]
+    fn topology_uncertain_reduces_file_shield_and_overall_posture() {
+        let mut inputs = healthy_status_inputs();
+        inputs.topology_uncertain = true;
+        assert_eq!(inputs.file_shield(), "REDUCED");
+        assert_ne!(inputs.overall(), "ACTIVE");
+        assert_eq!(inputs.overall(), "DEGRADED");
+    }
+
+    #[test]
+    fn exhausted_handle_index_reduces_file_shield_and_overall_posture() {
+        let mut inputs = healthy_status_inputs();
+        inputs.handle_index_exhausted = true;
+        assert_eq!(inputs.file_shield(), "REDUCED");
+        assert_eq!(inputs.overall(), "DEGRADED");
+    }
+
+    #[test]
+    fn continuity_and_audit_degradation_never_regress_to_active() {
+        let mut continuity_lost = healthy_status_inputs();
+        continuity_lost.continuity_intact = false;
+        assert_eq!(continuity_lost.file_shield(), "ACTIVE");
+        assert_eq!(continuity_lost.overall(), "DEGRADED");
+
+        let mut audit_degraded = healthy_status_inputs();
+        audit_degraded.audit_healthy = false;
+        assert_eq!(audit_degraded.file_shield(), "ACTIVE");
+        assert_eq!(audit_degraded.overall(), "DEGRADED");
     }
 }

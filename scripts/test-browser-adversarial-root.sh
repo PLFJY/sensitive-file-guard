@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Linux defensive adversarial acceptance harness for browser authentication data.
 #
-# Run from the active desktop user's shell:
-#   sudo bash scripts/test-browser-adversarial-root.sh
+# Run only through the test capsule; its synthetic non-root user stands in for
+# a desktop session. Never invoke this script with host sudo.
 #
 # Safety properties:
 # - creates profiles only below a uniquely named /tmp directory;
@@ -34,7 +34,7 @@ note_blocked() { printf 'BLOCKED: %s\n' "$1"; BLOCKED=$((BLOCKED + 1)); }
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "ERROR: root/CAP_SYS_ADMIN is required for FAN_OPEN_PERM enforcement."
-  echo "Run: sudo bash $0"
+  echo "Run through sfg-test-capsule; never host sudo"
   exit 2
 fi
 
@@ -657,4 +657,4 @@ echo "==> Defensive adversarial summary: PASS=$PASS FAIL=$FAIL BLOCKED=$BLOCKED"
 echo "Enforcement PASS always means: probe failed + canary absent + new audit DENY."
 echo "Notification delivery is reported independently and cannot make enforcement pass."
 echo "Use KEEP_WORK=1 to retain synthetic logs under: $WORK"
-exit "$FAIL"
+if [ "$FAIL" -gt 0 ]; then exit 1; elif [ "$BLOCKED" -gt 0 ]; then exit 2; else exit 0; fi

@@ -483,4 +483,4 @@ fi
 
 echo
 echo "Strict filesystem summary: PASS=$PASS FAIL=$FAIL BLOCKED=$BLOCKED OBSERVED=$OBSERVED"
-[ "$FAIL" -eq 0 ]
+if [ "$FAIL" -gt 0 ]; then exit 1; elif [ "$BLOCKED" -gt 0 ]; then exit 2; else exit 0; fi

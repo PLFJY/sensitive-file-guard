@@ -1,7 +1,7 @@
 #!/bin/bash
 # Capsule P1-b live test: topology group overflow -> topology_uncertain ->
 # persistent REDUCED health + ambiguous outside-path open fails closed.
-# - Marks ONLY a fresh capsule-internal tmpfs (independent super_block).
+# - Marks ONLY a fresh capsule-internal loop-backed ext4 (independent superblock).
 # - NO host sysctl mutation (default topology queue = 16384; rename burst
 #   exceeds it while the daemon is SIGSTOPped).
 set -euo pipefail
@@ -11,12 +11,17 @@ note_pass() { echo "PASS: $1"; PASS=$((PASS + 1)); }
 note_fail() { echo "FAIL: $1"; FAIL=$((FAIL + 1)); }
 note_blocked() { echo "BLOCKED: $1"; BLOCKED=$((BLOCKED + 1)); }
 
+P1B_IMG="/testfs/p1b-$$.img"
+P1B_LOOP=""
 mkdir -p /p1bfs
-mount -t tmpfs p1b-fs /p1bfs || { echo "BLOCKED: tmpfs mount failed"; exit 2; }
+truncate -s 512M "$P1B_IMG"
+P1B_LOOP="$(losetup --find --show "$P1B_IMG")"
+mkfs.ext4 -q -F "$P1B_LOOP"
+mount "$P1B_LOOP" /p1bfs || { echo "BLOCKED: loop ext4 mount failed"; exit 2; }
 ROOT_DEV=$(stat -c %d /); TESTFS_DEV=$(stat -c %d /testfs); P1B_DEV=$(stat -c %d /p1bfs)
 echo "root=$ROOT_DEV testfs=$TESTFS_DEV p1bfs=$P1B_DEV"
 if [ "$P1B_DEV" = "$ROOT_DEV" ] || [ "$P1B_DEV" = "$TESTFS_DEV" ]; then
-  echo "REFUSING: p1bfs shares a super_block"; umount /p1bfs; exit 3
+  echo "REFUSING: p1bfs shares a super_block"; umount /p1bfs; losetup -d "$P1B_LOOP"; exit 2
 fi
 
 PROFILE=/p1bfs/profile
@@ -54,6 +59,8 @@ cleanup() {
     wait "$DAEMON_PID" 2>/dev/null || true
   fi
   umount /p1bfs 2>/dev/null || true
+  if [ -n "$P1B_LOOP" ]; then losetup -d "$P1B_LOOP" 2>/dev/null || true; fi
+  rm -f -- "$P1B_IMG"
 }
 trap cleanup EXIT
 

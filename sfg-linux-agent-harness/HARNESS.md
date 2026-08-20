@@ -49,7 +49,7 @@ fmt / clippy / unit tests
   ↓
 需要内核权限？
   ├─ no  → local integration
-  └─ yes → 通过 polkit/pkexec 弹系统授权框
+  └─ yes → 仅通过 systemd-nspawn test capsule 执行
   ↓
 LIVE ACCEPTANCE
   ↓
@@ -68,51 +68,29 @@ ADVERSARIAL SELF-REVIEW
 
 ---
 
-## 2. 权限规则：需要密码时必须走 polkit
+## 2. 权限规则：仅 test capsule
 
-用户明确允许在系统授权弹窗中输入管理员密码。
-
-### 必须遵守
-
-- **不要向用户索要密码。**
-- **不要要求用户把密码复制到聊天、stdin、环境变量或文件。**
-- **禁止 `sudo -S`、`echo password | sudo`、expect 自动输密码等。**
-- 不要因为需要 root 就停下来让用户手工运行；优先自己发起 polkit 认证。
-- 若项目已有受限 privileged helper / `guardctl privileged ...` 能完成目标，优先使用它。
-- 否则使用 `pkexec` 触发桌面 polkit authentication agent。
-
-推荐模式：
+开发、构建、unit test 和仓库操作均以普通用户在 host 执行。任何需要
+root/内核能力的 live test 只能经由已配置的 unattended capsule：
 
 ```bash
-# 先以普通用户构建
-cargo build --workspace --all-features
-
-# root harness 不应重新编译；让脚本消费已构建 artifact
-pkexec /usr/bin/bash scripts/linux/<root-test>.sh
+sudo -n /usr/local/sbin/sfg-test-capsule paths
+sudo -n /usr/local/sbin/sfg-test-capsule run CMD [ARGS...]
+# 只有真正需要 systemd PID 1 的 gate：boot → exec → stop
+sudo -n /usr/local/sbin/sfg-test-capsule boot
+sudo -n /usr/local/sbin/sfg-test-capsule exec CMD [ARGS...]
+sudo -n /usr/local/sbin/sfg-test-capsule stop
 ```
 
-若旧脚本强制 `cargo build`，优先改造成：
-
-```text
-普通用户 build
-        ↓
-root script --skip-build / 显式 binary path
-```
-
-避免以 root 编译用户仓库。
-
-如果确实必须给 root command 一个工具路径，传**精确绝对路径**，不要把任意 user-writable PATH 整体送给 root。
-
-### polkit 不可用时
-
-只有以下情况才能标记 `BLOCKED`：
-
-- `pkexec` 不存在；
-- 当前 session 没有可用 polkit authentication agent；
-- 系统策略明确拒绝；
-- 用户在弹窗中主动取消。
-
-必须记录**精确命令 + 精确错误**。继续完成所有不依赖该 blocker 的工作，但 Goal 中要求的 LIVE gate 仍不得声明 PASS。
+- 禁止 interactive `sudo`、`sudo -S`、`pkexec`、密码缓存和任何其它
+  host-side privileged entrypoint。
+- 先在 host 以普通用户构建，再向 staging 复制最小 runtime artifact、脚本、
+  config 和 synthetic fixture；绝不复制真实 profile、key、cookie 或 token。
+- `/stage` 是只读；破坏性/live workspace 只能在 `/testfs`。测试脚本应接受
+  `BIN_DIR` 和 evidence/output override，不能假设 source repo 可写。
+- capsule 只证明其 kernel/namespace/seccomp 条件下的结果。若 nspawn 限制了
+  机制，记录精确命令和错误，结论为 `REDUCED`/`NOT ACCEPTED`/`BLOCKED`，不能
+  改走 host root。
 
 ---
 

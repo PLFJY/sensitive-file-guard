@@ -50,7 +50,9 @@ Guard causality NOT VERIFIED
 - root 只执行 kernel-dependent harness；
 - root harness 使用 synthetic temp directories；
 - root harness 不读取用户真实 `$HOME` 下的 secrets；
-- privilege 通过 `pkexec` / polkit；
+- privilege 仅通过 `sudo -n /usr/local/sbin/sfg-test-capsule`；
+- `/stage` 只读，破坏性 fixture/evidence 只在 `/testfs`；
+- 不得使用 interactive sudo、`sudo -S`、`pkexec` 或密码缓存；
 - root test exit code 非 0 时必须输出 stage + evidence dir。
 
 每个 script 统一：
@@ -59,7 +61,8 @@ Guard causality NOT VERIFIED
 === <NAME> SUMMARY pass=N fail=N blocked=N ===
 ```
 
-`fail > 0` 必须非 0 exit。
+`fail > 0` 必须 exit 1；无法执行的 mandatory gate 必须 exit 2；只有
+`fail = 0 && blocked = 0` 才能 exit 0。
 
 ---
 

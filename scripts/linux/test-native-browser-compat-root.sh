@@ -7,7 +7,8 @@
 # zero overflow / classifier failure / unexpected DENY, and continuity stays
 # INTACT. Never touches a real profile.
 #
-#   sudo bash scripts/linux/test-native-browser-compat-root.sh
+#   sudo -n /usr/local/sbin/sfg-test-capsule run \
+#     /stage/scripts/linux/test-native-browser-compat-root.sh
 #
 # guardd runs as root (fanotify FAN_CLASS_CONTENT needs CAP_SYS_ADMIN); the
 # browsers and probes run as the invoking user (SUDO_USER) because Firefox
@@ -31,7 +32,7 @@ note_blocked() { echo "BLOCKED: $1"; BLOCKED=$((BLOCKED + 1)); }
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "ERROR: run as root (fanotify FAN_CLASS_CONTENT requires CAP_SYS_ADMIN)"
-  echo "  sudo bash scripts/linux/test-native-browser-compat-root.sh"
+  echo "  sudo -n /usr/local/sbin/sfg-test-capsule run /stage/scripts/linux/test-native-browser-compat-root.sh"
   exit 2
 fi
 if [ -n "${SUDO_USER:-}" ]; then

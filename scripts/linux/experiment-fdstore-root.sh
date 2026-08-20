@@ -22,8 +22,9 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-HELPER="$REPO/target/release/guard-fdstore"
-PROBE="$REPO/target/release/guard-test-probe"
+BIN_DIR="${BIN_DIR:-$REPO/target/release}"
+HELPER="${HELPER:-$BIN_DIR/guard-fdstore}"
+PROBE="${PROBE:-$BIN_DIR/guard-test-probe}"
 
 PASS=0
 FAIL=0

@@ -226,14 +226,56 @@ fi
 mv "$NEWDIR/secret.txt" "$OUTSIDE/.sdf-race-tmp2"
 run_race_and_assert_zero "subdir" "$NEWDIR/secret.txt" "$OUTSIDE" "$OUTSIDE/.sdf-race-tmp2" 200
 
-echo "==> 3. unknown probe denied while enforcement is active (sanity)"
+echo "==> 4. delete/recreate the same runtime path with a NEW inode, then zero-settle attack"
+# Regression for the topology-mark lifecycle: the deleted directory's mark may
+# disappear normally. The learner must remove that old object from its expected
+# live set, mark the recreated directory, and must not become permanently
+# UNCERTAIN just because the intentionally deleted old mark vanished.
+MARK_LOGS_BEFORE="$(grep -c 'topology: marked newly created subdirectories' "$LOOP_MNT/guardd.log" || true)"
+rmdir "$NEWDIR"
+mkdir "$NEWDIR"
+RECREATED_MARKED=0
+for _ in $(seq 1 80); do
+  MARK_LOGS_NOW="$(grep -c 'topology: marked newly created subdirectories' "$LOOP_MNT/guardd.log" || true)"
+  if [ "$MARK_LOGS_NOW" -gt "$MARK_LOGS_BEFORE" ]; then RECREATED_MARKED=1; break; fi
+  sleep 0.25
+done
+if [ "$RECREATED_MARKED" = 1 ]; then
+  note_pass "recreated runtime path received a fresh topology mark"
+else
+  note_fail "recreated runtime path was not marked"
+fi
+LEARN_LOGS_BEFORE="$(grep -c 'topology: learned moved object handle' "$LOOP_MNT/guardd.log" || true)"
+printf 'RECREATED_RUNTIME_OBJECT' > "$OUTSIDE/.sdf-race-recreated"
+mv "$OUTSIDE/.sdf-race-recreated" "$NEWDIR/secret.txt"
+RECREATED_LEARNED=0
+for _ in $(seq 1 80); do
+  LEARN_LOGS_NOW="$(grep -c 'topology: learned moved object handle' "$LOOP_MNT/guardd.log" || true)"
+  if [ "$LEARN_LOGS_NOW" -gt "$LEARN_LOGS_BEFORE" ]; then RECREATED_LEARNED=1; break; fi
+  sleep 0.25
+done
+if [ "$RECREATED_LEARNED" = 1 ]; then
+  note_pass "recreated runtime directory learns moved-object identity"
+else
+  note_fail "recreated runtime directory never learned move identity"
+fi
+mv "$NEWDIR/secret.txt" "$OUTSIDE/.sdf-race-recreated"
+run_race_and_assert_zero "recreated-subdir" "$NEWDIR/secret.txt" "$OUTSIDE" "$OUTSIDE/.sdf-race-recreated" 200
+if "$GUARDCTL" --socket "$LOOP_MNT/guardd.sock" --json status 2>/dev/null \
+  | python3 -c 'import json,sys; d=json.load(sys.stdin); x=d.get("data") or {}; h=x.get("linux_health") or {}; raise SystemExit(0 if h.get("file_shield") == "ACTIVE" else 1)'; then
+  note_pass "intentional directory deletion did not make topology health UNCERTAIN"
+else
+  note_fail "topology health was not ACTIVE after intentional delete/recreate"
+fi
+
+echo "==> 5. unknown probe denied while enforcement is active (sanity)"
 if "$PROBE" read "$TARGET" >/dev/null 2>&1; then
   note_fail "sanity: unknown probe read the protected fixture"
 else
   note_pass "sanity: unknown probe denied"
 fi
 
-echo "==> 4. daemon exits cleanly on SIGTERM"
+echo "==> 6. daemon exits cleanly on SIGTERM"
 stop_guardd
 if kill -0 "$DAEMON_PID" 2>/dev/null; then
   note_fail "guardd did not exit on SIGTERM"

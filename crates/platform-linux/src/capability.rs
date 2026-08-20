@@ -239,78 +239,22 @@ pub fn probe_fanotify_pidfd() -> ProbeResult {
 /// `handle_bytes`). EOVERFLOW therefore proves the filesystem/kernel supports
 /// handles; we retry with the reported size to confirm a full success.
 fn probe_name_to_handle_syscall(fd: RawFd) -> ProbeResult {
-    // SAFETY: zeroed struct file_handle is valid for a two-call sequence;
-    // name_to_handle_at fills it and reports the required size on EOVERFLOW.
-    let mut handle: libc::file_handle = unsafe { std::mem::zeroed() };
-    let mut mount_id: libc::c_int = 0;
-    // SAFETY: handle is writable, mount_id is writable, AT_EMPTY_PATH with an
-    // empty name is the documented way to resolve an open fd by its own inode.
-    let rc = unsafe {
-        libc::name_to_handle_at(
-            fd,
-            c"".as_ptr(),
-            &mut handle,
-            &mut mount_id,
-            libc::AT_EMPTY_PATH,
-        )
-    };
-    if rc >= 0 {
-        return ProbeResult::ok(
+    // ObjectHandle owns the only flexible-array `file_handle` parser. In
+    // particular, this probe must not cast a Vec<u8> (alignment 1) to a
+    // file_handle pointer: that would be undefined behaviour on a successful
+    // EOVERFLOW retry.
+    match crate::object_handle::ObjectHandle::from_fd(fd) {
+        Ok(handle) => ProbeResult::ok(
             "name_to_handle_at(AT_EMPTY_PATH)",
             format!(
                 "handle_type={} handle_bytes={} mount_id={}",
-                handle.handle_type, handle.handle_bytes, mount_id
+                handle.handle_type,
+                handle.handle_bytes.len(),
+                handle.mount_id
             ),
-        );
+        ),
+        Err(error) => ProbeResult::fail("name_to_handle_at(AT_EMPTY_PATH)", &error),
     }
-    let err = io::Error::last_os_error();
-    if err.raw_os_error() == Some(libc::EOVERFLOW) {
-        // First call: buffer too small, kernel reports required size. Retry
-        // with an adequate buffer to prove a complete success.
-        let needed = handle.handle_bytes;
-        if needed == 0 || needed > 4096 {
-            return ProbeResult::fail(
-                "name_to_handle_at(AT_EMPTY_PATH)",
-                &io::Error::from_raw_os_error(libc::EOVERFLOW),
-            );
-        }
-        let mut sized: Vec<u8> =
-            vec![0; std::mem::size_of::<libc::file_handle>() + needed as usize];
-        let handle_ptr = sized.as_mut_ptr() as *mut libc::file_handle;
-        // SAFETY: sized buffer covers the file_handle header + payload; the
-        // kernel writes at most `needed` payload bytes.
-        let mut handle2: libc::file_handle = unsafe { std::ptr::read(handle_ptr) };
-        handle2.handle_bytes = needed;
-        // SAFETY: write the header back with the correct size, then retry.
-        unsafe {
-            std::ptr::write(handle_ptr, handle2);
-        }
-        let rc2 = unsafe {
-            libc::name_to_handle_at(
-                fd,
-                c"".as_ptr(),
-                handle_ptr,
-                &mut mount_id,
-                libc::AT_EMPTY_PATH,
-            )
-        };
-        if rc2 < 0 {
-            return ProbeResult::fail(
-                "name_to_handle_at(AT_EMPTY_PATH)",
-                &io::Error::last_os_error(),
-            );
-        }
-        // SAFETY: kernel returned success, so the header fields are valid.
-        let filled: libc::file_handle = unsafe { std::ptr::read(handle_ptr) };
-        return ProbeResult::ok(
-            "name_to_handle_at(AT_EMPTY_PATH)",
-            format!(
-                "handle_type={} handle_bytes={} mount_id={}",
-                filled.handle_type, filled.handle_bytes, mount_id
-            ),
-        );
-    }
-    ProbeResult::fail("name_to_handle_at(AT_EMPTY_PATH)", &err)
 }
 
 /// Probe `name_to_handle_at(AT_EMPTY_PATH)` on a path from each protected

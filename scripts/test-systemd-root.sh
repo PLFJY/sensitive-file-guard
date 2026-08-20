@@ -3,8 +3,7 @@
 #
 # Phase 14 privileged integration test for systemd install/startup/recovery.
 #
-# RUN AS ROOT on a systemd host:
-#   sudo bash scripts/test-systemd-root.sh
+# Run as root only through the test capsule in systemd boot mode.
 #
 # Requires: systemd, CAP_SYS_ADMIN (for fanotify), python3 (for JSON parsing).
 #
@@ -25,7 +24,7 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN_DIR="${BIN_DIR:-$REPO/target/release}"
-GUARDCTL="${GUARDCTL:-/usr/local/bin/guardctl}"
+GUARDCTL="${GUARDCTL:-$BIN_DIR/guardctl}"
 PROBE="${PROBE:-$BIN_DIR/guard-test-probe}"
 SOCK="/run/guardd/guardd.sock"
 
@@ -37,7 +36,7 @@ note_fail() { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
 note_blocked() { echo "BLOCKED: $1"; BLOCKED=$((BLOCKED+1)); }
 
 if [ "$(id -u)" -ne 0 ]; then
-  echo "ERROR: run as root (sudo $0)"
+  echo "ERROR: run as root only through sfg-test-capsule boot/exec"
   exit 2
 fi
 
@@ -51,7 +50,7 @@ echo "==> Checking unprivileged pre-built release binaries"
 # root-only integration script: `cargo build --release` as the desktop user.
 test -x "${GUARDD:-$BIN_DIR/guardd}" || { echo "guardd build failed"; exit 1; }
 test -x "${GUARDCTL:-$BIN_DIR/guardctl}" || { echo "guardctl build failed"; exit 1; }
-test -x "$REPO/target/release/guard-notify" || { echo "guard-notify build failed"; exit 1; }
+test -x "${GUARD_NOTIFY:-$BIN_DIR/guard-notify}" || { echo "guard-notify build failed"; exit 1; }
 test -x "$PROBE" || { echo "guard-test-probe build failed"; exit 1; }
 
 # AGENTS.md LIVE-TEST SAFETY: strict-filesystem marks the fixture's
@@ -325,4 +324,4 @@ fi
 echo
 echo "==> Phase 14 systemd test summary: PASS=$PASS FAIL=$FAIL BLOCKED=$BLOCKED"
 echo "    (see journalctl -u guardd for daemon logs)"
-exit $FAIL
+if [ "$FAIL" -gt 0 ]; then exit 1; elif [ "$BLOCKED" -gt 0 ]; then exit 2; else exit 0; fi

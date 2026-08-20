@@ -3,7 +3,7 @@
 #
 # Privileged regression test for interactive SSH private-key protection.
 #
-# RUN AS ROOT:   sudo bash scripts/test-ssh-enforcement-root.sh
+# RUN AS ROOT only inside `sudo -n /usr/local/sbin/sfg-test-capsule run ...`.
 #
 # Why root: fanotify permission-event enforcement (FAN_CLASS_CONTENT) requires
 # CAP_SYS_ADMIN. The non-interactive build agent cannot obtain it, so the
@@ -30,7 +30,7 @@ note_blocked() { echo "BLOCKED: $1"; BLOCKED=$((BLOCKED+1)); }
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "ERROR: this script must be run as root (needs CAP_SYS_ADMIN for fanotify)."
-  echo "       try: sudo bash $0"
+  echo "       run this script through sfg-test-capsule; never host sudo"
   exit 2
 fi
 
@@ -427,4 +427,4 @@ echo "NOTE: rename gap — fanotify marks are inode-based; renaming a protected"
 echo "      key moves the SAME inode so protection follows the rename. A key"
 echo "      re-created at the original path after deletion is NOT protected until"
 echo "      re-enrolled (documented in reports/phase-10.md)."
-exit $FAIL
+if [ "$FAIL" -gt 0 ]; then exit 1; elif [ "$BLOCKED" -gt 0 ]; then exit 2; else exit 0; fi

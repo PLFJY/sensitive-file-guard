@@ -402,4 +402,4 @@ fi
 
 echo
 echo "==> Installed authorization summary: PASS=$PASS FAIL=$FAIL BLOCKED=$BLOCKED"
-exit "$FAIL"
+if [ "$FAIL" -gt 0 ]; then exit 1; elif [ "$BLOCKED" -gt 0 ]; then exit 2; else exit 0; fi

@@ -4,7 +4,7 @@
 # Phase 11 privileged integration test for the ssh-agent load flow
 # (`guardctl ssh load` -> one-shot SshLoadLease -> ssh-add reads the key once).
 #
-# RUN AS ROOT:   sudo bash scripts/test-ssh-load-root.sh
+# RUN AS ROOT only inside `sudo -n /usr/local/sbin/sfg-test-capsule run ...`.
 #
 # Why root: fanotify permission-event enforcement (FAN_CLASS_CONTENT) requires
 # CAP_SYS_ADMIN. The non-interactive build agent cannot obtain it, so the
@@ -25,6 +25,7 @@ esac
 BIN_DIR="${BIN_DIR:-$REPO/target/release}"
 GUARDD="${GUARDD:-$BIN_DIR/guardd}"
 GUARDCTL="${GUARDCTL:-$BIN_DIR/guardctl}"
+IPC_HELPER="$REPO/scripts/helpers/ipc-request.py"
 
 PASS=0
 FAIL=0
@@ -35,7 +36,7 @@ note_blocked() { echo "BLOCKED: $1"; BLOCKED=$((BLOCKED+1)); }
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "ERROR: this script must be run as root (needs CAP_SYS_ADMIN for fanotify)."
-  echo "       try: sudo bash $0"
+  echo "       run this script through sfg-test-capsule; never host sudo"
   exit 2
 fi
 
@@ -142,6 +143,77 @@ done
 grep -q "enforcement ACTIVE" "$WORK/guardd.log" || { echo "guardd did not become active"; cat "$WORK/guardd.log"; exit 1; }
 echo "guardd active (pid=$GUARDD_PID)"
 
+IPC_SEQ=0
+IPC_OUTPUT=""
+ipc_request() {
+  local operation="$1"
+  IPC_SEQ=$((IPC_SEQ + 1))
+  IPC_OUTPUT="$WORK/ipc-$IPC_SEQ.json"
+  timeout 5s python3 "$IPC_HELPER" \
+    --socket "$SOCK" --operation-json "$operation" \
+    --output "$IPC_OUTPUT" --pid-file "$WORK/ipc-$IPC_SEQ.pid"
+}
+
+wait_for_pending() {
+  local reader_pid="$1"
+  PENDING_ID=""
+  for _ in $(seq 1 50); do
+    ipc_request '{"kind":"ssh_pending_list"}' || return 1
+    PENDING_ID="$(python3 - "$IPC_OUTPUT" "$reader_pid" <<'PY'
+import json, sys
+document = json.load(open(sys.argv[1], encoding="utf-8"))
+body = document.get("body") or {}
+items = body.get("data", []) if body.get("kind") == "ssh_pending" else []
+pid = int(sys.argv[2])
+print(next((item["id"] for item in items if item.get("pid") == pid), ""))
+PY
+)"
+    [ -n "$PENDING_ID" ] && return 0
+    sleep 0.1
+  done
+  return 1
+}
+
+deny_unleased_read() {
+  # Exercise the exact-reader authorization boundary, then resolve it with a
+  # deterministic DENY. A headless UI timeout is not acceptance evidence.
+  local label="$1"
+  shift
+  "$@" >"$WORK/$label.out" 2>"$WORK/$label.err" &
+  local reader_pid=$!
+  if ! wait_for_pending "$reader_pid"; then
+    note_fail "$label did not enter the SSH-read pending queue"
+    kill -TERM "$reader_pid" 2>/dev/null || true
+    wait "$reader_pid" 2>/dev/null || true
+    return
+  fi
+  if ! ipc_request "{\"kind\":\"ssh_read_resolve\",\"id\":\"$PENDING_ID\",\"action\":\"block\"}"; then
+    note_fail "$label could not be explicitly denied"
+    kill -TERM "$reader_pid" 2>/dev/null || true
+    wait "$reader_pid" 2>/dev/null || true
+    return
+  fi
+  for _ in $(seq 1 50); do
+    ! kill -0 "$reader_pid" 2>/dev/null && break
+    sleep 0.1
+  done
+  if kill -0 "$reader_pid" 2>/dev/null; then
+    note_fail "$label remained blocked after explicit denial"
+    kill -TERM "$reader_pid" 2>/dev/null || true
+    wait "$reader_pid" 2>/dev/null || true
+    return
+  fi
+  set +e
+  wait "$reader_pid"
+  local status=$?
+  set -e
+  if [ "$status" -ne 0 ]; then
+    note_pass "$label denied at the exact-reader boundary"
+  else
+    note_fail "$label unexpectedly succeeded after explicit denial"
+  fi
+}
+
 # ssh-add must be resolvable by guardctl via PATH; export a controlled PATH that
 # still contains the system ssh-add.
 export PATH="$PATH"
@@ -150,23 +222,19 @@ echo "==> Test 1: direct cat of the protected key => denied without a lease"
 # No SSH-read lease has been granted to `cat`; the exact-reader model requires
 # confirmation, which a headless harness cannot approve, so the read fails
 # closed. Only the brokered `guardctl ssh load` (Test 3) grants access.
-if cat "$PRIV_KEY" > "$WORK/t1.out" 2>/dev/null; then
-  note_fail "direct read was allowed without an exact-reader lease"
-else
-  note_pass "direct read denied without an exact-reader lease"
-fi
+deny_unleased_read direct-cat cat "$PRIV_KEY"
 
 echo "==> Test 2: direct ssh-add (no lease) => read denied"
-if ssh-add "$PRIV_KEY" > "$WORK/t2.out" 2>&1; then
-  if ssh-add -l 2>/dev/null | grep -q "guard-ephemeral-load-test"; then
-    note_fail "direct ssh-add was allowed without an exact-reader lease"
-  else
-    note_fail "direct ssh-add returned success without loading the fixture"
-  fi
+deny_unleased_read direct-ssh-add ssh-add "$PRIV_KEY"
+if ssh-add -l 2>/dev/null | grep -q "guard-ephemeral-load-test"; then
+  note_fail "direct ssh-add was allowed without an exact-reader lease"
 else
-  note_pass "direct ssh-add read denied without an exact-reader lease"
+  note_pass "direct ssh-add did not load the fixture without a lease"
 fi
-ssh-add -d "$PRIV_KEY" >/dev/null 2>&1 || true
+# Do not pass the protected pathname back to ssh-add: that command may reopen
+# it while removing the identity and re-enter the exact-reader gate. The
+# disposable agent contains only this fixture, so clear it by protocol only.
+ssh-add -D >/dev/null 2>&1 || true
 
 echo "==> Test 3: guardctl ssh load => succeeds under a one-shot lease"
 if "$GUARDCTL" --socket "$SOCK" ssh load "$PRIV_KEY" > "$WORK/t3.out" 2>&1; then
@@ -184,19 +252,15 @@ fi
 
 echo "==> Test 5: after the load lease ends, direct cat remains denied"
 # The one-shot load lease is consumed/revoked after the load; a direct read
-# without a fresh lease still requires confirmation and fails closed.
+# without a fresh lease must enter then be denied at the same boundary.
 sleep 1
-if cat "$PRIV_KEY" > "$WORK/t5.out" 2>/dev/null; then
-  note_fail "direct read was allowed after lease cleanup without a fresh lease"
-else
-  note_pass "direct read denied after lease cleanup without a fresh lease"
-fi
+deny_unleased_read post-lease-direct-cat cat "$PRIV_KEY"
 
 echo "==> Test 6: a second guardctl ssh load works (fresh one-shot lease)"
 # Remove the identity first so the second load is a real load (not a no-op).
-ssh-add -d "$PRIV_KEY" >/dev/null 2>&1 || true
+ssh-add -D >/dev/null 2>&1 || true
 if ssh-add -l 2>/dev/null | grep -q "guard-ephemeral-load-test"; then
-  note_fail "ssh-add -d did not remove the identity before the second load"
+  note_fail "ssh-add -D did not remove the identity before the second load"
 else
   if "$GUARDCTL" --socket "$SOCK" ssh load "$PRIV_KEY" > "$WORK/t6.out" 2>&1; then
     if ssh-add -l 2>/dev/null | grep -q "guard-ephemeral-load-test"; then
@@ -210,7 +274,6 @@ else
 fi
 
 echo "==> Test 7: the used/revoked lease is in a terminal state"
-# List leases; the one-shot leases from the loads should be revoked and/or used.
 "$GUARDCTL" --socket "$SOCK" --json leases list > "$WORK/t7.json" 2>/dev/null || true
 # Every ssh_load lease must be revoked OR used (no live grant remains).
 if command -v python3 >/dev/null 2>&1; then
@@ -274,4 +337,4 @@ echo
 echo "NOTE: documented limitation — once a key is loaded into ssh-agent, same-user"
 echo "      malware that can reach SSH_AUTH_SOCK may request signatures. V1 mediates"
 echo "      raw private-key file access; it does not fully mediate agent signing."
-exit $FAIL
+if [ "$FAIL" -gt 0 ]; then exit 1; elif [ "$BLOCKED" -gt 0 ]; then exit 2; else exit 0; fi
