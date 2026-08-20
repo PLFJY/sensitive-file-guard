@@ -97,8 +97,6 @@ user and staged separately. SHA-256:
 
 ## Next action
 
-Continue at final cross-layer `LINUX_PLATFORM_FREEZE`: refresh File Shield
-evidence on current code; run File Shield ON/Process Shield ON and OFF,
-disabled/unsupported independence, browser/SSH/migration/continuity/process
-attack/performance gates; and retain REDUCED where the capsule cannot prove
-host BPF behavior. See `linux-process-shield-freeze-final.md`.
+**GOAL COMPLETE — LINUX_PLATFORM_FREEZE.** See
+`linux-platform-freeze-final.md`; residual REDUCED/PARTIAL limits remain
+explicit and do not weaken File Shield.
