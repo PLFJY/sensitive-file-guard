@@ -31,6 +31,7 @@ fi
 BIN_DIR="${BIN_DIR:-$REPO/target/debug}"
 GUARDD="${GUARDD:-$BIN_DIR/guardd}"
 PROBE="${PROBE:-$BIN_DIR/guard-test-probe}"
+IPC_HELPER="$REPO/scripts/helpers/ipc-request.py"
 # Enrolled browser identity: fixture writes use this binary (matches the
 # config exe_paths) so the browser can create new profile content after
 # startup.
@@ -81,6 +82,64 @@ expect_denied_eventually() {
   return 1
 }
 
+IPC_SEQ=0
+IPC_OUTPUT=""
+ipc_request() {
+  local operation="$1"
+  IPC_SEQ=$((IPC_SEQ + 1))
+  IPC_OUTPUT="$WORK/ipc-$IPC_SEQ.json"
+  timeout 5s python3 "$IPC_HELPER" \
+    --socket "$WORK/guardd.sock" --operation-json "$operation" \
+    --output "$IPC_OUTPUT" --pid-file "$WORK/ipc-$IPC_SEQ.pid"
+}
+
+expect_ssh_read_blocked() {
+  # SSH readers are deliberately held for confirmation, even when the reader
+  # is untrusted. A headless gate must resolve that exact pending operation to
+  # BLOCK; treating its intentional wait as an immediate denial would hang and
+  # would not prove that no key bytes were returned.
+  local path="$1"
+  local output="$WORK/ssh-replacement.out"
+  "$EVIL_PROBE" read "$path" >"$output" 2>/dev/null &
+  local reader_pid=$!
+  local pending_id=""
+  for _ in $(seq 1 50); do
+    ipc_request '{"kind":"ssh_pending_list"}' || break
+    pending_id="$(python3 - "$IPC_OUTPUT" "$reader_pid" <<'PY'
+import json, sys
+document = json.load(open(sys.argv[1], encoding="utf-8"))
+body = document.get("body") or {}
+items = body.get("data", []) if body.get("kind") == "ssh_pending" else []
+pid = int(sys.argv[2])
+print(next((item["id"] for item in items if item.get("pid") == pid), ""))
+PY
+)"
+    [ -n "$pending_id" ] && break
+    sleep 0.1
+  done
+  if [ -z "$pending_id" ]; then
+    echo "FAIL: replacement SSH read did not enter the pending queue"
+    kill -TERM "$reader_pid" 2>/dev/null || true
+    wait "$reader_pid" 2>/dev/null || true
+    return 1
+  fi
+  if ! ipc_request "{\"kind\":\"ssh_read_resolve\",\"id\":\"$pending_id\",\"action\":\"block\"}"; then
+    echo "FAIL: replacement SSH read could not be explicitly blocked"
+    kill -TERM "$reader_pid" 2>/dev/null || true
+    wait "$reader_pid" 2>/dev/null || true
+    return 1
+  fi
+  set +e
+  wait "$reader_pid"
+  local status=$?
+  set -e
+  if [ "$status" -ne 0 ] && [ ! -s "$output" ]; then
+    return 0
+  fi
+  echo "FAIL: replacement SSH read returned data or was not denied"
+  return 1
+}
+
 # New inode at an already-protected critical path. The enrolled browser
 # replaces its own Cookies file; the unknown probe must still be denied.
 rm -f "$PROFILE/Network/Cookies"
@@ -110,6 +169,6 @@ chmod 0600 "$SSH_REPLACEMENT"
 # directly at the protected pathname must be denied. Model a legitimate
 # atomic key-file replacement without asking the firewall to allow that open.
 mv -f "$SSH_REPLACEMENT" "$SSH_KEY"
-expect_denied_eventually "$SSH_KEY"
+expect_ssh_read_blocked "$SSH_KEY"
 
 echo "PASS: browser replacements converge to denial; SSH replacement remains protected"
