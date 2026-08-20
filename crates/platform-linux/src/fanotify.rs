@@ -337,6 +337,17 @@ impl FanotifyGroup {
         Ok(count_filesystem_marks_from_fdinfo(&fdinfo))
     }
 
+    /// Count every live mark on this group from the kernel's fdinfo view.
+    ///
+    /// A topology group owns only its directory move marks, so its learner can
+    /// compare this count with the directory marks it successfully installed.
+    /// This catches a later kernel-side mark loss; retaining a path in the
+    /// learner's bookkeeping is not proof that the kernel still watches it.
+    pub fn mark_count(&self) -> io::Result<usize> {
+        let fdinfo = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", self.fd))?;
+        Ok(count_marks_from_fdinfo(&fdinfo))
+    }
+
     /// Blocking read of one or more events into `buf`; returns bytes read.
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
         // SAFETY: read into a valid buffer of buf.len() bytes from a valid fd.
@@ -373,6 +384,13 @@ fn count_filesystem_marks_from_fdinfo(fdinfo: &str) -> usize {
     fdinfo
         .lines()
         .filter(|line| line.starts_with("fanotify sdev:"))
+        .count()
+}
+
+fn count_marks_from_fdinfo(fdinfo: &str) -> usize {
+    fdinfo
+        .lines()
+        .filter(|line| line.starts_with("fanotify ") && !line.starts_with("fanotify flags:"))
         .count()
 }
 
@@ -914,6 +932,7 @@ mod tests {
                       fanotify mnt_id:2 mflags:0 mask:1 ignored_mask:0\n\
                       fanotify sdev:3 mflags:0 mask:10000 ignored_mask:0\n";
         assert_eq!(count_filesystem_marks_from_fdinfo(fdinfo), 2);
+        assert_eq!(count_marks_from_fdinfo(fdinfo), 4);
     }
 
     /// Build a FAN_MOVE event carrying one `FAN_EVENT_INFO_TYPE_FID` record

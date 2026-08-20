@@ -16,18 +16,19 @@ live gate BLOCKED counted as PASS (HARNESS §8).** This goal is **COMPLETE** (se
   live gates mark only fresh capsule-internal tmpfs instances or the host's isolated loop ext4.
 
 ## Current phase
-`REVIEW REOPENED — P0/P1 (user audit) IN LIVE VERIFICATION; FREEZE NOT RESTORED until closed`.
+`REVIEW REOPENED — P0/P1 targeted live verification complete; FRESH FULL SUITE PENDING; FREEZE NOT RESTORED`.
 
 The user's own post-freeze audit rejected the freeze with one P0 (SSH private-key mmap
 authorization boundary) and five P1 findings (pidfd-invalid terminal no-mutation; topology group
 failure/overflow → persistent health + ambiguous fail-closed; autonomous mark-loss detection;
 topology identity keyed by fsid+handle; parser read_unaligned + unknown-info-type advance). All
-are **closed in code and unit-tested (d1ddd2e + e9380f8); capsule live verification in progress**:
+are **closed in code and unit-tested (d1ddd2e + e9380f8); targeted capsule live verification complete**:
 
-- **P0 SSH mmap — capsule LIVE VERIFIED (PASS=3/3)**: with the key marked
+- **P0 SSH mmap — capsule LIVE VERIFIED in both modes (PASS=3/3 each)**: with the key marked
   `FAN_OPEN_PERM|FAN_ACCESS_PERM`, unknown-process `mmap`/`read` of the private key are denied
-  at open (no readable fd granted); audit records the deny. OPEN_PERM is the authorization
-  boundary; mmap/splice/sendfile/copy_file_range/io_uring all require a readable fd.
+  at open (no readable fd granted); audit records the deny. The fix covers strict-filesystem,
+  conservative, and runtime enrollment. OPEN_PERM is the authorization boundary;
+  mmap/splice/sendfile/copy_file_range/io_uring all require a readable fd.
 - **P1-a pidfd terminal — live group verified (PASS=5/5) + unit-tested**: FAN_REPORT_PIDFD
   group accepted, unknown denied, enrolled allowed, `pidfd_missing_events=0`; terminal deny is
   code-order-verified (before any authority mutation). The mismatch trigger itself (process-exit
@@ -41,10 +42,11 @@ are **closed in code and unit-tested (d1ddd2e + e9380f8); capsule live verificat
   query), continuity → `LOST(required_filesystem_mark_lost)`, `file_shield=REDUCED`, audit record
   `required_filesystem_mark_lost` committed (immediate flush, e9380f8); restore keeps LOST sticky;
   enforcement resumes.
-- **P1-d fsid-keyed topology identity — code + unit-tested; capsule UNAVAILABLE**: tmpfs has no
-  `name_to_handle_at`, so zero-settle/object-identity regressions under `TopologyKey=(fsid,
-  handle_type, handle_bytes)` need the host's isolated loop ext4 (BLOCKED in capsule; host rerun
-  pending).
+- **P1-d fsid-keyed topology identity — capsule LIVE VERIFIED on an isolated loop-backed ext4**:
+  object identity PASS=8; fast zero-settle attack 10,000/10,000 denied with 0 recovery, plus
+  settled 1,000/1,000 and runtime-subdirectory 200/200 with 0 recovery. The ordinary capsule
+  tmpfs lacks `name_to_handle_at`; the test instead used a fresh ext4 mounted from a bound loop
+  device, still wholly inside the capsule.
 - **P1-e parser — unit-tested + live sanity**: `ptr::read_unaligned` + unknown-info-type
   `off += len` (44000-event capsule burst parsed without looping).
 
@@ -95,7 +97,7 @@ PID/mount namespaces and seccomp differences are downgraded where relevant (e.g.
 ## Live evidence (current + historical)
 | Harness | Result | Evidence path | Notes |
 |---|---|---|---|
-| **FULL SUITE (current, authoritative)** | **PASS=21 FAIL=0 BLOCKED=0** | evidence/live-host-20260820-041545/ | fresh full LFH0–LFH7 run after all R1–R6 + safety fixes; includes zero-settle 0 recovery, continuity R3/R4 LIVE, fdstore PARTIAL, benchmark |
+| **FULL SUITE (historical, pre-P0/P1)** | **PASS=21 FAIL=0 BLOCKED=0** | evidence/live-host-20260820-041545/ | fresh LFH0–LFH7 run after R1–R6 and safety fixes, but before the later P0/P1 review; it is not current freeze evidence |
 | review batch 2 | PASS=3 FAIL=1 BLOCKED=1 | evidence/live-host-review-batch-20260819-231529/ | **HISTORICAL / SUPERSEDED** by 041545; fdstore first-run attribution bug (fixed), continuity under the OLD gate |
 | review batch 1 | PASS=2 FAIL=1 BLOCKED=1 | evidence/live-host-review-batch-20260819-222651/ | **HISTORICAL / SUPERSEDED** by 041545 |
 | review batch 3 (R1/R3/R4) | PASS (continuity + step3 live) | evidence/live-host-step3-target-20260820-011146/ etc. | **HISTORICAL / SUPERSEDED** by 041545; R1/R3/R4 individual live runs |
@@ -127,8 +129,8 @@ PID/mount namespaces and seccomp differences are downgraded where relevant (e.g.
   legacy/unsupported); NOT ACCEPTED (Chromium-family, Flatpak/Snap/network FS).**
 
 ## Next exact action
-Freeze stays REJECTED until the P0/P1 review is closed: finish the remaining host-side live
-reruns (P1-d zero-settle/object-identity under fsid keys on the isolated loop ext4 — capsule
-cannot), then re-run the full suite, then update this file and the freeze report truthfully.
+Freeze stays REJECTED until the P0/P1 review is closed by a fresh full suite, then update this
+file and the freeze report truthfully. P0/P1-a..P1-e are now code/unit closed and live-covered;
+P1-d used a loop-backed ext4 inside the capsule because ordinary capsule tmpfs has no handles.
 Capsule fanotify now works (nspawn `--system-call-filter=fanotify_init fanotify_mark
 pidfd_getfd`, installed by the user on 2026-08-20).

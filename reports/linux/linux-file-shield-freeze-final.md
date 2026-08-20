@@ -5,8 +5,7 @@ Baseline: commit `3cdf844` (LFH0–LFH7 implementation freeze, live gates 20/20 
 and then **REJECTED AGAIN by the user's own post-freeze audit with P0+P1 findings**. Kernel
 `7.1.8-arch1-3` (x86_64). This document records the review-closure state. **IMPLEMENTATION FREEZE
 IS NOT RESTORED** until the P0/P1 review is closed: P0 + P1-a..P1-e are closed in code and
-unit-tested (d1ddd2e, e9380f8); P0/P1-b/P1-c are capsule LIVE VERIFIED; P1-d needs the host
-isolated loop ext4 rerun (capsule tmpfs has no name_to_handle_at). The previous freeze evidence
+unit-tested (d1ddd2e, e9380f8); P0/P1-b/P1-c/P1-d are capsule LIVE VERIFIED. The previous freeze evidence
 (`evidence/live-host-20260820-041545`: PASS=21 FAIL=0 BLOCKED=0) is HISTORICAL / superseded by
 this reopened review.
 
@@ -30,10 +29,12 @@ this reopened review.
 ## Current posture (REVIEW REOPENED — P0/P1 IN LIVE VERIFICATION)
 - **Implementation freeze: NOT RESTORED.** The user's post-freeze audit (P0 SSH mmap boundary;
   P1-a pidfd terminal no-mutation; P1-b topology fail-closed + persistent health; P1-c autonomous
-  mark-loss; P1-d fsid-keyed topology identity; P1-e parser fixes) is being closed with capsule
-  live verification:
-  - **P0 SSH mmap — capsule LIVE VERIFIED (3/3)**: `FAN_OPEN_PERM` is the authorization boundary;
-    unknown mmap/read of the private key denied at open; audit deny recorded.
+  mark-loss; P1-d fsid-keyed topology identity; P1-e parser fixes) has completed its targeted
+  capsule live verification:
+  - **P0 SSH mmap — capsule LIVE VERIFIED in both modes (strict-filesystem 3/3; conservative
+    3/3)**: `FAN_OPEN_PERM` is the authorization boundary; unknown mmap/read of the private key
+    is denied before a readable fd is granted, and audit denial is recorded. Runtime enrollment
+    now installs the same `FAN_OPEN_PERM|FAN_ACCESS_PERM` mask.
   - **P1-b topology overflow — capsule LIVE VERIFIED (5/5)**: rename burst → topology queue
     overflow → sticky `topology_uncertain` → `file_shield=REDUCED`; ambiguous outside-path open
     fails closed (denied) while uncertain.
@@ -43,16 +44,17 @@ this reopened review.
     enforcement resumes after mark restore.
   - **P1-a pidfd terminal — live group verified (5/5) + unit/code-order verified** (mismatch
     trigger not deterministically live-testable — documented).
-  - **P1-d fsid-keyed topology identity — code + unit-tested; capsule UNAVAILABLE** (tmpfs has
-    no `name_to_handle_at`); host isolated loop ext4 rerun of zero-settle/object-identity
-    regressions pending.
+  - **P1-d fsid-keyed topology identity — capsule LIVE VERIFIED on an isolated loop-backed ext4**:
+    object identity 8/8; zero-settle fast attack 10,000/10,000 denied with 0 recovery, settled
+    1,000/1,000 and runtime-subdirectory 200/200 also denied. The capsule's ordinary tmpfs has
+    no `name_to_handle_at`, so the test explicitly used its bound loop device and a fresh ext4.
   - **P1-e parser — unit-tested + live sanity** (44000-event capsule burst parsed cleanly).
 - Accepted browser set: **Firefox only** (`test-native-browser-compat-root.sh` PASS 8/8).
   **Chromium-family (chromium/google-chrome/zen) NOT ACCEPTED** (NOT INSTALLED on this host).
 - fdstore crash continuity: **PARTIAL — Experiment B not recoverable via public UAPI; crash
   continuity REDUCED; fdstore experimental hardening only.**
 - LFH2 never-opened-before rename-in gap: **CLOSED** (cross-group ordering + target-fid learning,
-  zero-settle 10000/10000 denied under the pre-P0/P1 code; fsid-key rerun pending per P1-d).
+  zero-settle 10000/10000 denied under the current fsid-keyed implementation).
 - Safety: guardd REFUSES to start when strict-filesystem would mark the root mount (two real
   lockups; AGENTS.md LIVE-TEST SAFETY). This is a **SAFETY REFUSAL**, not fanotify unsupported.
 - Capsule: nspawn seccomp now allows fanotify + pidfd_getfd (`--system-call-filter=fanotify_init
@@ -60,7 +62,8 @@ this reopened review.
 
 ## Evidence
 - **P0/P1 capsule live verification (2026-08-20)**: capsule runners in
-  `scripts/linux/capsule/` — `p0-capsule-run.sh` (P0 SSH mmap 3/3),
+  `scripts/linux/capsule/` — `p0-capsule-run.sh` (P0 SSH mmap 3/3 in each of strict and
+  conservative modes),
   `p1b-capsule-run.sh` (topology overflow 5/5), `p1c-capsule-run.sh` (autonomous mark-loss 8/8),
   plus `test-pidfd-root.sh` live (5/5) and the guardd-exact fanotify matrix probe.
 - **Previous (HISTORICAL / superseded by this reopened review)**: `evidence/live-host-20260820-041545/`
@@ -73,9 +76,10 @@ this reopened review.
 
 ## Final verdict
 `FREEZE REJECTED / REVIEW REOPENED — P0 + P1-a..P1-e (user audit) are closed in code and
-unit-tested (d1ddd2e, e9380f8) with capsule live verification: P0 SSH mmap 3/3, P1-b topology
-overflow fail-closed 5/5, P1-c autonomous mark-loss 8/8, P1-a pidfd group 5/5. REMAINING before
-FREEZE: P1-d fsid-keyed zero-settle/object-identity rerun on the host isolated loop ext4
-(capsule tmpfs has no name_to_handle_at — honestly BLOCKED in capsule, not claimed PASS), then a
-fresh full suite, then truthful report update. LFH4 remains PARTIAL / crash continuity REDUCED.
+unit-tested (d1ddd2e, e9380f8) with capsule live verification: P0 SSH mmap 3/3 in each of strict
+and conservative mode, P1-b topology
+overflow fail-closed 5/5, P1-c autonomous mark-loss 8/8, P1-a pidfd group 5/5, and P1-d
+fsid-keyed object identity 8/8 plus zero-settle 10,000/10,000 with 0 recovery on capsule
+loop-ext4. REMAINING before FREEZE: a fresh full suite, then truthful report update. LFH4 remains
+PARTIAL / crash continuity REDUCED.
 Safety: guardd refuses root-mount FAN_MARK_FILESYSTEM; capsule marks only fresh tmpfs instances.`

@@ -119,7 +119,11 @@ impl TopologyLearner {
             cycle = cycle.wrapping_add(1);
             if cycle.is_multiple_of(8) {
                 if let Err(error) = self.refresh_tree_marks() {
-                    tracing::warn!(%error, "topology tree-mark refresh failed");
+                    // A refresh error includes a missing live mark. The
+                    // in-memory set is only an intent log, not evidence that
+                    // the kernel still delivers move events.
+                    self.classifier.mark_topology_uncertain();
+                    tracing::error!(%error, "topology tree-mark refresh failed; topology identity UNCERTAIN, ambiguous opens fail closed");
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(250));
@@ -132,6 +136,17 @@ impl TopologyLearner {
     fn refresh_tree_marks(&self) -> std::io::Result<usize> {
         let mut n = 0;
         let mut marked = self.marked.lock().expect("marked set lock poisoned");
+        // This group owns only directory move marks. If the kernel no longer
+        // reports every mark we installed, a move may have been missed; do
+        // not silently trust the bookkeeping set or classify outside objects
+        // as unrelated.
+        let observed = self.topology.mark_count()?;
+        if observed < marked.len() {
+            return Err(std::io::Error::other(format!(
+                "topology mark loss: observed {observed} live marks, expected at least {}",
+                marked.len()
+            )));
+        }
         for root in self.classifier.topology_roots() {
             n += mark_dir_recursive(
                 self.topology.as_ref(),
@@ -157,12 +172,15 @@ fn mark_dir_recursive(
     marked: &mut std::collections::HashSet<std::path::PathBuf>,
 ) -> std::io::Result<usize> {
     let mut n = 0;
-    if marked.insert(dir.to_path_buf()) {
+    if !marked.contains(dir) {
         group.mark_dir_move(dir)?;
         // Record the dir's handle so move events' parent handles (the fid is
         // the parent dir on kernel 7.1, never the moved file) resolve back
         // to a path for `parent/name` identity resolution.
         classifier.record_marked_dir(dir);
+        // Insert only after the kernel accepted the mark. Otherwise a retry
+        // would be skipped even though this directory was never covered.
+        marked.insert(dir.to_path_buf());
         n += 1;
     }
     for entry in std::fs::read_dir(dir)? {

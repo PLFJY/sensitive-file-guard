@@ -11,7 +11,7 @@
 # Tests:
 #   1. install service via deploy/install.sh
 #   2. start service, verify guardctl status shows ACTIVE
-#   3. browser fixture is denied while SSH-key read remains allowed
+#   3. browser fixture and an unapproved SSH-key open are denied
 #   4. stop service, verify files unprotected (fail-open)
 #   5. start service again, verify files protected (marks reconstructed)
 #   6. crash daemon (kill -9), verify systemd restarts it
@@ -184,7 +184,7 @@ else
 fi
 
 # ===========================================================================
-# Test 3: verify browser denial and SSH behavioral read allowance
+# Test 3: verify browser denial and SSH open-time authorization
 # ===========================================================================
 echo "==> Test 3: browser denied; SSH read fail-closed"
 if "$PROBE" read "$COOKIES" > /dev/null 2>&1; then
@@ -192,10 +192,10 @@ if "$PROBE" read "$COOKIES" > /dev/null 2>&1; then
 else
   note_pass "cookies denied"
 fi
-# LFH0 behavioral model: the SSH key OPEN is allowed (no audit) but the
-# subsequent FAN_ACCESS_PERM read event is a fail-closed authorization
-# boundary — an unapproved reader (no SshLoadLease, no confirmation) is
-# denied, so the probe cannot read the key bytes.
+# P0: SSH OPEN_PERM is the authorization boundary. An unapproved reader must
+# never receive a readable fd, because mmap(2) does not rely on a later
+# FAN_ACCESS_PERM event. ACCESS_PERM remains defense in depth for an approved
+# read flow.
 if "$PROBE" read "$PRIV_KEY" > /dev/null 2>&1; then
   note_fail "SSH key read succeeded (fail-closed boundary did not deny)"
 else

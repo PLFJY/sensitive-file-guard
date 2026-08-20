@@ -274,6 +274,15 @@ impl StrictClassifier {
         &self.filesystem_paths
     }
 
+    /// Make the topology identity coverage sticky-uncertain. Once a topology
+    /// mark or learner is lost, an outside-path object can no longer safely be
+    /// classified as unrelated; ambiguous opens must fail closed until restart.
+    pub(crate) fn mark_topology_uncertain(&self) {
+        self.metrics
+            .topology_uncertain
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub fn classify_fd(&self, fd: RawFd) -> StrictClassification {
         let identity = match fanotify::fd_identity(fd) {
             Ok(identity) => identity,

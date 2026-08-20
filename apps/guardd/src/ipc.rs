@@ -46,7 +46,7 @@ pub struct IpcState {
     pub audit: Arc<AuditStore>,
     pub version: String,
     /// The fanotify group, shared so the `SshProtect` handler can add a
-    /// browser `FAN_OPEN_PERM` or SSH `FAN_ACCESS_PERM` mark at runtime. `None` when the daemon is not running
+    /// browser `FAN_OPEN_PERM` or SSH `FAN_OPEN_PERM|FAN_ACCESS_PERM` mark at runtime. `None` when the daemon is not running
     /// in enforcement mode (e.g. one-shot tests). `mark_file` takes `&self` and
     /// the kernel `fanotify_mark` syscall is thread-safe, so sharing across the
     /// IPC thread is safe.
@@ -1081,7 +1081,10 @@ fn handle_ssh_protect(
     // Mark before publishing the resource. An event in the tiny interval
     // between these operations is unclassified and therefore denied; the old
     // registry-first ordering had a fail-open enrollment window.
-    if let Err(e) = group.mark_file(libc::FAN_ACCESS_PERM, &res.path) {
+    // P0: runtime enrollment must use the same open-time authorization
+    // boundary as startup configuration. ACCESS_PERM alone leaves mmap(2)
+    // able to consume a readable fd without a content permission event.
+    if let Err(e) = group.mark_file(libc::FAN_OPEN_PERM | libc::FAN_ACCESS_PERM, &res.path) {
         return Response::err(format!(
             "ssh protect: fanotify mark failed for {}: {e}",
             res.path.display()

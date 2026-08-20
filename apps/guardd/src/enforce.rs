@@ -604,15 +604,15 @@ impl EnforcementEngine {
         Ok((id, expires_at))
     }
 
-    /// Mark protected concrete files. Browser resources retain the existing
-    /// `FAN_OPEN_PERM` policy boundary; SSH private keys alone use
-    /// `FAN_ACCESS_PERM`, which corresponds to an actual read request and does
-    /// not impose a permission round trip on unrelated filesystem activity.
+    /// Mark protected concrete files. SSH private keys use OPEN_PERM as their
+    /// authorization boundary: ACCESS_PERM alone cannot mediate mmap(2), so an
+    /// unapproved reader must never receive a readable fd in any enforcement
+    /// mode. ACCESS_PERM remains a narrow, defense-in-depth read-time gate.
     pub fn mark_files(&self, group: &fanotify::FanotifyGroup) -> std::io::Result<usize> {
         let mut n = 0;
         for res in self.registry.files() {
             let mask = if res.kind == ProtectedResourceKind::SshPrivateKey {
-                libc::FAN_ACCESS_PERM
+                libc::FAN_OPEN_PERM | libc::FAN_ACCESS_PERM
             } else {
                 libc::FAN_OPEN_PERM
             };
@@ -772,7 +772,7 @@ impl EnforcementEngine {
         &mut self,
         pid: i32,
         fd: RawFd,
-        ssh_read_event: bool,
+        _ssh_read_event: bool,
     ) -> (Decision, Option<AuditRecord>) {
         let resource = match self.classify_fd(fd) {
             Some(r) => r,
@@ -782,13 +782,10 @@ impl EnforcementEngine {
                 return (Decision::Deny(DenyReason::UnknownProcess), None);
             }
         };
-        if resource.kind == ProtectedResourceKind::SshPrivateKey && !ssh_read_event {
-            // A strict filesystem FAN_OPEN_PERM mark can also observe the key's
-            // open. The behavioral contract begins at the subsequent exact
-            // FAN_ACCESS_PERM read event, so do not arm/audit twice.
-            self.allowed += 1;
-            return (Decision::Allow, None);
-        }
+        // P0: SSH OPEN_PERM is deliberately authorized here too. Never allow
+        // the pre-read event merely because an ACCESS_PERM event may follow:
+        // mmap(2) can consume a readable fd without generating that content
+        // permission event.
         self.decide_protected(pid, resource, classify_diag(fd))
     }
 
@@ -2188,6 +2185,22 @@ mod tests {
     }
 
     #[test]
+    fn ssh_key_open_requires_confirmation_before_a_readable_fd_is_granted() {
+        // P0: `decide` models FAN_OPEN_PERM. It must not return Allow merely
+        // because a later ACCESS_PERM event may occur: mmap(2) can use the fd
+        // without that later content-permission event.
+        let s = guard_test_fixtures::SshFixture::create().unwrap();
+        let mut engine =
+            EnforcementEngine::from_config(&ssh_config(&s.private_key)).expect("engine");
+        let f = std::fs::File::open(&s.private_key).unwrap();
+        assert_eq!(
+            engine.decide(std::process::id() as i32, f.as_raw_fd()),
+            Decision::RequireSshKeyConfirmation,
+            "unapproved SSH key open must not receive a readable fd"
+        );
+    }
+
+    #[test]
     fn ssh_key_audit_record_has_no_secret_content() {
         // The audit record for an allowed SSH key open must NOT contain the
         // fixture's private-key marker (which stands in for real key bytes).
@@ -2408,8 +2421,8 @@ mod tests {
     fn ssh_load_lease_wrong_identity_requires_confirmation() {
         // Lease bound to a different start_time than the opener => the scope
         // matches (same resource + uid) but the StableIdentity does not, so the
-        // opener does not receive the lease. The raw read remains allowed and
-        // the lease is NOT marked used.
+        // opener does not receive the lease and must require confirmation. The
+        // lease is NOT marked used.
         let s = guard_test_fixtures::SshFixture::create().unwrap();
         let mut engine =
             EnforcementEngine::from_config(&ssh_config(&s.private_key)).expect("engine");

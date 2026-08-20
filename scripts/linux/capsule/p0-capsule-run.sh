@@ -24,6 +24,7 @@ set +e
 TEST_FS_ROOT=/p0fs \
 PRESET_SSH_KEY=/stage/fixtures/synthetic-test-key \
 BIN_DIR=/stage/bin \
+ENFORCEMENT_MODE="${ENFORCEMENT_MODE:-strict-filesystem}" \
 /stage/scripts/test-p0-ssh-mmap-root.sh
 RC=$?
 set -e

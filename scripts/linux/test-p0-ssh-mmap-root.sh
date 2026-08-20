@@ -25,6 +25,7 @@ BIN_DIR="${BIN_DIR:-$REPO/target/release}"
 GUARDD="${GUARDD:-$BIN_DIR/guardd}"
 GUARDCTL="${GUARDCTL:-$BIN_DIR/guardctl}"
 PROBE="${PROBE:-$BIN_DIR/guard-test-probe}"
+ENFORCEMENT_MODE="${ENFORCEMENT_MODE:-strict-filesystem}"
 
 PASS=0; FAIL=0; BLOCKED=0
 note_pass() { echo "PASS: $1"; PASS=$((PASS + 1)); }
@@ -43,6 +44,10 @@ fi
 for bin in "$GUARDD" "$GUARDCTL" "$PROBE"; do
   test -x "$bin" || { echo "ERROR: missing $bin"; exit 2; }
 done
+case "$ENFORCEMENT_MODE" in
+  strict-filesystem|conservative) ;;
+  *) echo "ERROR: unsupported ENFORCEMENT_MODE=$ENFORCEMENT_MODE"; exit 2 ;;
+esac
 
 WORK="$TEST_FS_ROOT/p0-ssh-$$"
 mkdir -p "$WORK/ssh" "$WORK/profile/Default"
@@ -59,7 +64,7 @@ printf '{}' > "$WORK/profile/Local State"
 cat > "$WORK/config.json" <<EOF
 {
   "config_version": 1,
-  "enforcement_mode": "strict-filesystem",
+  "enforcement_mode": "$ENFORCEMENT_MODE",
   "browsers": [
     {
       "id": "synthetic-chromium",
@@ -96,7 +101,7 @@ for _ in $(seq 1 200); do
 done
 [ -S "$WORK/guardd.sock" ] || { echo "guardd not ready"; exit 1; }
 
-echo "==> P0: unknown process must NOT obtain a readable fd on the private key"
+echo "==> P0 ($ENFORCEMENT_MODE): unknown process must NOT obtain a readable fd on the private key"
 if "$PROBE" mmap "$WORK/ssh/id_ed25519" >/dev/null 2>&1; then
   note_fail "mmap of the private key succeeded (readable fd was granted)"
 else

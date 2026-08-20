@@ -263,8 +263,9 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                 })?;
         }
         // Strict's broad filesystem mark is deliberately `FAN_OPEN_PERM` for
-        // browser classification.  Add only exact SSH `FAN_ACCESS_PERM` marks
-        // rather than turning every ordinary file read into a round trip.
+        // browser classification. Add exact SSH OPEN+ACCESS marks: OPEN_PERM
+        // is the authorization boundary for mmap safety, while ACCESS_PERM is
+        // retained only as a narrow read-time defense in depth.
         let ssh_read_marks = engine.mark_ssh_read_files(&group)?;
         (ssh_read_marks, 0, classifier.filesystem_paths().len())
     } else {
@@ -385,7 +386,7 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                 classifier.attach_topology_group(Arc::clone(&topology_group));
                 match topology_learner::TopologyLearner::new(
                     cfg.enforcement_mode,
-                    classifier,
+                    Arc::clone(&classifier),
                     topology_group,
                 ) {
                     Ok(learner) => {
@@ -411,9 +412,26 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                                 tracing::warn!(%error, "topology tree marks incomplete; topology identity UNCERTAIN, ambiguous opens fail closed")
                             }
                         }
+                        let learner_classifier = Arc::clone(&classifier);
                         match std::thread::Builder::new()
                             .name("guardd-topology-fid".into())
-                            .spawn(move || learner.run())
+                            .spawn(move || {
+                                // A panic or unexpected return from this
+                                // thread means topology coverage stopped. It
+                                // must change enforcement posture rather than
+                                // leaving strict mode apparently ACTIVE.
+                                let result = std::panic::catch_unwind(
+                                    std::panic::AssertUnwindSafe(|| learner.run()),
+                                );
+                                if !signal::is_shutdown() {
+                                    learner_classifier.mark_topology_uncertain();
+                                    if result.is_err() {
+                                        tracing::error!("topology learner panicked; topology identity UNCERTAIN, ambiguous opens fail closed");
+                                    } else {
+                                        tracing::error!("topology learner exited unexpectedly; topology identity UNCERTAIN, ambiguous opens fail closed");
+                                    }
+                                }
+                            })
                         {
                             Ok(handle) => Some(handle),
                             Err(error) => {
