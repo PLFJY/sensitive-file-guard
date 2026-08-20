@@ -2,15 +2,11 @@
 
 ## Goal and current phase
 
-`LINUX_PLATFORM_FREEZE` is the active goal. The first sub-goal,
-`RE-CLOSE LINUX_FILE_SHIELD_FREEZE`, is **restored at commit
-`77dcd75edc3a10b95e4aa3051cd48fe29654e407`**. Process Shield LPS0 through
-LPS0 through LPS6 are frozen at `4eb6f8059cc19e9be52d32b9dfc724d147ff1118`: an LPS2-proven
-disposable Firefox Main is bound to the exact-instance BPF map before its File
-Shield WebStorage fd is released; LPS4 has zero unexplained Process Shield
-denials; and the fresh physical-host LPS5/LPS6 5/5 manifest includes a
-daemon-integrated adversarial oracle. Process Shield remains truthfully
-REDUCED/optional, and Linux Platform Freeze is not complete.
+`LINUX_PLATFORM_FREEZE` is **accepted for the documented REDUCED capability
+scope**. Fresh physical-host evidence on implementation commit
+`9673f6fcd6380447af307b8f7ecc13679d5fbc8d` re-closes File Shield and runs the
+complete Process Shield 5-gate manifest. Process Shield remains truthfully
+REDUCED/optional; this never weakens File Shield.
 
 ## Current File Shield verdict
 
@@ -21,13 +17,14 @@ back-filled evidence:
 
 - host kernel: `Linux plfjy-arch 7.1.8-arch1-3 #1 SMP PREEMPT_DYNAMIC Tue,
   11 Aug 2026 09:16:08 +0000 x86_64 GNU/Linux`
-- commit: `77dcd75edc3a10b95e4aa3051cd48fe29654e407`
+- commit: `9673f6fcd6380447af307b8f7ecc13679d5fbc8d`
 - one-shot formal manifest:
-  `/tmp/sfg-host-formal-77dcd75-20260820-210000/summary-oneshot.txt`
+  `/tmp/sfg-platform-file-oneshot-9673f6fcd638/summary-oneshot.txt`
 - result: **23 mandatory PASS, 0 FAIL, 0 BLOCKED**; native-browser observation:
   **1 PASS, 0 PARTIAL/FAIL/BLOCKED**.
 - systemd current-head evidence:
-  `/tmp/sfg-systemd-77dcd75-20260820-211000.log`, **13 PASS, 0 FAIL, 0 BLOCKED**.
+  `/tmp/sfg-platform-file-systemd-9673f6fcd638/summary-systemd.txt`, **1
+  mandatory PASS, 0 FAIL, 0 BLOCKED**, plus fdstore observation PARTIAL.
 
 The formal manifest derives its count from `scripts/linux/run-all-root-gates.sh`.
 It includes P0 SSH mmap (configured strict, configured conservative, runtime
@@ -70,8 +67,8 @@ filesystems, or untested browser variants.
   public UAPI. Do not describe this as accepted crash continuity.
 - Process Shield is optional. With `process_shield_enabled: true`, LPS3
   attaches a `ptrace_access_check` BPF LSM policy and admits an exact Firefox
-  Main only from a pre-response File Shield WebStorage event. The host
-  synthetic oracle proves product-object causality for ptrace,
+  Main only from a pre-response File Shield WebStorage event. The current-head
+  daemon-integrated oracle proves this full admission path for ptrace,
   `process_vm_readv`, `process_vm_writev`, and `/proc/PID/mem`; other paths
   remain NOT ACCEPTED. Its unsupported or disabled state never weakens File
   Shield. See `reports/linux/lps5-adversarial.md`.
@@ -81,22 +78,26 @@ filesystems, or untested browser variants.
   The capsule boot path also blocked in `systemd-firstboot`. Those limitations
   are reported rather than treated as host-equivalent PASS.
 
-## Release artifacts staged and tested
+## Release artifacts built and tested
 
 The release artifacts used by the physical-host run were built by the normal
-user and staged separately. SHA-256:
+user. The complete formal manifests also record `guard-es` and `guard-ui`.
+SHA-256:
 
 | Artifact | SHA-256 |
 |---|---|
-| `guardd` | `71562e764802aa406adb7446f6dcb6a8a818857aa948ee8ba16eb8c1720b03e0` |
-| `guardctl` | `8a7bfffb7f5af5595fa370931b4b34144703a7038751a1342030b1b80e3e196e` |
-| `guard-test-probe` | `37a850e7c0b67a6ba037299d63fee4ced1f28dff49979296c2c74452db8b256c` |
-| `guard-notify` | `a9a2cda718ae5e04acb282465bbbe7d7c8f9b0de72799e8384a90e523c1811c1` |
+| `guardd` | `a8a69e9b53ca194767e4d172c83dde21d7b20f8c96ac809649405685dfc510c9` |
+| `guardctl` | `b897232aa8435aab3dc47375830a0839a5601861ba6e0abf5d6737eecd66679b` |
+| `guard-test-probe` | `182abd41d92cbe9fd6c1812b426bf3e7ac16abea939c45c17375f69918ad1569` |
+| `guard-notify` | `5ea90bda7c024e5b5995a2f8f4c65c45ed96018424fbc3931880c604adfeab93` |
 | `guard-fdstore` | `7fbe5968ae5aa4b6b77eacb87186199fc73919f55887aa81b722b9e48094ee0e` |
 | `rename-burst` | `52d51f887f753a38f31eaa576145a799883cad8067a03ee490e67be2449a17e4` |
 
-## Next action
+## Final cross-layer result
 
-Re-run fresh File Shield and cross-layer acceptance at this current HEAD; the
-new test-probe artifact means the earlier File Shield manifest is not itself
-current-head evidence. See `linux-platform-freeze-final.md`.
+The current-head Process Shield manifest at
+`/tmp/sfg-process-shield-final-9673f6fcd638/summary.txt` is **5 mandatory
+PASS, 0 FAIL, 0 BLOCKED**. It includes Firefox/File Shield compatibility and
+the daemon-integrated four-primitive causality gate. See
+`linux-platform-freeze-final.md` for the exact accepted scope and residual
+limits.

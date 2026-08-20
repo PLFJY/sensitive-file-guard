@@ -2,12 +2,12 @@
 
 Verdict: **IMPLEMENTATION FREEZE (REDUCED, optional current-host scope).**
 
-The frozen implementation is commit
-`4eb6f8059cc19e9be52d32b9dfc724d147ff1118`. Its fresh physical-host formal
+The frozen implementation evidence is commit
+`9673f6fcd6380447af307b8f7ecc13679d5fbc8d`. Its fresh physical-host formal
 manifest is:
 
 ```text
-/tmp/sfg-process-shield-final-4eb6f8059cc1
+/tmp/sfg-process-shield-final-9673f6fcd638
 ```
 
 It records **5 mandatory PASS, 0 FAIL, 0 BLOCKED** on host kernel
@@ -21,8 +21,10 @@ persist ordinary ALLOW events. The manifest records SHA-256 for both sets.
 - LPS0: host BPF LSM loads and attaches to `ptrace_access_check`.
 - LPS1/LPS5: the exact product BPF object denies same-UID parent attacks to an
   exact instance for `ptrace`, `process_vm_readv`, `process_vm_writev`, and
-  `/proc/PID/mem`, after each Guard-OFF primitive succeeded. Each ON result has
-  exact requester/target ring attribution and zero readable synthetic canary.
+  `/proc/PID/mem`, after each Guard-OFF primitive succeeded. The
+  daemon-integrated gate additionally proves this against a target actually
+  admitted by running guardd. Each ON result has exact requester/target
+  attribution and zero readable synthetic canary.
 - LPS2/LPS3: only an evidence-proven disposable Firefox Main instance is
   admitted, and only while its File Shield WebStorage open is withheld. The map
   is `(TGID, start-jiffies, clock-tick-rate)`; a stale start-time entry does not
@@ -33,8 +35,8 @@ persist ordinary ALLOW events. The manifest records SHA-256 for both sets.
 - LPS6: the unpinned BPF link and maps are owned by daemon RAII; exit removes
   the link, and the cleanup loop removes departed/stale entries. The formal
   synthetic stale-entry check passed. Unprotected same-UID process control
-  remains under normal kernel policy. Five 100-operation samples had median
-  1,673,077 ns OFF and 1,932,035 ns ON, within the formal 5x + 1ms
+  remains under normal kernel policy. The current sample median was 1,046,029
+  ns OFF and 1,232,107 ns ON, within the formal 5x + 1ms
   catastrophic-regression guard.
 
 ## Truthful limits
@@ -55,9 +57,9 @@ persist ordinary ALLOW events. The manifest records SHA-256 for both sets.
   Shield. Requesting it on an unsupported environment fails daemon startup
   rather than silently claiming it is enabled.
 
-The daemon-integrated adversarial gate now supplies that causal proof: its
+The daemon-integrated adversarial gate supplies that causal proof: its
 disposable root-owned synthetic Firefox Main completes a real classified
 WebStorage File Shield admission before its same-UID parent attacks it. Every
 claimed primitive has OFF success, ON daemon denial, persisted exact audit, and
-zero canary recovery. The remaining work is fresh current-head File Shield and
-cross-layer platform acceptance.
+zero canary recovery. The fresh current-head File Shield and cross-layer
+platform acceptance are recorded in `linux-platform-freeze-final.md`.

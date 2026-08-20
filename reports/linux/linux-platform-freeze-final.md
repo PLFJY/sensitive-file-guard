@@ -1,38 +1,58 @@
 # Linux Platform Freeze
 
-Verdict: **NOT ACCEPTED — platform freeze remains open.**
+Verdict: **LINUX_PLATFORM_FREEZE ACCEPTED (REDUCED capability scope).**
 
-Fresh physical-host evidence on `14bbd02ed9b894afd4fbbde1ef8bfce35ac47528`:
+Fresh physical-host evidence was produced for implementation commit
+`9673f6fcd6380447af307b8f7ecc13679d5fbc8d` on kernel `7.1.8-arch1-3`:
 
-- File Shield OFF/independence formal oneshot:
-  `/tmp/sfg-platform-file-oneshot-14bbd02ed9b8` — 23/23 mandatory PASS;
-  native-browser observation PASS.
-- systemd formal: `/tmp/sfg-platform-file-systemd-14bbd02ed9b8` — 1/1
-  mandatory PASS; fdstore crash-continuity observation remains PARTIAL.
-- Process Shield product-object manifest:
-  `/tmp/sfg-process-shield-final-8bb2213b026d` — 4/4 PASS, but this loads
-  guardd's BPF ELF into a short-lived oracle rather than attacking a target
-  admitted by a running guardd daemon.
+- File Shield one-shot manifest:
+  `/tmp/sfg-platform-file-oneshot-9673f6fcd638/summary-oneshot.txt` — **23/23
+  mandatory PASS**, 0 fail, 0 blocked; native-browser observation PASS.
+- File Shield systemd manifest:
+  `/tmp/sfg-platform-file-systemd-9673f6fcd638/summary-systemd.txt` — **1/1
+  mandatory PASS**, 0 fail, 0 blocked; fdstore crash-continuity is explicitly
+  **PARTIAL**, not accepted crash recovery.
+- Process Shield manifest:
+  `/tmp/sfg-process-shield-final-9673f6fcd638/summary.txt` — **5/5 mandatory
+  PASS**, 0 fail, 0 blocked. It includes the daemon-integrated same-UID
+  adversarial matrix, rather than relying only on an independently loaded BPF
+  object.
 
-The File Shield-only scope is current-code accepted: SSH read/load and P0 mmap
-oracles, migration/installed authorization, topology and restart gates, and
-performance all have fresh evidence. The Process Shield disposable Firefox
-compatibility run also passed with the layer ON.
+All fixtures were disposable synthetic browser profiles and ephemeral SSH keys.
+Strict filesystem tests used isolated loop-backed ext4 and did not mark the
+host root filesystem or tmpfs.
 
-However, no current daemon-integrated same-UID adversarial oracle establishes
-that a *live File-Shield-admitted SecretAuthority target* is denied for every
-claimed process-control primitive. The product-object evidence is useful
-mechanism evidence, not that stronger end-to-end proof. Therefore it cannot
-close the required cross-layer process-control acceptance. Process Shield
-remains optional and REDUCED; disabling or unsupported Process Shield does not
-weaken File Shield.
+## Cross-layer acceptance
 
-Residual truthful limits: LFH4 crash continuity is PARTIAL/REDUCED; only
-Firefox is accepted; root/kernel compromise, pre-existing attachment before
-first admitted WebStorage open, and unproven process interfaces are out of
-scope. No real browser profile or SSH key was used.
+- **File Shield ON, Process Shield OFF:** the File Shield 23-gate formal run
+  uses the default disabled optional Process Shield and passes its SSH mmap,
+  migration/installed authorization, topology, restart, adversarial, and
+  performance gates.
+- **File Shield ON, Process Shield ON:** the Process Shield manifest passes
+  LPS2 authority admission, Firefox disposable compatibility with File Shield
+  green, the daemon-integrated process-control matrix, and lifecycle/perf.
+- **Process Shield unavailable:** nspawn blocks BPF program loading with
+  `EPERM`; that is container-scoped REDUCED/NOT-HOST-EQUIVALENT evidence, not a
+  host pass. The host physical-polkit run proves the supported path, and an
+  unavailable/disabled Process Shield does not disable or weaken File Shield.
+- **Process-control causality:** after an actual classified File Shield
+  WebStorage allow admits the exact synthetic Firefox Main instance, each of
+  ptrace, `process_vm_readv`, `process_vm_writev`, and `/proc/PID/mem` has
+  Guard-OFF success and Guard-ON daemon denial, persisted requester/target
+  audit, and zero canary recovery. The hook is `ptrace_access_check`; this is
+  not a claim that unhooked process interfaces are prevented.
 
-Required next gate: a disposable, daemon-admitted synthetic SecretAuthority
-whose lifecycle creates a valid same-UID attack relation, followed by each
-claimed primitive's OFF-success / ON-daemon-denial / persisted exact-audit /
-zero-canary-recovery proof.
+## Residual limits
+
+- File Shield LFH4 crash continuity remains **PARTIAL / REDUCED**: a pending
+  permission event cannot be restored after daemon crash through public UAPI.
+- Firefox is the only accepted browser family. Firefox ESR, Chromium, Chrome,
+  and Zen remain NOT ACCEPTED/NOT INSTALLED as applicable.
+- Process Shield remains optional and status is **REDUCED**, never a claim of
+  complete Linux process mediation. Root/kernel compromise, pre-existing
+  attachment before first SecretAuthority admission, and interfaces outside
+  the proven hook are out of scope.
+
+There are no P0/P1 findings outstanding and no mandatory formal gate is
+BLOCKED. The report-only commit following this evidence does not alter runtime
+code or test artifacts.
