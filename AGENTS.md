@@ -55,13 +55,16 @@ host. It is the ONLY authorized way to run privileged/live Linux tests now.
   adversarial filesystem tests operate there unless a test explicitly proves
   another location is technically required.
 - The capsule uses the HOST Linux kernel (real `CAP_SYS_ADMIN`, permission
-  events, filesystem marks, pidfd, object handles). Do NOT automatically treat
-  a capsule result as equivalent to every host deployment: if a result may
-  depend on PID/mount namespaces, nspawn restrictions, nspawn
-  seccomp/kernel-interface restrictions, BPF LSM availability, or another
-  container-specific difference, explicitly investigate it and downgrade to
-  REDUCED / NOT ACCEPTED / BLOCKED rather than inventing host acceptance. A
-  passing capsule test is evidence only for exactly what the test proves.
+  events, filesystem marks, pidfd, object handles). The capsule's nspawn
+  seccomp allow-list is `--system-call-filter=fanotify_init fanotify_mark
+  pidfd_getfd` (installed 2026-08-20; fanotify was previously EPERM-blocked).
+  Do NOT automatically treat a capsule result as equivalent to every host
+  deployment: if a result may depend on PID/mount namespaces, nspawn
+  restrictions, nspawn seccomp/kernel-interface restrictions, BPF LSM
+  availability, or another container-specific difference, explicitly
+  investigate it and downgrade to REDUCED / NOT ACCEPTED / BLOCKED rather
+  than inventing host acceptance. A passing capsule test is evidence only for
+  exactly what the test proves.
 
 ## LIVE-TEST SAFETY — HARD RULES (two real system-wide lockups)
 The root cause of BOTH observed system-wide lockups was a `FAN_MARK_FILESYSTEM`
