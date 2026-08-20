@@ -103,8 +103,13 @@ expect_denied_eventually "$NEW_PROFILE/Network/Cookies"
 # exact-reader confirmation model (no lease is granted to any probe here), so
 # the unknown probe must remain denied after the replacement.
 rm -f "$SSH_KEY"
-printf '%s' 'synthetic-ephemeral-key-fixture-v2' > "$SSH_KEY"
-chmod 0600 "$SSH_KEY"
+SSH_REPLACEMENT="$WORK/id_synthetic.replacement"
+printf '%s' 'synthetic-ephemeral-key-fixture-v2' > "$SSH_REPLACEMENT"
+chmod 0600 "$SSH_REPLACEMENT"
+# The shell is an unknown reader/writer after enforcement starts, so creating
+# directly at the protected pathname must be denied. Model a legitimate
+# atomic key-file replacement without asking the firewall to allow that open.
+mv -f "$SSH_REPLACEMENT" "$SSH_KEY"
 expect_denied_eventually "$SSH_KEY"
 
 echo "PASS: browser replacements converge to denial; SSH replacement remains protected"
