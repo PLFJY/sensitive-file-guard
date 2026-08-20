@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Linux defensive adversarial acceptance harness for browser authentication data.
 #
-# Run only through the test capsule; its synthetic non-root user stands in for
-# a desktop session. Never invoke this script with host sudo.
+# Run through the test capsule by default; its synthetic non-root user stands
+# in for a desktop session. An explicitly user-authorized physical-host
+# fallback uses polkit (`pkexec`), never interactive sudo.
 #
 # Safety properties:
 # - creates profiles only below a uniquely named /tmp directory;
@@ -34,7 +35,7 @@ note_blocked() { printf 'BLOCKED: %s\n' "$1"; BLOCKED=$((BLOCKED + 1)); }
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "ERROR: root/CAP_SYS_ADMIN is required for FAN_OPEN_PERM enforcement."
-  echo "Run through sfg-test-capsule; never host sudo"
+  echo "Run through sfg-test-capsule; physical-host execution requires explicit polkit authorization"
   exit 2
 fi
 

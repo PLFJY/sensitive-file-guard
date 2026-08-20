@@ -36,9 +36,18 @@ if ! getent passwd 1000 >/dev/null 2>&1; then
   mkdir -p /home/sfgtest
   chown 1000:1000 /home/sfgtest
 fi
-# Legacy compatibility gates key off SUDO_USER to choose the non-root browser
-# fixture identity. It is not a host sudo contract inside the capsule.
-export SUDO_USER="${SUDO_USER:-sfgtest}"
+# Legacy compatibility gates key off SUDO_USER to choose a non-root synthetic
+# subject. In a capsule this is the injected `sfgtest`; on an explicitly
+# authorized physical-host run UID 1000 is the real normal-user account. Do
+# not fabricate a username that has no matching passwd entry.
+if [ -z "${SUDO_USER:-}" ] || [ "$SUDO_USER" = root ]; then
+  SUDO_USER="$(getent passwd 1000 | awk -F: 'NR == 1 { print $1 }')"
+fi
+if [ -z "${SUDO_USER:-}" ] || ! id -u "$SUDO_USER" >/dev/null 2>&1 || [ "$(id -u "$SUDO_USER")" -eq 0 ]; then
+  echo "ERROR: no non-root UID 1000 test identity is available" >&2
+  exit 2
+fi
+export SUDO_USER
 
 cleanup_stale_test_loops() {
   # nspawn exposes only loop0..2. Interrupted synthetic test gates can leave

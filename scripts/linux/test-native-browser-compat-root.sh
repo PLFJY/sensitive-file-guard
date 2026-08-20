@@ -10,6 +10,9 @@
 #   sudo -n /usr/local/sbin/sfg-test-capsule run \
 #     /stage/scripts/linux/test-native-browser-compat-root.sh
 #
+# An explicitly user-authorized physical-host fallback uses polkit (`pkexec`),
+# never interactive sudo or password forwarding.
+#
 # guardd runs as root (fanotify FAN_CLASS_CONTENT needs CAP_SYS_ADMIN); the
 # browsers and probes run as the invoking user (SUDO_USER) because Firefox
 # refuses to run as root. Browsers that are not installed are reported as
@@ -38,7 +41,7 @@ fi
 if [ -n "${SUDO_USER:-}" ]; then
   TEST_USER="$SUDO_USER"
 else
-  echo "ERROR: run via sudo so the browsers can run as a non-root user"
+  echo "ERROR: a non-root test user is required so browsers do not run as root"
   echo "  (Firefox refuses to run as root)."
   exit 2
 fi
