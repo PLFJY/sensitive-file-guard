@@ -260,6 +260,14 @@ fn admission_loop(
                     tracing::error!(pid = identity.stable.pid, err = %error, "Process Shield admission failed; refusing this target");
                     continue;
                 }
+                if !active.contains(&identity.stable.pid) {
+                    tracing::info!(
+                        pid = identity.stable.pid,
+                        start_time = identity.stable.start_time,
+                        exe = %identity.stable.exe.display(),
+                        "Process Shield admitted exact Firefox Main instance"
+                    );
+                }
                 current.insert(identity.stable.pid);
             }
         }

@@ -16,6 +16,7 @@ GUARDCTL="${GUARDCTL:-$BIN_DIR/guardctl}"
 FIREFOX="${FIREFOX:-/usr/lib/firefox/firefox}"
 TEST_USER="${TEST_USER:-${SUDO_USER:-${PKEXEC_UID:-}}}"
 EVIDENCE_ROOT="${EVIDENCE_ROOT:-}"
+PROCESS_SHIELD_ENABLED="${PROCESS_SHIELD_ENABLED:-false}"
 
 for artifact in "$GUARDD" "$GUARDCTL" "$FIREFOX"; do
   [ -x "$artifact" ] || { echo "BLOCKED: required artifact unavailable: $artifact"; exit 2; }
@@ -29,6 +30,7 @@ TEST_USER="$(getent passwd "$TEST_USER" | awk -F: 'NR == 1 { print $1 }')"
 TEST_UID="$(id -u "$TEST_USER")"
 TEST_GID="$(id -g "$TEST_USER")"
 if [ "$TEST_UID" -eq 0 ]; then echo "BLOCKED: Firefox test user must not be root"; exit 2; fi
+case "$PROCESS_SHIELD_ENABLED" in true|false) ;; *) echo "BLOCKED: PROCESS_SHIELD_ENABLED must be true or false"; exit 2;; esac
 
 WORK="$(mktemp -d /tmp/sfg-lps2-firefox.XXXXXX)"
 PROFILE="$WORK/profile"
@@ -71,7 +73,8 @@ cat > "$WORK/config.json" <<EOF
     "exe_paths": ["$FIREFOX"]
   }],
   "enrolled_exes": ["$FIREFOX"],
-  "ssh_keys": []
+  "ssh_keys": [],
+  "process_shield_enabled": $PROCESS_SHIELD_ENABLED
 }
 EOF
 
@@ -171,6 +174,26 @@ print("LPS2_SECRET_AUTHORITY_CANDIDATES=" + str(len(accepted)))
 for item in accepted:
     print("LPS2_ROLE=" + item["role"] + " RESOURCE=" + item["resource_kind"])
 PY
+
+if [ "$PROCESS_SHIELD_ENABLED" = true ]; then
+  LPS3_STATUS=""
+  for _ in $(seq 1 30); do
+    LPS3_STATUS="$("$GUARDCTL" --socket "$SOCK" --json status 2>/dev/null || true)"
+    if printf '%s' "$LPS3_STATUS" | python3 -c 'import json,sys; d=json.load(sys.stdin); raise SystemExit(0 if ((d.get("data") or {}).get("linux_health") or {}).get("process_shield") == "REDUCED" else 1)' 2>/dev/null; then
+      break
+    fi
+    sleep 0.1
+  done
+  if ! printf '%s' "$LPS3_STATUS" | python3 -c 'import json,sys; d=json.load(sys.stdin); raise SystemExit(0 if ((d.get("data") or {}).get("linux_health") or {}).get("process_shield") == "REDUCED" else 1)'; then
+    echo "FAIL: requested LPS3 BPF link did not report REDUCED ptrace-only state"
+    exit 1
+  fi
+  if ! grep -q 'Process Shield admitted exact Firefox Main instance' "$WORK/guardd.log"; then
+    echo "FAIL: LPS3 BPF link was live but no exact Firefox Main instance entered the target map"
+    exit 1
+  fi
+  echo "LPS3_FIREFOX_MAIN_BPF_ADMISSION_RUNTIME=PASS"
+fi
 
 if [ -n "$EVIDENCE_ROOT" ]; then
   mkdir -p "$EVIDENCE_ROOT"
