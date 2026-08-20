@@ -5,7 +5,8 @@
 `LINUX_PLATFORM_FREEZE` is the active goal. The first sub-goal,
 `RE-CLOSE LINUX_FILE_SHIELD_FREEZE`, is **restored at commit
 `77dcd75edc3a10b95e4aa3051cd48fe29654e407`**. Process Shield LPS0 capability
-and LPS1's narrow synthetic ptrace causality oracle are complete; product
+and LPS1's narrow synthetic ptrace causality oracle are complete. LPS2 proves
+only a disposable Firefox Main / Web Storage SecretAuthority candidate; product
 enforcement remains unimplemented. Linux Platform Freeze is therefore not
 complete.
 
@@ -90,7 +91,7 @@ user and staged separately. SHA-256:
 
 ## Next action
 
-Continue `LINUX_PROCESS_SHIELD_FREEZE` at LPS2: derive Firefox SecretAuthority
-from real File Shield ALLOW events on disposable profiles. LPS0 already probed
-actual host and capsule BPF LSM capabilities and recorded supported, disabled,
-reduced, or blocked status without degrading File Shield.
+Continue `LINUX_PROCESS_SHIELD_FREEZE` at LPS3: implement the narrow lifecycle
+admission and BPF LSM policy only for evidence-proven Firefox Main instances.
+LPS0 already probed actual host and capsule BPF LSM capabilities and recorded
+supported, disabled, reduced, or blocked status without degrading File Shield.
