@@ -24,6 +24,8 @@ BIN_DIR="${BIN_DIR:-$REPO/target/release}"
 GUARDD="${GUARDD:-$BIN_DIR/guardd}"
 GUARDCTL="${GUARDCTL:-$BIN_DIR/guardctl}"
 PROBE="${PROBE:-$BIN_DIR/guard-test-probe}"
+PROCESS_SHIELD_ENABLED="${PROCESS_SHIELD_ENABLED:-false}"
+FIREFOX_ONLY="${FIREFOX_ONLY:-false}"
 
 PASS=0
 FAIL=0
@@ -38,8 +40,12 @@ if [ "$(id -u)" -ne 0 ]; then
   echo "  sudo -n /usr/local/sbin/sfg-test-capsule run /stage/scripts/linux/test-native-browser-compat-root.sh"
   exit 2
 fi
+case "$PROCESS_SHIELD_ENABLED" in true|false) ;; *) echo "ERROR: PROCESS_SHIELD_ENABLED must be true or false"; exit 2;; esac
+case "$FIREFOX_ONLY" in true|false) ;; *) echo "ERROR: FIREFOX_ONLY must be true or false"; exit 2;; esac
 if [ -n "${SUDO_USER:-}" ]; then
   TEST_USER="$SUDO_USER"
+elif [ -n "${PKEXEC_UID:-}" ]; then
+  TEST_USER="$PKEXEC_UID"
 else
   echo "ERROR: a non-root test user is required so browsers do not run as root"
   echo "  (Firefox refuses to run as root)."
@@ -72,6 +78,10 @@ trap cleanup EXIT
 declare -a BROWSERS=()
 detect_browser() { # id family elf
   local id="$1" family="$2" elf="$3"
+  # LPS3 has authority evidence only for Firefox Main. When it is enabled,
+  # do not fabricate Chromium-family compatibility acceptance.
+  if { [ "$FIREFOX_ONLY" = true ] || [ "$PROCESS_SHIELD_ENABLED" = true ]; } \
+    && [ "$family" != Firefox ]; then return; fi
   if [ -x "$elf" ]; then
     BROWSERS+=("$id|$family|$elf")
     echo "detected: $id ($family) at $elf"
@@ -174,7 +184,8 @@ run_browser_compat() {
     }
   ],
   "enrolled_exes": ["$elf"],
-  "ssh_keys": []
+  "ssh_keys": [],
+  "process_shield_enabled": $PROCESS_SHIELD_ENABLED
 }
 EOF
   echo "    starting guardd"
@@ -253,12 +264,13 @@ EOF
   # --- oracles ---
   local json=""
   json="$("$GUARDCTL" --socket "$B/guardd.sock" --json status 2>/dev/null || true)"
-  local continuity overflows classifier unclassified audit_dropped
+  local continuity overflows classifier unclassified audit_dropped process_shield
   continuity="$(echo "$json" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(((d.get("data") or {}).get("linux_health") or {}).get("continuity","?"))' 2>/dev/null || echo "?")"
   overflows="$(echo "$json" | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("data") or {}).get("fanotify_overflows","?"))' 2>/dev/null || echo "?")"
   classifier="$(echo "$json" | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("data") or {}).get("classifier_failures","?"))' 2>/dev/null || echo "?")"
   unclassified="$(echo "$json" | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("data") or {}).get("unclassified","?"))' 2>/dev/null || echo "?")"
   audit_dropped="$(echo "$json" | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("data") or {}).get("audit_dropped","?"))' 2>/dev/null || echo "?")"
+  process_shield="$(echo "$json" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(((d.get("data") or {}).get("linux_health") or {}).get("process_shield","?"))' 2>/dev/null || echo "?")"
 
   [ "$continuity" = "INTACT" ] && note_pass "$id continuity=INTACT" \
     || note_fail "$id continuity=$continuity"
@@ -270,6 +282,21 @@ EOF
     || note_fail "$id unclassified=$unclassified"
   [ "$audit_dropped" = "0" ] && note_pass "$id audit_dropped=0" \
     || note_fail "$id audit_dropped=$audit_dropped"
+  if [ "$PROCESS_SHIELD_ENABLED" = true ]; then
+    [ "$process_shield" = "REDUCED" ] && note_pass "$id Process Shield ptrace-only status=REDUCED" \
+      || note_fail "$id Process Shield status=$process_shield"
+    # IPC forces AuditStore flush. This workload performs no intended process
+    # control, so every Process Shield denial would be unexplained.
+    if "$GUARDCTL" --socket "$B/guardd.sock" --json events | python3 -c '
+import json, sys
+events = (json.load(sys.stdin).get("data") or [])
+raise SystemExit(0 if not any(e.get("event_code") == "process_shield_ptrace_denied" for e in events) else 1)
+'; then
+      note_pass "$id Process Shield denies=0 on legal workload"
+    else
+      note_fail "$id unexpected Process Shield deny on legal workload"
+    fi
+  fi
 
   # Unknown probes: every probe must have been DENIED (non-zero exit). A
   # denied probe prints its error to stderr only, so the exit code is the
@@ -332,5 +359,9 @@ done
 
 echo
 echo "==> LFH6 native browser compat summary: PASS=$PASS FAIL=$FAIL NOT_INSTALLED=$NOT_INSTALLED"
+if [ "$PROCESS_SHIELD_ENABLED" = true ] && [ "$FAIL" -eq 0 ]; then
+  echo "LPS4_FIREFOX_DISPOSABLE_WORKLOAD_NO_PROCESS_DENIALS=PASS"
+  echo "LPS4_FILE_SHIELD_COMPATIBILITY_GREEN=PASS"
+fi
 echo "    logs: $WORK"
 if [ "$FAIL" -gt 0 ]; then exit 1; else exit 0; fi

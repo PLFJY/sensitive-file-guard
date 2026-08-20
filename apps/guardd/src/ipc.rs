@@ -280,13 +280,11 @@ fn handle_status(state: &IpcState, creds: PeerCreds) -> Response {
             continuity,
             continuity_reason,
             audit,
-            // LPS0 proved that this host's BPF LSM capability is available,
-            // but LPS3 product enforcement has not been installed yet. Keep
-            // the optional Process Shield axis truthful without degrading the
-            // independent File Shield posture.
+            // Process Shield is optional and never changes File Shield's
+            // independently derived posture.
             process_shield: if state.process_shield_active.load(Ordering::Acquire) {
-                // Current LPS3 protects only ptrace and does not yet consume
-                // the BPF audit ring, so it is never advertised as complete.
+                // LPS3 consumes ptrace ring events, but does not cover the
+                // other process-memory primitives, so it is never complete.
                 "REDUCED".to_owned()
             } else {
                 "DISABLED".to_owned()

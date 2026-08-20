@@ -5,10 +5,11 @@
 `LINUX_PLATFORM_FREEZE` is the active goal. The first sub-goal,
 `RE-CLOSE LINUX_FILE_SHIELD_FREEZE`, is **restored at commit
 `77dcd75edc3a10b95e4aa3051cd48fe29654e407`**. Process Shield LPS0 through
-LPS3 are implemented: LPS3 binds only an LPS2-proven disposable Firefox Main
-instance to the ptrace-only BPF map while its File Shield WebStorage open is
-still withheld. The Process Shield remains REDUCED, and Linux Platform Freeze
-is therefore not complete.
+LPS3 and LPS4 are implemented: LPS3 binds only an LPS2-proven disposable
+Firefox Main instance to the ptrace-only BPF map while its File Shield
+WebStorage open is still withheld; LPS4's Firefox LFH6 workload has zero
+unexplained Process Shield denials. The Process Shield remains REDUCED, and
+Linux Platform Freeze is therefore not complete.
 
 ## Current File Shield verdict
 
@@ -94,8 +95,7 @@ user and staged separately. SHA-256:
 
 ## Next action
 
-Continue `LINUX_PROCESS_SHIELD_FREEZE` at LPS4: run the disposable Firefox
-compatibility workload with LPS3 enabled, then proceed to LPS5's per-primitive
+Continue `LINUX_PROCESS_SHIELD_FREEZE` at LPS5: execute the per-primitive
 adversarial matrix. LPS0 already probed actual host and capsule BPF LSM
 capabilities and recorded supported, disabled, reduced, or blocked status
 without degrading File Shield.
