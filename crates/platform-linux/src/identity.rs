@@ -872,7 +872,25 @@ mod tests {
     // blocking on the 30s sleep.
     #[allow(clippy::zombie_processes)]
     fn spawn_and_resolve(exe: &Path, enrollment: &mut EnrollmentStore) -> (Child, ProcessIdentity) {
-        let child = Command::new(exe).arg("30").spawn().expect("spawn");
+        // Executing a freshly-written binary can transiently fail with
+        // ETXTBSY on some filesystems (same retry pattern as
+        // `renamed_to_firefox_is_still_denied`).
+        let child = {
+            let mut spawned = None;
+            for _ in 0..40 {
+                match Command::new(exe).arg("30").spawn() {
+                    Ok(c) => {
+                        spawned = Some(c);
+                        break;
+                    }
+                    Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => {
+                        std::thread::sleep(std::time::Duration::from_millis(25));
+                    }
+                    Err(e) => panic!("spawn {exe:?}: {e}"),
+                }
+            }
+            spawned.expect("spawn {exe:?} after ETXTBSY retries")
+        };
         let pid = child.id() as i32;
         let (dev, ino) = {
             use std::os::unix::fs::MetadataExt;

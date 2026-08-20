@@ -544,6 +544,12 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                                 "required_filesystem_mark_lost",
                                 "required filesystem mark lost; all leases and pending confirmations revoked (autonomous)",
                             ));
+                            // P1-c: the transition is autonomous and rare — do
+                            // NOT leave the revocation record in the writer's
+                            // 64-record batch where it could be invisible to a
+                            // later query (or lost on crash). Flush immediately
+                            // so the security transition is durably committed.
+                            audit.flush();
                         }
                     }
                 }
@@ -661,6 +667,10 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                     "fanotify_queue_overflow",
                     "protection continuity lost; all leases and pending confirmations revoked",
                 ));
+                // LFH3: the overflow transition is rare and security-critical —
+                // flush immediately so the LOST record is durably committed and
+                // visible to the next query (the writer batches 64 records).
+                audit.flush();
                 continue;
             }
 

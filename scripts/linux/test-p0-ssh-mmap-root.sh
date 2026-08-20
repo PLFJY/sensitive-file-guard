@@ -111,7 +111,7 @@ fi
 
 echo "==> audit records an SSH open denial with Guard attribution"
 if "$GUARDCTL" --socket "$WORK/guardd.sock" --json events --limit 10 2>/dev/null \
-  | grep -q '"decision":"deny"'; then
+  | grep -qE '"decision": "Deny'; then
   note_pass "audit records the denied SSH open"
 else
   note_fail "no SSH denial in audit"
