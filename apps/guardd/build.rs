@@ -1,4 +1,5 @@
 use std::env;
+use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
@@ -25,4 +26,27 @@ fn main() {
         }
     });
     println!("cargo:rustc-env=GUARDD_BUILD_ID={build_id}");
+
+    // Keep the LPS3 BPF source beside the daemon so the product, rather than
+    // an ad-hoc test script, owns the policy it will attach. Rust integration
+    // consumes the resulting object through libbpf at runtime.
+    println!("cargo:rerun-if-changed=src/process_shield.bpf.c");
+    let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
+    let object = out.join("guardd-process-shield.bpf.o");
+    let status = Command::new("clang")
+        .args([
+            "-target",
+            "bpf",
+            "-O2",
+            "-g",
+            "-Wall",
+            "-Werror",
+            "-c",
+            "src/process_shield.bpf.c",
+            "-o",
+        ])
+        .arg(&object)
+        .status()
+        .expect("clang is required to build guardd's Linux Process Shield BPF object");
+    assert!(status.success(), "guardd Process Shield BPF compilation failed");
 }
