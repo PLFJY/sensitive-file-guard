@@ -278,7 +278,11 @@ fn handle_status(state: &IpcState, creds: PeerCreds) -> Response {
             continuity,
             continuity_reason,
             audit,
-            process_shield: "UNSUPPORTED".to_owned(),
+            // LPS0 proved that this host's BPF LSM capability is available,
+            // but LPS3 product enforcement has not been installed yet. Keep
+            // the optional Process Shield axis truthful without degrading the
+            // independent File Shield posture.
+            process_shield: "DISABLED".to_owned(),
             pidfd_enabled: backend.pidfd_enabled,
             pidfd_missing_events: backend.pidfd_missing_events,
         })),
