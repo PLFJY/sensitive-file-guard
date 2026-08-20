@@ -28,6 +28,10 @@ fn main() -> ExitCode {
             let protected = args.get(4).map(PathBuf::from);
             do_shield_target(Path::new(&args[2]), seconds, protected.as_deref())
         }
+        Some("shield-authority") if (6..=7).contains(&args.len()) && args[4] == "--profile" => {
+            let seconds = args.get(6).and_then(|value| value.parse::<u64>().ok());
+            do_shield_authority(Path::new(&args[2]), Path::new(&args[3]), seconds)
+        }
         Some("probe-task") if args.len() == 4 => {
             let pid = match args[2].parse::<i32>() {
                 Ok(pid) => pid,
@@ -212,9 +216,49 @@ fn print_usage() {
            fsmark-remove PID PATH (linux)
            fsmark-restore PID PATH (linux)
            shield-target READY_FILE [SECONDS] [PROTECTED_FILE]
+           shield-authority READY_FILE WEB_STORAGE --profile PROFILE [SECONDS]
            probe-task TARGET_PID control|read
            probe-memory TARGET_PID"
     );
+}
+
+/// Linux LPS5 daemon-integrated target. Its command line deliberately carries
+/// an exact `--profile` binding, while its first protected WebStorage open is
+/// what causes running guardd to admit the exact process instance. The marker
+/// is written only after that open returns, so an attacker never races ahead of
+/// the File Shield pre-response admission boundary.
+fn do_shield_authority(ready_file: &Path, web_storage: &Path, seconds: Option<u64>) -> ExitCode {
+    let mut canary = Box::new([0u8; SHIELD_CANARY_LEN]);
+    if let Ok(mut random) = File::open("/dev/urandom") {
+        let _ = random.read_exact(&mut *canary);
+    }
+    let hex = canary
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let pid = std::process::id();
+    if let Err(error) = std::fs::write(
+        ready_file,
+        format!("{pid} {hex} 0x{:x}\n", canary.as_ptr() as usize),
+    ) {
+        eprintln!("guard-test-probe: cannot write shield-authority ready file: {error}");
+        return ExitCode::from(2);
+    }
+    if let Err(error) = std::fs::read(web_storage) {
+        eprintln!("guard-test-probe: shield-authority WebStorage open failed: {error}");
+        return ExitCode::from(3);
+    }
+    let admitted = ready_file.with_extension("admitted");
+    if let Err(error) = std::fs::write(&admitted, format!("{pid}\n")) {
+        eprintln!("guard-test-probe: cannot write shield-authority admission marker: {error}");
+        return ExitCode::from(2);
+    }
+    let deadline = Instant::now() + Duration::from_secs(seconds.unwrap_or(30));
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+        let _ = std::hint::black_box(&*canary);
+    }
+    ExitCode::SUCCESS
 }
 
 /// MPS9 synthetic shielded target: allocates a random in-memory canary,

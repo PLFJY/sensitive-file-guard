@@ -4,6 +4,14 @@ Date: 2026-08-20. Verdict: **PASS for the four accepted primitives on this
 physical host.** This is not a capsule-equivalence claim: the nspawn capsule
 still returns `EPERM` when it tries to load a BPF program.
 
+The earlier product-object oracle has now been supplemented by
+`test-lps5-daemon-integrated-root.sh`: a root-owned disposable synthetic
+Firefox-family Main opens a classified `webappsstore.sqlite` through running
+guardd, waits until that pre-response File Shield admission returns, and is
+then attacked by its same-UID parent. It proves all four ON denials have
+persisted `process_shield_ptrace_denied` audit attribution with target PID and
+requester identity. This closes the prior mechanism-only evidence gap.
+
 ## Causal test boundary
 
 `scripts/linux/test-lps5-adversarial-root.sh` loads the exact clang-produced

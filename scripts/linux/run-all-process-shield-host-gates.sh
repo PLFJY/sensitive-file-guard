@@ -30,6 +30,7 @@ declare -a FORMAL_MANIFEST=(
   "authority-admission|scripts/linux/test-lps2-firefox-authority-root.sh|BIN_DIR=$REPO/target/debug PROCESS_SHIELD_ENABLED=true TEST_USER=$SFG_TEST_USER"
   "firefox-compatibility|scripts/linux/test-native-browser-compat-root.sh|PROCESS_SHIELD_ENABLED=true FIREFOX_ONLY=true PKEXEC_UID=$SFG_TEST_USER"
   "adversarial-primitives|scripts/linux/test-lps5-adversarial-root.sh|TEST_UID=$SFG_TEST_UID"
+  "daemon-integrated-adversarial|scripts/linux/test-lps5-daemon-integrated-root.sh|TEST_USER=$SFG_TEST_USER"
   "lifecycle-and-performance|scripts/linux/test-lps6-lifecycle-root.sh|TEST_UID=$SFG_TEST_UID"
 )
 
