@@ -5,5 +5,5 @@ Exec=guard-ui
 Icon=io.github.plfjy.SensitiveFileGuard
 Terminal=false
 Type=Application
-Categories=Security;Utility;
+Categories=System;Security;
 StartupNotify=true

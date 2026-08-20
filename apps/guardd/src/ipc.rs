@@ -62,6 +62,13 @@ pub struct IpcState {
     pub pending_ssh_reads: Arc<Mutex<PendingSshReadStore>>,
     /// True only after LPS3 attached its temporary BPF LSM link successfully.
     pub process_shield_active: Arc<std::sync::atomic::AtomicBool>,
+    /// Whether Process Shield was requested in the reviewed configuration.
+    pub process_shield_requested: bool,
+    /// Inactive state derived without pretending an unreadable capability is
+    /// proof of unsupported hardware/kernel. Actual requested activation still
+    /// requires successful BPF load+attach before `active` becomes true.
+    pub process_shield_inactive_state: String,
+    pub process_shield_inactive_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -287,8 +294,17 @@ fn handle_status(state: &IpcState, creds: PeerCreds) -> Response {
                 // ptrace_access_check boundary; it must never be advertised
                 // as complete platform-wide process mediation.
                 "REDUCED".to_owned()
+            } else if state.process_shield_requested {
+                "REDUCED".to_owned()
             } else {
-                "DISABLED".to_owned()
+                state.process_shield_inactive_state.clone()
+            },
+            process_shield_reason: if state.process_shield_active.load(Ordering::Acquire) {
+                Some("limited to the accepted ptrace_access_check boundary".to_owned())
+            } else if state.process_shield_requested {
+                Some("requested Process Shield is not active".to_owned())
+            } else {
+                state.process_shield_inactive_reason.clone()
             },
             pidfd_enabled: backend.pidfd_enabled,
             pidfd_missing_events: backend.pidfd_missing_events,
@@ -521,10 +537,20 @@ fn event_visible_in_build(event: &guard_audit::AuditEvent) -> bool {
     cfg!(debug_assertions)
         || matches!(event.record.decision, guard_core::policy::Decision::Deny(_))
         || event.record.event_code.starts_with("ssh_key_access_")
+        || operational_event_visible_in_release(&event.record.event_code)
         || (matches!(
             event.record.decision,
             guard_core::policy::Decision::AllowByLease(_)
         ) && event.record.resource_kind == guard_core::ProtectedResourceKind::SshPrivateKey)
+}
+
+fn operational_event_visible_in_release(event_code: &str) -> bool {
+    matches!(
+        event_code,
+        "process_shield_authority_admitted"
+            | "required_filesystem_mark_lost"
+            | "fanotify_queue_overflow"
+    )
 }
 
 fn handle_leases_list(state: &IpcState, creds: PeerCreds) -> Response {
@@ -1808,5 +1834,17 @@ mod tests {
         audit_degraded.audit_healthy = false;
         assert_eq!(audit_degraded.file_shield(), "ACTIVE");
         assert_eq!(audit_degraded.overall(), "DEGRADED");
+    }
+
+    #[test]
+    fn product_operational_events_remain_visible_in_release_builds() {
+        for event_code in [
+            "process_shield_authority_admitted",
+            "required_filesystem_mark_lost",
+            "fanotify_queue_overflow",
+        ] {
+            assert!(operational_event_visible_in_release(event_code));
+        }
+        assert!(!operational_event_visible_in_release("ordinary_allow"));
     }
 }

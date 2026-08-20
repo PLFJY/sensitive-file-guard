@@ -128,6 +128,7 @@ pub struct ProcessShieldRuntime {
 pub struct ProcessShieldAdmission {
     shield: Arc<std::sync::Mutex<ProcessShield>>,
     candidates: Arc<Vec<FirefoxMainCandidate>>,
+    audit: Arc<AuditStore>,
 }
 
 // libbpf object/link ownership moves once into the dedicated admission thread
@@ -216,9 +217,19 @@ impl ProcessShield {
 
     /// Admit one verified SecretAuthority instance. `start_jiffies` must have
     /// been read from the live instance after exact executable verification.
-    pub fn admit(&self, pid: u32, start_jiffies: u64, uid: u32) -> anyhow::Result<()> {
+    pub fn admit(&self, pid: u32, start_jiffies: u64, uid: u32) -> anyhow::Result<bool> {
         if pid == 0 || start_jiffies == 0 {
             anyhow::bail!("invalid Process Shield target identity");
+        }
+        if self
+            .audit_context
+            .targets
+            .lock()
+            .expect("Process Shield target mutex poisoned")
+            .get(&pid)
+            .is_some_and(|target| target.uid == uid && target.start_jiffies == start_jiffies)
+        {
+            return Ok(false);
         }
         let value = TargetInstance {
             start_jiffies,
@@ -261,7 +272,7 @@ impl ProcessShield {
             .lock()
             .expect("Process Shield target mutex poisoned")
             .insert(pid, TargetMetadata { uid, start_jiffies });
-        Ok(())
+        Ok(true)
     }
 
     fn remove(&self, pid: u32) -> anyhow::Result<()> {
@@ -350,10 +361,13 @@ pub fn start_admission(
     if candidates.is_empty() {
         anyhow::bail!("Process Shield enabled but no explicit Firefox Main executable/owner candidate is configured");
     }
-    let shield = Arc::new(std::sync::Mutex::new(ProcessShield::load(audit)?));
+    let shield = Arc::new(std::sync::Mutex::new(ProcessShield::load(Arc::clone(
+        &audit,
+    ))?));
     let admission = ProcessShieldAdmission {
         shield: Arc::clone(&shield),
         candidates: Arc::new(candidates),
+        audit,
     };
     let active = Arc::new(AtomicBool::new(true));
     let loop_active = Arc::clone(&active);
@@ -374,7 +388,11 @@ impl ProcessShieldAdmission {
     /// Admit only a live Firefox Main that exactly matches an LPS2-proven
     /// configured profile. The caller invokes this before it grants the
     /// protected WebStorage open, so polling can never be the security edge.
-    pub fn admit_from_file_shield(&self, pid: i32) -> anyhow::Result<bool> {
+    pub fn admit_from_file_shield(
+        &self,
+        pid: i32,
+        resource: &ProtectedResource,
+    ) -> anyhow::Result<bool> {
         let mut enrolled = platform_linux::enrollment::EnrollmentStore::new();
         for candidate in self.candidates.iter() {
             let Ok(identity) = platform_linux::identity::resolve(pid, candidate.uid, &mut enrolled)
@@ -388,7 +406,8 @@ impl ProcessShieldAdmission {
             {
                 continue;
             }
-            self.shield
+            let newly_admitted = self
+                .shield
                 .lock()
                 .expect("Process Shield mutex poisoned")
                 .admit(
@@ -396,6 +415,16 @@ impl ProcessShieldAdmission {
                     identity.stable.start_time,
                     identity.uid,
                 )?;
+            if newly_admitted {
+                let mut record = crate::enforce::build_audit_record(
+                    resource,
+                    Some(&identity),
+                    Decision::Allow,
+                    "process_shield_authority_admitted;role=firefox_main;source=file_shield_web_storage",
+                );
+                record.event_code = "process_shield_authority_admitted".into();
+                self.audit.record(record);
+            }
             tracing::info!(
                 pid = identity.stable.pid,
                 start_time = identity.stable.start_time,
@@ -405,6 +434,50 @@ impl ProcessShieldAdmission {
             return Ok(true);
         }
         Ok(false)
+    }
+}
+
+/// Static prerequisites used only to distinguish DISABLED from UNSUPPORTED
+/// while Process Shield is not requested. A requested shield is never called
+/// active until `ProcessShield::load` and hook attach both succeed.
+pub fn inactive_status() -> (String, Option<String>) {
+    let btf_available = std::path::Path::new("/sys/kernel/btf/vmlinux").is_file();
+    let lsm_list = std::fs::read_to_string("/sys/kernel/security/lsm")
+        .map_err(|error| format!("kernel LSM list is unavailable: {error}"));
+    classify_inactive_status(
+        btf_available,
+        lsm_list
+            .as_ref()
+            .map(String::as_str)
+            .map_err(String::as_str),
+    )
+}
+
+fn classify_inactive_status(
+    btf_available: bool,
+    lsm_list: Result<&str, &str>,
+) -> (String, Option<String>) {
+    if !btf_available {
+        return (
+            "UNSUPPORTED".to_owned(),
+            Some("kernel BTF is unavailable".to_owned()),
+        );
+    }
+    match lsm_list {
+        Ok(lsms) if lsms.split(',').any(|lsm| lsm.trim() == "bpf") => (
+            "DISABLED".to_owned(),
+            Some("not enabled in configuration".to_owned()),
+        ),
+        Ok(_) => (
+            "UNSUPPORTED".to_owned(),
+            Some("BPF LSM is not enabled in the active kernel LSM list".to_owned()),
+        ),
+        Err(reason) => (
+            "DISABLED".to_owned(),
+            Some(format!(
+                "Process Shield support could not be verified: {reason}"
+            )),
+        ),
     }
 }
 
@@ -523,7 +596,7 @@ fn find_program(object: NonNull<BpfObject>, name: &str) -> anyhow::Result<NonNul
 
 #[cfg(test)]
 mod tests {
-    use super::is_exact_firefox_main;
+    use super::{classify_inactive_status, is_exact_firefox_main};
 
     #[test]
     fn admission_requires_exact_configured_profile() {
@@ -564,5 +637,33 @@ mod tests {
             &canonical,
         ));
         std::fs::remove_dir_all(profile).unwrap();
+    }
+
+    #[test]
+    fn inactive_capability_status_never_turns_unknown_into_unsupported() {
+        assert_eq!(
+            classify_inactive_status(false, Ok("lockdown,bpf")),
+            (
+                "UNSUPPORTED".to_owned(),
+                Some("kernel BTF is unavailable".to_owned())
+            )
+        );
+        assert_eq!(
+            classify_inactive_status(true, Ok("lockdown,yama,bpf,landlock")),
+            (
+                "DISABLED".to_owned(),
+                Some("not enabled in configuration".to_owned())
+            )
+        );
+        assert_eq!(
+            classify_inactive_status(true, Ok("lockdown,yama,landlock")),
+            (
+                "UNSUPPORTED".to_owned(),
+                Some("BPF LSM is not enabled in the active kernel LSM list".to_owned())
+            )
+        );
+        let unreadable = classify_inactive_status(true, Err("permission denied"));
+        assert_eq!(unreadable.0, "DISABLED");
+        assert!(unreadable.1.unwrap().contains("could not be verified"));
     }
 }

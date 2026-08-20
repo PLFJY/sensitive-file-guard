@@ -13,10 +13,45 @@ for x in "$GUARDD" "$GUARDCTL" "$PROBE" "$ORACLE"; do [ -x "$x" ] || { echo "BLO
 [ -n "$TEST_USER" ] && getent passwd "$TEST_USER" >/dev/null || { echo "BLOCKED: TEST_USER/PKEXEC_UID required"; exit 2; }
 TEST_USER="$(getent passwd "$TEST_USER" | awk -F: 'NR==1{print $1}')"; TEST_UID="$(id -u "$TEST_USER")"; TEST_GID="$(id -g "$TEST_USER")"
 [ "$TEST_UID" -ne 0 ] || { echo "BLOCKED: non-root test user required"; exit 2; }
-WORK="$(mktemp -d /tmp/sfg-lps5-daemon.XXXXXX)"; PROFILE="$WORK/profile"; STATE="$WORK/state"; READY="$STATE/ready"; STORAGE="$PROFILE/webappsstore.sqlite"; AUTHORITY="$WORK/synthetic-firefox-main"; SOCK="$WORK/guardd.sock"; AUDIT="$WORK/audit.db"; DAEMON=""
-cleanup(){ [ -n "$DAEMON" ] && kill -TERM "$DAEMON" 2>/dev/null || true; [ -n "$DAEMON" ] && wait "$DAEMON" 2>/dev/null || true; if [ "${KEEP_WORK:-0}" = 1 ]; then echo "KEEP_WORK: $WORK"; else rm -rf -- "$WORK"; fi; }
+LOOP_IMG=""; LOOP_DEV=""; LOOP_MNT=""; WORK=""; DAEMON=""
+select_test_fs() {
+  if [ -n "${TEST_FS_ROOT:-}" ]; then
+    [ -d "$TEST_FS_ROOT" ] || { echo "BLOCKED: TEST_FS_ROOT is not a directory"; exit 2; }
+    [ "$(stat -c %d "$TEST_FS_ROOT")" != "$(stat -c %d /)" ] || { echo "BLOCKED: TEST_FS_ROOT is on the root filesystem"; exit 2; }
+    [ "$(stat -f -c %T "$TEST_FS_ROOT")" != "tmpfs" ] || { echo "BLOCKED: TEST_FS_ROOT must not be tmpfs"; exit 2; }
+    WORK="$(mktemp -d "$TEST_FS_ROOT/sfg-lps5-daemon.XXXXXX")"
+    return
+  fi
+  LOOP_IMG="$(mktemp /tmp/sfg-lps5-daemon-img.XXXXXX)"
+  truncate -s 256M "$LOOP_IMG"
+  LOOP_DEV="$(losetup -f)"
+  losetup "$LOOP_DEV" "$LOOP_IMG"
+  mkfs.ext4 -q -F "$LOOP_DEV"
+  LOOP_MNT="$(mktemp -d /tmp/sfg-lps5-daemon-mnt.XXXXXX)"
+  mount "$LOOP_DEV" "$LOOP_MNT"
+  WORK="$LOOP_MNT/work"
+  mkdir "$WORK"
+}
+select_test_fs
+PROFILE="$WORK/profile"; STATE="$WORK/state"; READY="$STATE/ready"; STORAGE="$PROFILE/webappsstore.sqlite"; AUTHORITY="$WORK/synthetic-firefox-main"; SOCK="$WORK/guardd.sock"; AUDIT="$WORK/audit.db"
+cleanup(){
+  [ -n "$DAEMON" ] && kill -TERM "$DAEMON" 2>/dev/null || true
+  [ -n "$DAEMON" ] && wait "$DAEMON" 2>/dev/null || true
+  if [ -n "$LOOP_DEV" ]; then
+    umount "$LOOP_MNT" 2>/dev/null || true
+    losetup -d "$LOOP_DEV" 2>/dev/null || true
+    rm -f -- "$LOOP_IMG" 2>/dev/null || true
+    rmdir "$LOOP_MNT" 2>/dev/null || true
+  elif [ "${KEEP_WORK:-0}" = 1 ]; then
+    echo "KEEP_WORK: $WORK"
+  else
+    rm -rf -- "$WORK"
+  fi
+}
 trap cleanup EXIT
 mkdir -p "$PROFILE" "$STATE"; printf 'synthetic-cookie-db-marker' > "$PROFILE/cookies.sqlite"; printf 'synthetic-web-storage' > "$STORAGE"; chown -R "$TEST_UID:$TEST_GID" "$PROFILE" "$STATE"; chmod 0755 "$WORK"; install -m 0555 -o root -g root "$PROBE" "$AUTHORITY"
+[ "$(stat -c %d "$PROFILE")" != "$(stat -c %d /)" ] || { echo "BLOCKED: fixture is on the root filesystem"; exit 2; }
+echo "LPS5_FIXTURE_ST_DEV=$(stat -c %d "$PROFILE") ROOT_ST_DEV=$(stat -c %d /)"
 start_guard(){
   local enabled="$1"; cat > "$WORK/config.json" <<EOF
 {"config_version":1,"enforcement_mode":"conservative","browsers":[{"id":"synthetic-firefox","family":"Firefox","profile_root":"$PROFILE","owner_uid":$TEST_UID,"exe_paths":["$AUTHORITY"]}],"enrolled_exes":["$AUTHORITY"],"ssh_keys":[],"process_shield_enabled":$enabled}
@@ -43,14 +78,16 @@ for op in ptrace process_vm_readv process_vm_writev proc_mem; do
     if python3 - "$WORK/events-$op.json" "$target" <<'PY'
 import json,sys
 events=(json.load(open(sys.argv[1])).get('data') or [])
-target=sys.argv[2]
-ok=any(e.get('event_code')=='process_shield_ptrace_denied' and f'target_pid={target}' in e.get('backend_diag','') and e.get('pid',0)>0 for e in events)
+target=int(sys.argv[2])
+denied=any(e.get('event_code')=='process_shield_ptrace_denied' and f'target_pid={target}' in e.get('backend_diag','') and e.get('pid',0)>0 for e in events)
+admitted=any(e.get('event_code')=='process_shield_authority_admitted' and e.get('pid')==target and e.get('resource_browser')=='synthetic-firefox' and e.get('resource_kind_code')=='browser_web_storage' for e in events)
+ok=denied and admitted
 raise SystemExit(0 if ok else 1)
 PY
     then audit_ok=1; break; fi
     sleep .1
   done
-  [ "$audit_ok" = 1 ] || { echo "FAIL: missing persisted exact Process Shield audit for $op"; exit 1; }
+  [ "$audit_ok" = 1 ] || { echo "FAIL: missing persisted exact Process Shield denial/admission audit for $op"; exit 1; }
   echo "LPS5_DAEMON_${op^^}_ON_PERSISTED_EXACT_AUDIT=PASS"
 done
 grep -q 'Process Shield admitted exact Firefox Main from File Shield WebStorage allow' "$WORK/guardd-true.log" || { echo 'FAIL: no real daemon admission'; exit 1; }

@@ -93,6 +93,11 @@ enum Command {
         /// Write without the interactive "yes" confirmation.
         #[arg(long)]
         yes: bool,
+        /// Request the optional Linux Process Shield. This is accepted only
+        /// when a reviewed native Firefox enrollment is present; unsupported
+        /// hosts fail daemon startup instead of silently weakening protection.
+        #[arg(long)]
+        process_shield: bool,
     },
     /// List recent authorization events.
     Events {
@@ -174,6 +179,9 @@ enum BrowserAction {
         #[arg(long, value_name = "PATH")]
         home: Option<PathBuf>,
     },
+    /// Show configured browser authorities and whether an exact Firefox
+    /// instance has completed File Shield evidence-driven admission.
+    Status,
 }
 
 #[derive(Subcommand, Debug)]
@@ -188,6 +196,14 @@ enum LeasesAction {
 enum ConfigAction {
     /// Check configuration validity (queries the daemon's in-memory policy).
     Check,
+    /// Validate a Linux configuration file locally without contacting guardd.
+    /// Release installers use this before upgrade or explicit downgrade so an
+    /// incompatible schema can never be activated by replacing the daemon.
+    #[command(name = "validate-file")]
+    ValidateFile {
+        #[arg(long, value_name = "PATH", default_value = "/etc/guardd/config.json")]
+        path: PathBuf,
+    },
     /// macOS-only local diagnostic: read the authoritative config and run the
     /// same load/validate/prepare steps as guard-es at startup, printing the
     /// EXACT failure (if any). Requires root to read the config file. No
@@ -293,8 +309,24 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
     {
         return run_browser_discover(home.as_deref());
     }
-    if let Command::Setup { home, config, yes } = &cli.command {
-        return run_setup(home.as_deref(), config, *yes);
+    if let Command::Browser {
+        action: BrowserAction::Status,
+    } = &cli.command
+    {
+        return run_browser_status(&cli.socket, cli.json);
+    }
+    if let Command::Setup {
+        home,
+        config,
+        yes,
+        process_shield,
+    } = &cli.command
+    {
+        return run_setup(home.as_deref(), config, *yes, *process_shield);
+    }
+    #[cfg(target_os = "linux")]
+    if matches!(&cli.command, Command::Status) && !cli.json {
+        return run_product_status(&cli.socket);
     }
     // Local capability inventory (no daemon connection). Runs probes against
     // this kernel; full fanotify results need root (CAP_SYS_ADMIN).
@@ -307,6 +339,12 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
     } = &cli.command
     {
         return run_config_validate_local();
+    }
+    if let Command::Config {
+        action: ConfigAction::ValidateFile { path },
+    } = &cli.command
+    {
+        return run_config_validate_file(path, cli.json);
     }
     // `ssh load` runs a multi-step brokered flow (authorize -> continue child
     // -> revoke) that does not fit the single-request dispatch below.
@@ -328,6 +366,9 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
         Command::Browser {
             action: BrowserAction::Discover { .. },
         } => unreachable!("browser discover handled before IPC dispatch"),
+        Command::Browser {
+            action: BrowserAction::Status,
+        } => unreachable!("browser status handled before IPC dispatch"),
         Command::Setup { .. } => unreachable!("setup handled before IPC dispatch"),
         Command::Events { limit } => RequestOp::Events {
             limit: *limit,
@@ -376,6 +417,9 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
         Command::Config {
             action: ConfigAction::ValidateLocal,
         } => unreachable!("config validate-local handled before IPC dispatch"),
+        Command::Config {
+            action: ConfigAction::ValidateFile { .. },
+        } => unreachable!("config validate-file handled before IPC dispatch"),
         Command::Capabilities => unreachable!("capabilities handled before IPC dispatch"),
         Command::Privileged { .. } => unreachable!("privileged helper handled before IPC dispatch"),
         Command::ServiceStatus | Command::NotificationService { .. } => {
@@ -540,6 +584,62 @@ fn run_config_validate_local() -> anyhow::Result<()> {
 #[cfg(not(target_os = "macos"))]
 fn run_config_validate_local() -> anyhow::Result<()> {
     anyhow::bail!("config validate-local is available only on macOS")
+}
+
+#[cfg(target_os = "linux")]
+fn run_config_validate_file(path: &Path, json: bool) -> anyhow::Result<()> {
+    #[derive(Serialize)]
+    struct Validation<'a> {
+        valid: bool,
+        path: &'a str,
+        config_version: u32,
+        enforcement_mode: &'a str,
+        browsers: usize,
+        ssh_keys: usize,
+        process_shield_enabled: bool,
+    }
+
+    let bytes = std::fs::read(path)
+        .map_err(|error| anyhow::anyhow!("reading configuration {}: {error}", path.display()))?;
+    let config: platform_linux::config::EnforcementConfig = serde_json::from_slice(&bytes)
+        .map_err(|error| anyhow::anyhow!("parsing configuration {}: {error}", path.display()))?;
+    config
+        .validate()
+        .map_err(|error| anyhow::anyhow!("validating configuration {}: {error}", path.display()))?;
+    let path_text = path.to_string_lossy();
+    let validation = Validation {
+        valid: true,
+        path: &path_text,
+        config_version: config.config_version,
+        enforcement_mode: config.enforcement_mode.as_str(),
+        browsers: config.browsers.len(),
+        ssh_keys: config.ssh_keys.len(),
+        process_shield_enabled: config.process_shield_enabled,
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&validation)?);
+    } else {
+        println!("Configuration is compatible with this guardd release.");
+        println!("  path           : {}", path.display());
+        println!("  schema version : {}", config.config_version);
+        println!("  mode           : {}", config.enforcement_mode.as_str());
+        println!("  browsers       : {}", config.browsers.len());
+        println!("  SSH keys       : {}", config.ssh_keys.len());
+        println!(
+            "  Process Shield : {}",
+            if config.process_shield_enabled {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_config_validate_file(_path: &Path, _json: bool) -> anyhow::Result<()> {
+    anyhow::bail!("config validate-file is available only on Linux")
 }
 
 #[cfg(target_os = "linux")]
@@ -808,6 +908,7 @@ struct SetupConfig {
     browsers: Vec<SetupBrowserConfig>,
     enrolled_exes: Vec<String>,
     ssh_keys: Vec<String>,
+    process_shield_enabled: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -937,6 +1038,111 @@ fn run_browser_discover(home: Option<&Path>) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+fn run_product_status(socket: &Path) -> anyhow::Result<()> {
+    let status = guard_client::status(socket)?;
+    let browsers = guard_client::browsers(socket)?;
+    let events = guard_client::events(socket, Some(200))?;
+    print_product_status(&status, &browsers, &events);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn run_browser_status(socket: &Path, json: bool) -> anyhow::Result<()> {
+    #[derive(Serialize)]
+    struct BrowserAuthorityView<'a> {
+        id: &'a str,
+        family: &'a str,
+        profile_root: &'a str,
+        product_acceptance: &'static str,
+        file_shield: &'a str,
+        process_shield: &'a str,
+        exact_instance_admitted: bool,
+        message: &'static str,
+    }
+
+    let status = guard_client::status(socket)?;
+    let browsers = guard_client::browsers(socket)?;
+    let events = guard_client::events(socket, Some(200))?;
+    let file_shield = status
+        .linux_health
+        .as_deref()
+        .map(|health| user_file_shield_state(&health.file_shield))
+        .unwrap_or("DISABLED");
+    let process_shield = status
+        .linux_health
+        .as_deref()
+        .map(|health| health.process_shield.as_str())
+        .unwrap_or("UNSUPPORTED");
+    let views = browsers
+        .iter()
+        .map(|browser| {
+            let admitted = live_authority_admission(browser, &events);
+            BrowserAuthorityView {
+                id: &browser.id,
+                family: &browser.family,
+                profile_root: &browser.profile_root,
+                product_acceptance: browser_product_acceptance(browser),
+                file_shield,
+                process_shield,
+                exact_instance_admitted: admitted,
+                message: if admitted {
+                    "This Firefox instance is trusted for authentication state access"
+                } else {
+                    "Waiting for the configured browser to access protected authentication state"
+                },
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&views)?);
+    } else if views.is_empty() {
+        println!("No browser authority is configured.");
+        println!("Run guardctl setup to review and enroll a native browser instance.");
+    } else {
+        println!("Browser authority");
+        for view in views {
+            println!(
+                "  {} ({}) — {}",
+                view.id, view.family, view.product_acceptance
+            );
+            println!("    profile        : {}", view.profile_root);
+            println!("    File Shield    : {}", view.file_shield);
+            println!("    Process Shield : {}", view.process_shield);
+            println!("    {}", view.message);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_browser_status(_socket: &Path, _json: bool) -> anyhow::Result<()> {
+    anyhow::bail!("browser status is currently available only on Linux")
+}
+
+#[cfg(target_os = "linux")]
+fn live_authority_admission(
+    browser: &guard_ipc::BrowserInfo,
+    events: &[guard_ipc::EventInfo],
+) -> bool {
+    events.iter().any(|event| {
+        event.event_code == "process_shield_authority_admitted"
+            && event.resource_browser.as_deref() == Some(browser.id.as_str())
+            && platform_linux::identity::read_start_time(event.pid as i32).ok()
+                == Some(event.start_time)
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn browser_product_acceptance(browser: &guard_ipc::BrowserInfo) -> &'static str {
+    if browser.id == "firefox" && browser.family == "Firefox" {
+        "ACCEPTED"
+    } else {
+        "NOT ACCEPTED"
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn run_browser_discover(home: Option<&Path>) -> anyhow::Result<()> {
     use std::sync::Arc;
@@ -960,13 +1166,19 @@ fn run_browser_discover(home: Option<&Path>) -> anyhow::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn run_setup(home: Option<&Path>, config_path: &Path, assume_yes: bool) -> anyhow::Result<()> {
+fn run_setup(
+    home: Option<&Path>,
+    config_path: &Path,
+    assume_yes: bool,
+    process_shield: bool,
+) -> anyhow::Result<()> {
     reject_existing_config(config_path)?;
     let home = resolve_setup_home(home)?;
     let discovery = shared_discovery(&home);
-    let config = setup_config(&discovery)?;
+    let config = setup_config(&discovery, process_shield)?;
     let rendered = serde_json::to_string_pretty(&config)?;
 
+    println!("Review the browser instance(s) below before enrollment.");
     println!(
         "The following strict-filesystem configuration will be written to {}:\n",
         config_path.display()
@@ -998,11 +1210,20 @@ fn run_setup(home: Option<&Path>, config_path: &Path, assume_yes: bool) -> anyho
     );
     println!("Review it, then run: sudo systemctl enable --now guardd");
     println!("Verify with: guardctl status");
+    println!("Enrollment continues automatically when the browser first accesses protected authentication state.");
+    if process_shield {
+        println!("After that access, `guardctl browser status` confirms exact-instance Process Shield admission.");
+    }
     Ok(())
 }
 
 #[cfg(target_os = "macos")]
-fn run_setup(_home: Option<&Path>, _config_path: &Path, _assume_yes: bool) -> anyhow::Result<()> {
+fn run_setup(
+    _home: Option<&Path>,
+    _config_path: &Path,
+    _assume_yes: bool,
+    _process_shield: bool,
+) -> anyhow::Result<()> {
     anyhow::bail!(
         "macOS configuration is applied through authenticated XPC; the Linux --yes setup path is unavailable"
     )
@@ -1036,10 +1257,20 @@ fn resolve_setup_home(home: Option<&Path>) -> anyhow::Result<PathBuf> {
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn setup_config(discovery: &BrowserDiscovery) -> anyhow::Result<SetupConfig> {
+fn setup_config(discovery: &BrowserDiscovery, process_shield: bool) -> anyhow::Result<SetupConfig> {
     if discovery.browsers.is_empty() {
         anyhow::bail!(
             "no supported native browser profile/executable pair was found; no configuration was written. Use `guardctl browser discover --home PATH` to inspect candidates, or configure an explicit custom browser path."
+        );
+    }
+    if process_shield
+        && !discovery
+            .browsers
+            .iter()
+            .any(|browser| browser.id == "firefox" && browser.family == "Firefox")
+    {
+        anyhow::bail!(
+            "--process-shield requires the accepted native Firefox enrollment; other browser families remain unsupported"
         );
     }
     let browsers = discovery
@@ -1060,6 +1291,7 @@ fn setup_config(discovery: &BrowserDiscovery) -> anyhow::Result<SetupConfig> {
         browsers,
         enrolled_exes: Vec::new(),
         ssh_keys: Vec::new(),
+        process_shield_enabled: process_shield,
     })
 }
 
@@ -1356,6 +1588,96 @@ fn print_human(resp: &Response) {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn print_product_status(
+    status: &StatusInfo,
+    browsers: &[guard_ipc::BrowserInfo],
+    events: &[guard_ipc::EventInfo],
+) {
+    let linux = status.linux_health.as_deref();
+    let file_shield = linux
+        .map(|health| user_file_shield_state(&health.file_shield))
+        .unwrap_or_else(|| {
+            if status.enforcement_active {
+                "REDUCED"
+            } else {
+                "DISABLED"
+            }
+        });
+    let process_shield = linux
+        .map(|health| health.process_shield.as_str())
+        .unwrap_or("UNSUPPORTED");
+
+    println!("Sensitive File Guard {}", status.version);
+    println!("File Shield: {file_shield}");
+    if let Some(health) = linux {
+        if health.continuity != "INTACT" {
+            println!(
+                "  Protection continuity: REDUCED ({})",
+                health
+                    .continuity_reason
+                    .as_deref()
+                    .unwrap_or("continuity lost")
+            );
+        }
+        if health.audit != "HEALTHY" {
+            println!("  Audit: REDUCED");
+        }
+    }
+    println!("Process Shield: {process_shield}");
+    if let Some(message) = product_process_shield_message(process_shield) {
+        println!("  {message}");
+    }
+
+    println!("Browser authority:");
+    if browsers.is_empty() {
+        println!("  none enrolled");
+    } else {
+        for browser in browsers {
+            let acceptance = browser_product_acceptance(browser);
+            let admission = if live_authority_admission(browser, events) {
+                "exact instance admitted"
+            } else if process_shield == "DISABLED" || process_shield == "UNSUPPORTED" {
+                "File Shield enrollment active"
+            } else {
+                "waiting for authentication-state access"
+            };
+            println!(
+                "  {} ({}) — {acceptance}; {admission}",
+                browser.id, browser.family
+            );
+        }
+    }
+    println!(
+        "SSH protection: {} enabled key{}",
+        status.ssh_protected_keys,
+        if status.ssh_protected_keys == 1 {
+            ""
+        } else {
+            "s"
+        }
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn user_file_shield_state(state: &str) -> &str {
+    match state {
+        "ACTIVE" => "ACTIVE",
+        "REDUCED" | "DEGRADED" => "REDUCED",
+        _ => "DISABLED",
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn product_process_shield_message(state: &str) -> Option<&'static str> {
+    match state {
+        "REDUCED" => Some("limited process-control coverage"),
+        "UNSUPPORTED" => Some("required kernel support is unavailable"),
+        "DISABLED" => Some("not enabled"),
+        _ => None,
+    }
+}
+
 fn print_status(s: &StatusInfo) {
     println!("guardd {} — {}", s.version, s.status);
     println!(
@@ -1419,6 +1741,9 @@ fn print_status(s: &StatusInfo) {
         }
         println!("  audit_health       : {}", linux.audit);
         println!("  process_shield     : {}", linux.process_shield);
+        if let Some(reason) = &linux.process_shield_reason {
+            println!("  process_shield_reason: {reason}");
+        }
         println!("  pidfd_enabled      : {}", linux.pidfd_enabled);
         if linux.pidfd_missing_events > 0 {
             println!(
@@ -1528,21 +1853,81 @@ fn print_events(es: &[guard_ipc::EventInfo]) {
         println!("(no events)");
         return;
     }
-    println!(
-        "{:<6} {:<14} {:<6} {:<8} {:<24} {:<10} PATH",
-        "ID", "DECISION", "UID", "PID", "KIND", "BROWSER"
-    );
     for e in es {
-        println!(
-            "{:<6} {:<14} {:<6} {:<8} {:<24} {:<10} {}",
-            e.id,
-            decision_short(&e.decision),
-            e.uid,
-            e.pid,
-            e.resource_kind,
-            e.resource_browser.as_deref().unwrap_or("-"),
-            e.path,
-        );
+        println!("#{} · {} · {}", e.id, event_age(e.ts_ms), event_label(e));
+        match e.event_code.as_str() {
+            "process_shield_authority_admitted" => {
+                println!(
+                    "  Browser : {}",
+                    e.resource_browser.as_deref().unwrap_or("Firefox")
+                );
+                println!("  Process : {} (pid {})", e.exe, e.pid);
+                println!("  This Firefox instance is trusted for authentication state access");
+            }
+            "process_shield_ptrace_denied" => {
+                println!("  Requester: {} (pid {}, uid {})", e.exe, e.pid, e.uid);
+                println!("  Target   : {}", e.path);
+                println!("  Result   : blocked before process memory/control access");
+            }
+            "required_filesystem_mark_lost" => {
+                println!("  File Shield protection topology is reduced");
+                println!("  Action: review `guardctl status` and restart only after the cause is understood");
+            }
+            "fanotify_queue_overflow" => {
+                println!("  File Shield protection continuity is reduced");
+                println!("  Action: review `guardctl status` and restart only after the cause is understood");
+            }
+            _ => {
+                println!("  Requester: {} (pid {}, uid {})", e.exe, e.pid, e.uid);
+                println!("  Target   : {}", e.path);
+                if let Some(reason) = event_reason(e) {
+                    println!("  Reason   : {reason}");
+                }
+            }
+        }
+        println!();
+    }
+}
+
+fn event_label(event: &guard_ipc::EventInfo) -> &'static str {
+    match event.event_code.as_str() {
+        "process_shield_authority_admitted" => "Browser authority admitted",
+        "process_shield_ptrace_denied" => "Process Shield blocked access",
+        "required_filesystem_mark_lost" => "File Shield topology degraded",
+        "fanotify_queue_overflow" => "File Shield continuity degraded",
+        _ if event.decision.starts_with("Deny") => "Protected-file access denied",
+        _ => "Protected-file access allowed",
+    }
+}
+
+fn event_reason(event: &guard_ipc::EventInfo) -> Option<&'static str> {
+    match event.reason_code.as_deref() {
+        Some("unknown_process") | Some("identity_mismatch") => {
+            Some("the requester did not match an authorized process identity")
+        }
+        Some("migration_lease_required") => {
+            Some("cross-browser access requires explicit migration approval")
+        }
+        Some("wrong_user") => Some("the requester does not own this protected resource"),
+        Some("lease_expired") | Some("lease_revoked") => {
+            Some("the temporary authorization is no longer valid")
+        }
+        Some(_) => Some("the request did not satisfy the configured authorization policy"),
+        None => None,
+    }
+}
+
+fn event_age(timestamp_ms: u64) -> String {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(timestamp_ms);
+    let seconds = now_ms.saturating_sub(timestamp_ms) / 1_000;
+    match seconds {
+        0..=59 => format!("{seconds}s ago"),
+        60..=3_599 => format!("{}m ago", seconds / 60),
+        3_600..=86_399 => format!("{}h ago", seconds / 3_600),
+        _ => format!("{}d ago", seconds / 86_400),
     }
 }
 
@@ -2142,6 +2527,7 @@ fn revoke_lease_best_effort(socket: &Path, lease_id: &str) {
     );
 }
 
+#[cfg(test)]
 fn decision_short(s: &str) -> &str {
     if s.contains("Allow") && s.contains("Lease") {
         "ALLOW_LEASE"
@@ -2293,7 +2679,7 @@ mod tests {
             unsupported_sandboxed: Vec::new(),
         };
 
-        let config = setup_config(&discovery).unwrap();
+        let config = setup_config(&discovery, false).unwrap();
         let value = serde_json::to_value(config).unwrap();
         assert_eq!(value["enforcement_mode"], "strict-filesystem");
         assert_eq!(
@@ -2303,17 +2689,50 @@ mod tests {
         assert_eq!(value["browsers"][0]["family"], "firefox");
         assert!(value["browsers"][0].get("owner_uid").is_none());
         assert_eq!(value["ssh_keys"], serde_json::json!([]));
+        assert_eq!(value["process_shield_enabled"], serde_json::json!(false));
         assert!(value.get("ssh_behavior_window_secs").is_none());
     }
 
     #[test]
     fn setup_refuses_to_create_an_empty_protection_config() {
-        let error = setup_config(&BrowserDiscovery {
-            browsers: Vec::new(),
-            unsupported_sandboxed: Vec::new(),
-        })
+        let error = setup_config(
+            &BrowserDiscovery {
+                browsers: Vec::new(),
+                unsupported_sandboxed: Vec::new(),
+            },
+            false,
+        )
         .unwrap_err();
         assert!(error.to_string().contains("no supported native browser"));
+    }
+
+    #[test]
+    fn process_shield_setup_requires_the_accepted_native_firefox_enrollment() {
+        let esr_only = BrowserDiscovery {
+            browsers: vec![BrowserSuggestion {
+                id: "firefox-esr".to_owned(),
+                family: "Firefox".to_owned(),
+                profile_root: "/synthetic/firefox-esr".to_owned(),
+                exe_paths: vec!["/usr/bin/firefox-esr".to_owned()],
+            }],
+            unsupported_sandboxed: Vec::new(),
+        };
+        assert!(setup_config(&esr_only, true).is_err());
+
+        let firefox = BrowserDiscovery {
+            browsers: vec![BrowserSuggestion {
+                id: "firefox".to_owned(),
+                family: "Firefox".to_owned(),
+                profile_root: "/synthetic/firefox".to_owned(),
+                exe_paths: vec!["/usr/bin/firefox".to_owned()],
+            }],
+            unsupported_sandboxed: Vec::new(),
+        };
+        assert!(
+            setup_config(&firefox, true)
+                .expect("accepted Firefox setup")
+                .process_shield_enabled
+        );
     }
 
     #[test]
@@ -2358,6 +2777,74 @@ mod tests {
         assert_eq!(decision_short("Allow"), "ALLOW");
         assert_eq!(decision_short("AllowByLease(42)"), "ALLOW_LEASE");
         assert_eq!(decision_short("Deny(CrossBrowserWithoutLease)"), "DENY");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn product_status_uses_public_states_and_exact_browser_acceptance() {
+        assert_eq!(user_file_shield_state("ACTIVE"), "ACTIVE");
+        assert_eq!(user_file_shield_state("DEGRADED"), "REDUCED");
+        assert_eq!(user_file_shield_state("NOT_ENFORCING"), "DISABLED");
+        assert_eq!(
+            product_process_shield_message("REDUCED"),
+            Some("limited process-control coverage")
+        );
+
+        let firefox = guard_ipc::BrowserInfo {
+            id: "firefox".to_owned(),
+            family: "Firefox".to_owned(),
+            profile_root: "/synthetic/firefox".to_owned(),
+            owner_uid: 1000,
+            exe_paths: vec!["/usr/lib/firefox/firefox".to_owned()],
+        };
+        let esr = guard_ipc::BrowserInfo {
+            id: "firefox-esr".to_owned(),
+            ..firefox.clone()
+        };
+        assert_eq!(browser_product_acceptance(&firefox), "ACCEPTED");
+        assert_eq!(browser_product_acceptance(&esr), "NOT ACCEPTED");
+    }
+
+    #[test]
+    fn audit_labels_keep_topology_and_continuity_distinct() {
+        let parse = |event_code: &str| {
+            serde_json::from_value::<guard_ipc::EventInfo>(serde_json::json!({
+                "id": 1,
+                "event_code": event_code,
+                "ts_ms": 1,
+                "uid": 1000,
+                "pid": 123,
+                "start_time": 456,
+                "decision": "Allow",
+                "deny_reason": null,
+                "resource_kind": "WebStorage",
+                "resource_kind_code": "browser_web_storage",
+                "resource_browser": "firefox",
+                "resource_profile": "default",
+                "path": "/synthetic/profile/storage",
+                "exe": "/synthetic/firefox",
+                "exe_owner_uid": 0,
+                "trust_tier": "SystemPackage",
+                "process_browser": "firefox",
+                "parent_pid": 1,
+                "parent_exe": "/usr/lib/systemd/systemd",
+                "lease_id": null,
+                "backend_diag": "metadata only"
+            }))
+            .expect("synthetic audit event")
+        };
+        assert_eq!(
+            event_label(&parse("required_filesystem_mark_lost")),
+            "File Shield topology degraded"
+        );
+        assert_eq!(
+            event_label(&parse("fanotify_queue_overflow")),
+            "File Shield continuity degraded"
+        );
+        assert_eq!(
+            event_label(&parse("process_shield_authority_admitted")),
+            "Browser authority admitted"
+        );
     }
 
     #[test]

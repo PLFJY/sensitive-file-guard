@@ -1,0 +1,67 @@
+name: Linux release artifact
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  linux-x86_64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            clang libbpf-dev libelf-dev libgtk-4-dev libadwaita-1-dev \
+            libpolkit-gobject-1-dev pkg-config desktop-file-utils appstream
+
+      - name: Select Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+
+      - name: Quality gates
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --all-features
+          desktop-file-validate data/io.github.plfjy.SensitiveFileGuard.desktop
+          appstreamcli validate --no-net data/io.github.plfjy.SensitiveFileGuard.metainfo.xml
+          git diff --check
+
+      - name: Build release bundle
+        shell: bash
+        run: |
+          args=()
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            tag_version="${GITHUB_REF_NAME#v}"
+            [[ "$tag_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.+_-][0-9A-Za-z.+_-]+)?$ ]] || {
+              echo "Invalid release tag: $GITHUB_REF_NAME" >&2
+              exit 2
+            }
+            args+=(--version "$tag_version")
+          fi
+          packaging/linux/build-release.sh "${args[@]}"
+
+      - name: Verify release lifecycle
+        run: tests/check_linux_packaging.sh
+
+      - name: Upload checksum-verified bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: sensitive-file-guard-linux-x86_64
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 30

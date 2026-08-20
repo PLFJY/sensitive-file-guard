@@ -299,6 +299,8 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
     } else {
         None
     };
+    let (process_shield_inactive_state, process_shield_inactive_reason) =
+        process_shield::inactive_status();
     let process_shield_active = process_shield
         .as_ref()
         .map(|runtime| Arc::clone(&runtime.active))
@@ -497,6 +499,9 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
             pending_migrations: Arc::clone(&pending_migrations),
             pending_ssh_reads: Arc::clone(&pending_ssh_reads),
             process_shield_active: Arc::clone(&process_shield_active),
+            process_shield_requested: cfg.process_shield_enabled,
+            process_shield_inactive_state,
+            process_shield_inactive_reason,
         };
         Some(
             std::thread::Builder::new()
@@ -848,7 +853,7 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                         .expect("engine mutex poisoned")
                         .web_storage_resource(ev.fd);
                     if let Some(resource) = resource {
-                        if let Err(error) = admission.admit_from_file_shield(ev.pid) {
+                        if let Err(error) = admission.admit_from_file_shield(ev.pid, &resource) {
                             tracing::error!(pid = ev.pid, err = %error, "Process Shield target admission failed before WebStorage open; denying this open");
                             decision = guard_core::policy::Decision::Deny(
                                 guard_core::policy::DenyReason::UnknownProcess,

@@ -12,6 +12,22 @@ scripts/build-deploy-linux.sh
 
 选项：`--build-only` 只构建，`--no-start` 安装但不启动，`--yes` 跳过首次配置确认。脚本不会以 root 编译 Rust，也不会覆盖已有 `/etc/guardd/config.json`。
 
+## 正式 release artifact
+
+面向发布的离线 artifact 与源码树安装分开。普通用户执行：
+
+```sh
+packaging/linux/build-release.sh
+sha256sum -c dist/sensitive-file-guard-linux-*.tar.gz.sha256
+tar -xzf dist/sensitive-file-guard-linux-*.tar.gz
+cd sensitive-file-guard-linux-*
+sudo ./install.sh install
+```
+
+release 安装到 `/usr/bin`、`/usr/lib/systemd` 和 `/usr/share`。升级前会用候选
+`guardctl` 验证现有配置；降级默认拒绝，只有显式 `--allow-downgrade` 且配置兼容
+才会继续。完整 lifecycle 与权限契约见 [Linux release pipeline](linux-release.md)。
+
 ## 手工安装
 
 先安装 Rust、Cargo、GTK4、libadwaita、pkg-config、systemd 和 polkit。然后：
@@ -27,6 +43,27 @@ guardctl status
 ```
 
 `guardctl setup` 会根据当前用户已验证的浏览器可执行文件和 profile 元数据生成严格配置，并且不会猜测或自动加入 SSH 私钥。空配置不代表防护已启用；必须存在经过审阅的非空 `/etc/guardd/config.json`。
+
+如果当前 enrollment 是已经接受的原生 Firefox，并且内核确实具备已验证的 BPF LSM
+能力，可以在首次生成配置时显式请求可选的 Process Shield：
+
+```sh
+sudo /usr/local/bin/guardctl setup --home "$HOME" --process-shield
+```
+
+Firefox ESR、Chromium、Chrome 和 Zen 目前不会因此自动获得接受状态。完成配置并启动
+daemon 后，使用 `guardctl browser status` 查看 File Shield 捕获到真实认证状态访问后，
+某个精确 Firefox 进程实例是否已被接纳。
+
+## 面向用户的状态与审计
+
+`guardctl status` 的默认输出只展示产品级状态：File Shield、可选 Process Shield、
+browser authority 和已经启用的 SSH key 数量。`guardctl --json status` 保留稳定的机器
+可读健康字段与诊断原因。
+
+`guardctl events --limit 20` 默认把拒绝访问、browser authority 接纳、Process Shield
+阻止和保护连续性/拓扑降级显示为可读事件；`guardctl --json events --limit 20` 输出原始
+JSON 合约，不通过人类文本推断事件类别。
 
 ## strict-filesystem 与根文件系统标记（SAFETY REFUSAL）
 

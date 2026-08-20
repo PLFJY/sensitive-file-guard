@@ -497,9 +497,15 @@ pub struct LinuxHealthInfo {
     pub continuity_reason: Option<String>,
     /// Audit pipeline health: `"HEALTHY"` or `"DEGRADED"` (events dropped).
     pub audit: String,
-    /// Process Shield capability inventory on this host: `"UNSUPPORTED"` for
-    /// the Linux File Shield freeze (inventory only, not enforced).
+    /// Optional Process Shield posture: `"REDUCED"` when the accepted narrow
+    /// hook is active, `"DISABLED"` when not requested (including when support
+    /// cannot be verified), or `"UNSUPPORTED"` only when a required kernel
+    /// prerequisite is definitively absent.
     pub process_shield: String,
+    /// Human-safe reason for DISABLED/UNSUPPORTED/REDUCED. Clients must not
+    /// infer support from a missing reason or from File Shield state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_shield_reason: Option<String>,
     /// LFH1: whether the fanotify group was created with FAN_REPORT_PIDFD.
     /// `true` => events carry kernel-pinned pidfds; `false` => legacy
     /// PID+starttime identity (REDUCED(legacy_process_identity)).
