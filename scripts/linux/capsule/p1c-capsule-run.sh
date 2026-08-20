@@ -1,5 +1,5 @@
 #!/bin/bash
-# Capsule P1-c live test: AUTONOMOUS required-filesystem-mark-loss detection.
+# P1-c live test: AUTONOMOUS required-filesystem-mark-loss detection.
 # - Marks ONLY a fresh capsule-internal loop-backed ext4 (independent superblock).
 # - NEVER marks /testfs (host root bind), /, or changes host sysctls.
 # - P1-c claim under test: mark loss is detected by the daemon event loop
@@ -14,17 +14,23 @@ note_pass() { echo "PASS: $1"; PASS=$((PASS + 1)); }
 note_fail() { echo "FAIL: $1"; FAIL=$((FAIL + 1)); }
 note_blocked() { echo "BLOCKED: $1"; BLOCKED=$((BLOCKED + 1)); }
 
-P1C_IMG="/testfs/p1c-$$.img"
+BIN_DIR="${BIN_DIR:-/stage/bin}"
+P1C_ARTIFACT_ROOT="${P1C_ARTIFACT_ROOT:-${TEST_ARTIFACT_ROOT:-}}"
+if [ -z "$P1C_ARTIFACT_ROOT" ]; then
+  if [ -d /testfs ]; then P1C_ARTIFACT_ROOT=/testfs; else P1C_ARTIFACT_ROOT=/tmp; fi
+fi
+[ -d "$P1C_ARTIFACT_ROOT" ] || { echo "BLOCKED: artifact root missing: $P1C_ARTIFACT_ROOT"; exit 2; }
+P1C_IMG="$P1C_ARTIFACT_ROOT/p1c-$$.img"
 P1C_LOOP=""
 mkdir -p /p1cfs
 truncate -s 256M "$P1C_IMG"
 P1C_LOOP="$(losetup --find --show "$P1C_IMG")"
 mkfs.ext4 -q -F "$P1C_LOOP"
 mount "$P1C_LOOP" /p1cfs || { echo "BLOCKED: loop ext4 mount failed"; exit 2; }
-ROOT_DEV=$(stat -c %d /); TESTFS_DEV=$(stat -c %d /testfs); P1C_DEV=$(stat -c %d /p1cfs)
+ROOT_DEV=$(stat -c %d /); ARTIFACT_DEV=$(stat -c %d "$P1C_ARTIFACT_ROOT"); P1C_DEV=$(stat -c %d /p1cfs)
 echo "== super_block identities =="
-echo "root=$ROOT_DEV testfs=$TESTFS_DEV p1cfs=$P1C_DEV"
-if [ "$P1C_DEV" = "$ROOT_DEV" ] || [ "$P1C_DEV" = "$TESTFS_DEV" ]; then
+echo "root=$ROOT_DEV artifact_root=$ARTIFACT_DEV p1cfs=$P1C_DEV"
+if [ "$P1C_DEV" = "$ROOT_DEV" ] || [ "$P1C_DEV" = "$ARTIFACT_DEV" ]; then
   echo "REFUSING: p1cfs shares a super_block with root/testfs"; umount /p1cfs; losetup -d "$P1C_LOOP"; exit 2
 fi
 
@@ -47,7 +53,7 @@ cat > /p1cfs/config.json <<CONF_EOF
 CONF_EOF
 
 status_json() {
-  /stage/bin/guardctl --socket /p1cfs/guardd.sock --json status 2>/dev/null || echo "{}"
+  "$BIN_DIR/guardctl" --socket /p1cfs/guardd.sock --json status 2>/dev/null || echo "{}"
 }
 read_health() {
   status_json | python3 -c '
@@ -70,7 +76,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-/stage/bin/guardd --enforce-browser-config /p1cfs/config.json \
+"$BIN_DIR/guardd" --enforce-browser-config /p1cfs/config.json \
   --ipc-socket /p1cfs/guardd.sock --audit-db /p1cfs/audit.db --print-decisions \
   > /p1cfs/guardd.log 2>&1 &
 DAEMON_PID=$!
@@ -90,14 +96,14 @@ else
 fi
 
 echo "==> 2. unknown probe denied while INTACT"
-if /stage/bin/guard-test-probe read "$PROFILE/Default/Network/Cookies" >/dev/null 2>&1; then
+if "$BIN_DIR/guard-test-probe" read "$PROFILE/Default/Network/Cookies" >/dev/null 2>&1; then
   note_fail "unknown probe read the fixture"
 else
   note_pass "unknown probe denied"
 fi
 
 echo "==> 3. remove the REAL kernel filesystem mark on the live group"
-FSMARK_OUT="$(/stage/bin/guard-test-probe fsmark-remove "$DAEMON_PID" /p1cfs 2>&1)" || true
+FSMARK_OUT="$("$BIN_DIR/guard-test-probe" fsmark-remove "$DAEMON_PID" /p1cfs 2>&1)" || true
 echo "    $FSMARK_OUT"
 FSMARK_FD="$(echo "$FSMARK_OUT" | sed -n 's/.*fanotify_fd=\([0-9]*\).*/\1/p' | head -1)"
 if echo "$FSMARK_OUT" | grep -q 'result=ok' && echo "$FSMARK_OUT" | grep -q 'sdev_after=0'; then
@@ -141,7 +147,7 @@ else
 fi
 
 echo "==> 6. restore the mark; continuity STAYS LOST (sticky)"
-RESTORE_OUT="$(/stage/bin/guard-test-probe fsmark-restore "$DAEMON_PID" "$FSMARK_FD" /p1cfs 2>&1)" || true
+RESTORE_OUT="$("$BIN_DIR/guard-test-probe" fsmark-restore "$DAEMON_PID" "$FSMARK_FD" /p1cfs 2>&1)" || true
 echo "    $RESTORE_OUT"
 if echo "$RESTORE_OUT" | grep -q 'sdev_after=[1-9]'; then
   note_pass "kernel filesystem mark restored"
@@ -156,7 +162,7 @@ else
 fi
 
 echo "==> 7. enforcement resumed after mark restore (gating back)"
-if /stage/bin/guard-test-probe read "$PROFILE/Default/Network/Cookies" >/dev/null 2>&1; then
+if "$BIN_DIR/guard-test-probe" read "$PROFILE/Default/Network/Cookies" >/dev/null 2>&1; then
   note_fail "probe read fixture after mark restore"
 else
   note_pass "probe denied again after mark restore"

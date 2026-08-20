@@ -1,5 +1,5 @@
 #!/bin/bash
-# Capsule P1-b live test: topology group overflow -> topology_uncertain ->
+# P1-b live test: topology group overflow -> topology_uncertain ->
 # persistent REDUCED health + ambiguous outside-path open fails closed.
 # - Marks ONLY a fresh capsule-internal loop-backed ext4 (independent superblock).
 # - NO host sysctl mutation (default topology queue = 16384; rename burst
@@ -11,16 +11,23 @@ note_pass() { echo "PASS: $1"; PASS=$((PASS + 1)); }
 note_fail() { echo "FAIL: $1"; FAIL=$((FAIL + 1)); }
 note_blocked() { echo "BLOCKED: $1"; BLOCKED=$((BLOCKED + 1)); }
 
-P1B_IMG="/testfs/p1b-$$.img"
+BIN_DIR="${BIN_DIR:-/stage/bin}"
+RENAME_BURST="${RENAME_BURST:-$BIN_DIR/rename-burst}"
+P1B_ARTIFACT_ROOT="${P1B_ARTIFACT_ROOT:-${TEST_ARTIFACT_ROOT:-}}"
+if [ -z "$P1B_ARTIFACT_ROOT" ]; then
+  if [ -d /testfs ]; then P1B_ARTIFACT_ROOT=/testfs; else P1B_ARTIFACT_ROOT=/tmp; fi
+fi
+[ -d "$P1B_ARTIFACT_ROOT" ] || { echo "BLOCKED: artifact root missing: $P1B_ARTIFACT_ROOT"; exit 2; }
+P1B_IMG="$P1B_ARTIFACT_ROOT/p1b-$$.img"
 P1B_LOOP=""
 mkdir -p /p1bfs
 truncate -s 512M "$P1B_IMG"
 P1B_LOOP="$(losetup --find --show "$P1B_IMG")"
 mkfs.ext4 -q -F "$P1B_LOOP"
 mount "$P1B_LOOP" /p1bfs || { echo "BLOCKED: loop ext4 mount failed"; exit 2; }
-ROOT_DEV=$(stat -c %d /); TESTFS_DEV=$(stat -c %d /testfs); P1B_DEV=$(stat -c %d /p1bfs)
-echo "root=$ROOT_DEV testfs=$TESTFS_DEV p1bfs=$P1B_DEV"
-if [ "$P1B_DEV" = "$ROOT_DEV" ] || [ "$P1B_DEV" = "$TESTFS_DEV" ]; then
+ROOT_DEV=$(stat -c %d /); ARTIFACT_DEV=$(stat -c %d "$P1B_ARTIFACT_ROOT"); P1B_DEV=$(stat -c %d /p1bfs)
+echo "root=$ROOT_DEV artifact_root=$ARTIFACT_DEV p1bfs=$P1B_DEV"
+if [ "$P1B_DEV" = "$ROOT_DEV" ] || [ "$P1B_DEV" = "$ARTIFACT_DEV" ]; then
   echo "REFUSING: p1bfs shares a super_block"; umount /p1bfs; losetup -d "$P1B_LOOP"; exit 2
 fi
 
@@ -44,7 +51,7 @@ cat > /p1bfs/config.json <<'CONF_END'
 CONF_END
 
 read_health() {
-  /stage/bin/guardctl --socket /p1bfs/guardd.sock --json status 2>/dev/null | python3 -c '
+  "$BIN_DIR/guardctl" --socket /p1bfs/guardd.sock --json status 2>/dev/null | python3 -c '
 import json,sys
 d=json.load(sys.stdin); data=d.get("data") or {}
 lh=data.get("linux_health") or {}
@@ -64,7 +71,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-/stage/bin/guardd --enforce-browser-config /p1bfs/config.json \
+"$BIN_DIR/guardd" --enforce-browser-config /p1bfs/config.json \
   --ipc-socket /p1bfs/guardd.sock --audit-db /p1bfs/audit.db --print-decisions \
   > /tmp/p1b-guardd.log 2>&1 &
 DAEMON_PID=$!
@@ -84,14 +91,14 @@ else
 fi
 
 echo "==> 2. ambiguous outside-path open ALLOWED while topology healthy"
-if /stage/bin/guard-test-probe read /p1bfs/outside.txt >/dev/null 2>&1; then
+if "$BIN_DIR/guard-test-probe" read /p1bfs/outside.txt >/dev/null 2>&1; then
   note_pass "outside-path open allowed pre-overflow (Unrelated)"
 else
   note_fail "outside-path open denied pre-overflow (unexpected)"
 fi
 
 echo "==> 3. pre-create 22000 burst files (opens while daemon runs)"
-/stage/bin/rename-burst create "$PROFILE/Default/Network/burst" 22000 2>&1 | tail -1
+"$RENAME_BURST" create "$PROFILE/Default/Network/burst" 22000 2>&1 | tail -1
 echo "    burst files created"
 
 echo "==> 4. SIGSTOP daemon; rename burst -> topology queue overflow (16384)"
@@ -99,7 +106,7 @@ kill -STOP "$DAEMON_PID"
 # Each file renamed twice = 44000 FAN_MOVE events while the daemon is
 # SIGSTOPped; the topology queue (default max_queued_events=16384) overflows.
 # Renames never open files, so the PERMISSION queue stays empty.
-/stage/bin/rename-burst rename "$PROFILE/Default/Network/burst" 22000 2>&1 | tail -1
+"$RENAME_BURST" rename "$PROFILE/Default/Network/burst" 22000 2>&1 | tail -1
 kill -CONT "$DAEMON_PID"
 echo "    SIGCONT; waiting for daemon to process overflow"
 
@@ -116,7 +123,7 @@ else
 fi
 
 echo "==> 6. ambiguous outside-path open DENIED while topology uncertain"
-if /stage/bin/guard-test-probe read /p1bfs/outside.txt >/dev/null 2>&1; then
+if "$BIN_DIR/guard-test-probe" read /p1bfs/outside.txt >/dev/null 2>&1; then
   note_fail "outside-path open ALLOWED while topology uncertain (fail-open!)"
 else
   note_pass "outside-path open denied (fail-closed) while topology uncertain"

@@ -9,7 +9,7 @@
 set -euo pipefail
 
 if [ "$(id -u)" -ne 0 ]; then
-  echo "ERROR: run only inside sfg-test-capsule as root"
+  echo "ERROR: run as root through the capsule, or through an explicitly authorized polkit host fallback"
   exit 2
 fi
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
