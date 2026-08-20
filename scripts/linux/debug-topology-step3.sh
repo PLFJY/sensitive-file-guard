@@ -2,9 +2,10 @@
 # Debug harness for LFH2 Step 3 topology group (keeps logs).
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-GUARDD="$REPO/target/release/guardd"
-GUARDCTL="$REPO/target/release/guardctl"
-PROBE="$REPO/target/release/guard-test-probe"
+BIN_DIR="${BIN_DIR:-$REPO/target/release}"
+GUARDD="${GUARDD:-$BIN_DIR/guardd}"
+GUARDCTL="${GUARDCTL:-$BIN_DIR/guardctl}"
+PROBE="${PROBE:-$BIN_DIR/guard-test-probe}"
 OUT="/tmp/objid-debug-$$"
 mkdir -p "$OUT"
 
