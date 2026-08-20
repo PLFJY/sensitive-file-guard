@@ -8,9 +8,10 @@ CARGO_BIN="$(command -v cargo)"
 if [ -z "${SKIP_BUILD:-}" ]; then
   (cd "$REPO" && "$CARGO_BIN" build -p guardd -p guardctl -p guard-test-probe)
 fi
-GUARDD="$REPO/target/debug/guardd"
-GUARDCTL="$REPO/target/debug/guardctl"
-PROBE="$REPO/target/debug/guard-test-probe"
+BIN_DIR="${BIN_DIR:-$REPO/target/debug}"
+GUARDD="${GUARDD:-$BIN_DIR/guardd}"
+GUARDCTL="${GUARDCTL:-$BIN_DIR/guardctl}"
+PROBE="${PROBE:-$BIN_DIR/guard-test-probe}"
 # AGENTS.md LIVE-TEST SAFETY: strict-filesystem marks the fixture's
 # filesystem. Pressure/load tests MUST use an ISOLATED loop-backed ext4
 # (a root-fs mark -> total lockup; a tmpfs mark wedges /tmp when the daemon

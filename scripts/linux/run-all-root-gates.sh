@@ -50,7 +50,7 @@ for s in "${SCRIPTS[@]}"; do
   name="$(basename "$s" .sh)"
   echo "=== [$name] $(date +%H:%M:%S) START ===" | tee -a "$OUT/summary.txt"
   set +e
-  SKIP_BUILD=1 SUDO_USER="${SUDO_USER:-}" bash "$REPO/$s" > "$OUT/$name.log" 2>&1
+  SKIP_BUILD=1 SUDO_USER="${SUDO_USER:-}" BIN_DIR="${BIN_DIR:-}" bash "$REPO/$s" > "$OUT/$name.log" 2>&1
   rc=$?
   set -e
   case "$rc" in

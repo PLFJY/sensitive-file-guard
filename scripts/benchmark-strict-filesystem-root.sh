@@ -8,9 +8,10 @@ CARGO_BIN="$(command -v cargo)"
 if [ -z "${SKIP_BUILD:-}" ]; then
   (cd "$REPO" && "$CARGO_BIN" build -p guardd -p guardctl -p guard-test-probe)
 fi
-GUARDD="$REPO/target/debug/guardd"
-GUARDCTL="$REPO/target/debug/guardctl"
-PROBE="$REPO/target/debug/guard-test-probe"
+BIN_DIR="${BIN_DIR:-$REPO/target/debug}"
+GUARDD="${GUARDD:-$BIN_DIR/guardd}"
+GUARDCTL="${GUARDCTL:-$BIN_DIR/guardctl}"
+PROBE="${PROBE:-$BIN_DIR/guard-test-probe}"
 
 # LIVE-TEST SAFETY (AGENTS.md): strict-filesystem mode performs
 # FAN_MARK_FILESYSTEM on the profile's filesystem. The fixtures MUST live on

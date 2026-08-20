@@ -24,8 +24,9 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-GUARDCTL="/usr/local/bin/guardctl"
-PROBE="$REPO/target/release/guard-test-probe"
+BIN_DIR="${BIN_DIR:-$REPO/target/release}"
+GUARDCTL="${GUARDCTL:-/usr/local/bin/guardctl}"
+PROBE="${PROBE:-$BIN_DIR/guard-test-probe}"
 SOCK="/run/guardd/guardd.sock"
 
 PASS=0
@@ -48,8 +49,8 @@ fi
 echo "==> Checking unprivileged pre-built release binaries"
 # Deployment must never populate root's Cargo home. Build before invoking this
 # root-only integration script: `cargo build --release` as the desktop user.
-test -x "$REPO/target/release/guardd" || { echo "guardd build failed"; exit 1; }
-test -x "$REPO/target/release/guardctl" || { echo "guardctl build failed"; exit 1; }
+test -x "${GUARDD:-$BIN_DIR/guardd}" || { echo "guardd build failed"; exit 1; }
+test -x "${GUARDCTL:-$BIN_DIR/guardctl}" || { echo "guardctl build failed"; exit 1; }
 test -x "$REPO/target/release/guard-notify" || { echo "guard-notify build failed"; exit 1; }
 test -x "$PROBE" || { echo "guard-test-probe build failed"; exit 1; }
 

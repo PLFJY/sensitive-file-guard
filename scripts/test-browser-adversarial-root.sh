@@ -19,9 +19,10 @@ case "$ENFORCEMENT_MODE" in
   conservative|strict-filesystem) ;;
   *) echo "ERROR: ENFORCEMENT_MODE must be conservative or strict-filesystem"; exit 2 ;;
 esac
-GUARDD="$REPO/target/release/guardd"
-GUARDCTL="$REPO/target/release/guardctl"
-PROBE="$REPO/target/release/guard-test-probe"
+BIN_DIR="${BIN_DIR:-$REPO/target/release}"
+GUARDD="${GUARDD:-$BIN_DIR/guardd}"
+GUARDCTL="${GUARDCTL:-$BIN_DIR/guardctl}"
+PROBE="${PROBE:-$BIN_DIR/guard-test-probe}"
 GUARD_NOTIFY="$REPO/target/release/guard-notify"
 
 PASS=0

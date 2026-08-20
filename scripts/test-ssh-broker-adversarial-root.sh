@@ -14,9 +14,10 @@ case "$ENFORCEMENT_MODE" in
   conservative|strict-filesystem) ;;
   *) echo "ERROR: ENFORCEMENT_MODE must be conservative or strict-filesystem"; exit 2 ;;
 esac
-GUARDD="$REPO/target/release/guardd"
-GUARDCTL="$REPO/target/release/guardctl"
-PROBE="$REPO/target/release/guard-test-probe"
+BIN_DIR="${BIN_DIR:-$REPO/target/release}"
+GUARDD="${GUARDD:-$BIN_DIR/guardd}"
+GUARDCTL="${GUARDCTL:-$BIN_DIR/guardctl}"
+PROBE="${PROBE:-$BIN_DIR/guard-test-probe}"
 SCENARIOS="$REPO/scripts/helpers/ssh-broker-scenarios.py"
 WORK="$(mktemp -d -t guard-ssh-broker-adversarial-XXXXXX)"
 GUARDD_PID=""

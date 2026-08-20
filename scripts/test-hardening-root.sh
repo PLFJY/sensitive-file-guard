@@ -28,8 +28,9 @@ trap cleanup EXIT
 if [ -z "${SKIP_BUILD:-}" ]; then
 cargo build --manifest-path "$REPO/Cargo.toml" -p guardd -p guard-test-probe
 fi
-GUARDD="$REPO/target/debug/guardd"
-PROBE="$REPO/target/debug/guard-test-probe"
+BIN_DIR="${BIN_DIR:-$REPO/target/debug}"
+GUARDD="${GUARDD:-$BIN_DIR/guardd}"
+PROBE="${PROBE:-$BIN_DIR/guard-test-probe}"
 # Enrolled browser identity: fixture writes use this binary (matches the
 # config exe_paths) so the browser can create new profile content after
 # startup.

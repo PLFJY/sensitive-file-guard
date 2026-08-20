@@ -76,8 +76,9 @@ echo "==> Building topology race probe and daemon"
 if [ -z "${SKIP_BUILD:-}" ]; then
 cargo build --manifest-path "$REPO/Cargo.toml" -p guardd -p guard-test-probe
 fi
-GUARDD="$REPO/target/debug/guardd"
-PROBE="$REPO/target/debug/guard-test-probe"
+BIN_DIR="${BIN_DIR:-$REPO/target/debug}"
+GUARDD="${GUARDD:-$BIN_DIR/guardd}"
+PROBE="${PROBE:-$BIN_DIR/guard-test-probe}"
 
 PROFILE_ROOT="$WORK/disposable-chromium"
 COOKIE="$PROFILE_ROOT/Default/Network/Cookies"
