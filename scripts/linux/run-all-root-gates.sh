@@ -51,7 +51,22 @@ cleanup_stale_test_loops() {
     if findmnt -rn -S "$loop" >/dev/null 2>&1; then
       continue
     fi
-    losetup -d "$loop" 2>/dev/null || true
+    # A just-exited fanotify daemon can keep the synthetic loop transiently
+    # busy while its final fd closes. nspawn exposes only loop0..2, so retry a
+    # known, unmounted test loop before the next gate instead of letting
+    # losetup select an invisible loop3 and misreport an environment failure.
+    detached=0
+    for _ in $(seq 1 20); do
+      if losetup -d "$loop" 2>/dev/null; then
+        detached=1
+        break
+      fi
+      sleep 0.05
+    done
+    if [ "$detached" -ne 1 ]; then
+      echo "ERROR: could not detach stale synthetic loop $loop: $backing" >&2
+      return 1
+    fi
   done
 }
 

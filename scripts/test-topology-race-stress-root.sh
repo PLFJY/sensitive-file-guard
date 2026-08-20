@@ -9,14 +9,17 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ITERATIONS="${ITERATIONS:-10000}"
+# This gate measures the replacement/read race, not handle-index exhaustion.
+# Stay below the bounded dynamic-handle capacity; P1-b separately proves the
+# capacity-exhaustion fail-closed contract.
+ITERATIONS="${ITERATIONS:-1000}"
 ENFORCEMENT_MODE="${ENFORCEMENT_MODE:-conservative}"
 KEEP_WORK="${KEEP_WORK:-0}"
 # AGENTS.md LIVE-TEST SAFETY: strict-filesystem marks the fixture's
 # filesystem. Pressure/load tests MUST use an ISOLATED loop-backed ext4
 # (a root-fs mark -> total lockup; a tmpfs mark wedges /tmp when the daemon
 # stalls under load). TEST_FS_ROOT may override with a non-root non-tmpfs fs.
-LOOP_IMG=""; LOOP_DEV=""; LOOP_MNT=""; WORK=""
+LOOP_IMG=""; LOOP_DEV=""; LOOP_MNT=""; WORK=""; RESULT=""
 select_test_fs() {
   if [ -n "${TEST_FS_ROOT:-}" ]; then
     if [ "$(stat -c %d "$TEST_FS_ROOT")" = "$(stat -c %d /)" ]; then
@@ -61,6 +64,7 @@ cleanup() {
     rm -rf -- "$WORK"
   fi
   fi
+  [ -z "$RESULT" ] || rm -f -- "$RESULT"
 }
 trap cleanup EXIT
 
@@ -126,7 +130,10 @@ if ! grep -q 'enforcement ACTIVE' "$WORK/guardd.log"; then
 fi
 
 echo "==> Running $ITERATIONS atomic-replacement/read iterations"
-RESULT="$WORK/result.json"
+# The strict filesystem mark covers WORK's loop filesystem. Keep the harness
+# result on the unmarked host/capsule root so an intentional P1-b-style
+# fail-closed transition can never prevent the test from reporting diagnostics.
+RESULT="$(mktemp /tmp/sfg-topology-race-result-XXXXXX.json)"
 if ! "$PROBE" topology-race "$COOKIE" "$STAGING" "$ITERATIONS" > "$RESULT"; then
   echo "FAIL: topology stress probe encountered non-policy errors"
   sed -n '1,20p' "$RESULT"
