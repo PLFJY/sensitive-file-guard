@@ -5,11 +5,12 @@
 `LINUX_PLATFORM_FREEZE` is the active goal. The first sub-goal,
 `RE-CLOSE LINUX_FILE_SHIELD_FREEZE`, is **restored at commit
 `77dcd75edc3a10b95e4aa3051cd48fe29654e407`**. Process Shield LPS0 through
-LPS3 and LPS4 are implemented: LPS3 binds only an LPS2-proven disposable
+LPS3 through LPS5 are implemented: LPS3 binds only an LPS2-proven disposable
 Firefox Main instance to the ptrace-only BPF map while its File Shield
 WebStorage open is still withheld; LPS4's Firefox LFH6 workload has zero
-unexplained Process Shield denials. The Process Shield remains REDUCED, and
-Linux Platform Freeze is therefore not complete.
+unexplained Process Shield denials; and LPS5's physical-host product-object
+matrix proves the four accepted process-control paths. The Process Shield
+remains REDUCED, and Linux Platform Freeze is therefore not complete.
 
 ## Current File Shield verdict
 
@@ -68,11 +69,12 @@ filesystems, or untested browser variants.
   but a permission event read before a daemon crash cannot be recovered through
   public UAPI. Do not describe this as accepted crash continuity.
 - Process Shield is optional. With `process_shield_enabled: true`, LPS3
-  attaches a ptrace-only BPF LSM policy and admits an exact Firefox Main only
-  from a pre-response File Shield WebStorage event. The host synthetic oracle
-  proves product-object ptrace causality; `process_vm_*` and `/proc/PID/mem`
+  attaches a `ptrace_access_check` BPF LSM policy and admits an exact Firefox
+  Main only from a pre-response File Shield WebStorage event. The host
+  synthetic oracle proves product-object causality for ptrace,
+  `process_vm_readv`, `process_vm_writev`, and `/proc/PID/mem`; other paths
   remain NOT ACCEPTED. Its unsupported or disabled state never weakens File
-  Shield. See `reports/linux/lps3-policy.md`.
+  Shield. See `reports/linux/lps5-adversarial.md`.
 - Capsule fanotify results remain container-scoped evidence. The prior capsule
   formal run could not be used as final full evidence because nspawn exposes
   only loop0--2; later synthetic loop allocation selected an invisible loop3.
@@ -95,7 +97,7 @@ user and staged separately. SHA-256:
 
 ## Next action
 
-Continue `LINUX_PROCESS_SHIELD_FREEZE` at LPS5: execute the per-primitive
-adversarial matrix. LPS0 already probed actual host and capsule BPF LSM
-capabilities and recorded supported, disabled, reduced, or blocked status
-without degrading File Shield.
+Continue `LINUX_PROCESS_SHIELD_FREEZE` at LPS6: close lifecycle, status,
+audit, performance, and fresh quality evidence. LPS0 already probed actual
+host and capsule BPF LSM capabilities and recorded supported, disabled,
+reduced, or blocked status without degrading File Shield.

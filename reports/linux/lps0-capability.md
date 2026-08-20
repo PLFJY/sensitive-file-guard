@@ -7,7 +7,8 @@ a persistent BPF policy or claim Process Shield enforcement.
 
 - Host BPF LSM capability: **ACTIVE**.
 - Capsule BPF LSM live capability: **REDUCED / NOT HOST-EQUIVALENT**.
-- Current Linux Process Shield product state: **DISABLED (not implemented)**.
+- Current Linux Process Shield product state: optional and implemented through
+  the `ptrace_access_check` BPF LSM boundary; see the later LPS3/LPS5 reports.
   This does not change File Shield, whose independent freeze remains restored.
 
 ## Host evidence
@@ -53,6 +54,6 @@ BPF capabilities.
 
 ## Scope for LPS1
 
-LPS1 must bind targets by exact process instance (PID plus start time/pidfd),
-establish a same-UID synthetic canary baseline, and test only primitives whose
-actual LSM path is verified. No Process Shield denial is implemented by LPS0.
+LPS1 through LPS5 now bind exact target instances, establish same-UID synthetic
+canary baselines, and test only primitives whose actual LSM path is verified.
+No Process Shield denial was implemented by LPS0 itself.

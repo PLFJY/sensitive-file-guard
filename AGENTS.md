@@ -31,7 +31,8 @@ successfully opened. This is an access firewall, not an antivirus/EDR/DLP.
 ## PRIVILEGED LIVE-TEST ENVIRONMENT — systemd-nspawn CAPSULE (use this for root)
 
 A dedicated unattended privileged `systemd-nspawn` test capsule runs on the
-host. It is the ONLY authorized way to run privileged/live Linux tests now.
+host. It is the default privileged/live Linux test environment. The narrowly
+scoped, explicitly user-authorized polkit fallback below is the only exception.
 
 - **Default to the capsule for every privileged live test.** A physical-host
   privileged test is permitted only when the user explicitly authorizes it

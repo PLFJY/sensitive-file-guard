@@ -1,9 +1,11 @@
-// LPS1 same-non-root-UID synthetic process-control oracle. The short-lived
+// LPS1/LPS5 same-non-root-UID synthetic process-control oracle. The short-lived
 // root supervisor loads the BPF LSM program; the attacker is the target's
 // same-UID parent, which makes the Guard-OFF ptrace baseline legal under Yama.
+#define _GNU_SOURCE
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <grp.h>
 #include <pwd.h>
 #include <signal.h>
@@ -13,13 +15,17 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ptrace.h>
+#include <sys/uio.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 struct target_instance { uint64_t start_jiffies; uint32_t hz; };
 struct audit_event { uint32_t requester_pid, target_pid; uint64_t start_jiffies; uint32_t kind; };
 struct audit_state { uint32_t requester_pid, target_pid; uint64_t start_jiffies; uint32_t kind; bool seen; };
+
+static void stop_and_reap(pid_t pid);
 
 static int on_audit(void *ctx, void *data, size_t size) {
     if (size != sizeof(struct audit_event)) return 0;
@@ -71,6 +77,86 @@ static int ptrace_read(pid_t target, uintptr_t address, const uint8_t expected[6
     return memcmp(recovered, expected, sizeof(recovered)) == 0 ? 1 : 0;
 }
 
+static int process_vm_read_canary(pid_t target, uintptr_t address, const uint8_t expected[64]) {
+    uint8_t recovered[64];
+    struct iovec local = { .iov_base = recovered, .iov_len = sizeof(recovered) };
+    struct iovec remote = { .iov_base = (void *)address, .iov_len = sizeof(recovered) };
+    ssize_t bytes = process_vm_readv(target, &local, 1, &remote, 1, 0);
+    return bytes == (ssize_t)sizeof(recovered) ? memcmp(recovered, expected, sizeof(recovered)) == 0 : -1;
+}
+
+static int process_vm_write_synthetic(pid_t target, uintptr_t address) {
+    uint8_t replacement = 0xa5;
+    struct iovec local = { .iov_base = &replacement, .iov_len = sizeof(replacement) };
+    struct iovec remote = { .iov_base = (void *)address, .iov_len = sizeof(replacement) };
+    return process_vm_writev(target, &local, 1, &remote, 1, 0) == (ssize_t)sizeof(replacement) ? 1 : -1;
+}
+
+static int proc_mem_read_canary(pid_t target, uintptr_t address, const uint8_t expected[64]) {
+    char path[64]; uint8_t recovered[64];
+    snprintf(path, sizeof(path), "/proc/%d/mem", target);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    ssize_t bytes = pread(fd, recovered, sizeof(recovered), (off_t)address);
+    close(fd);
+    return bytes == (ssize_t)sizeof(recovered) ? memcmp(recovered, expected, sizeof(recovered)) == 0 : -1;
+}
+
+static int ptrace_attach_only(pid_t target) {
+    if (ptrace(PTRACE_SEIZE, target, NULL, NULL) < 0) return -1;
+    if (ptrace(PTRACE_INTERRUPT, target, NULL, NULL) < 0 || waitpid(target, NULL, 0) < 0) return -1;
+    return ptrace(PTRACE_DETACH, target, NULL, NULL) == 0 ? 1 : -1;
+}
+
+static int perform_operation(const char *operation, pid_t target, uintptr_t address, const uint8_t expected[64]) {
+    if (!strcmp(operation, "ptrace")) return ptrace_read(target, address, expected);
+    if (!strcmp(operation, "process_vm_readv")) return process_vm_read_canary(target, address, expected);
+    if (!strcmp(operation, "process_vm_writev")) return process_vm_write_synthetic(target, address);
+    if (!strcmp(operation, "proc_mem")) return proc_mem_read_canary(target, address, expected);
+    return -2;
+}
+
+static int unrelated_ptrace_remains_allowed(void) {
+    pid_t unrelated = fork();
+    if (unrelated < 0) return -1;
+    if (unrelated == 0) { execl("/bin/sleep", "sleep", "20", NULL); _exit(127); }
+    // The attacker is this process's same-UID parent, so Yama permits the
+    // baseline. The BPF map deliberately contains a different target TGID.
+    usleep(100000);
+    int outcome = ptrace_attach_only(unrelated);
+    stop_and_reap(unrelated);
+    return outcome;
+}
+
+static int unrelated_ptrace_benchmark(void) {
+    pid_t unrelated = fork();
+    if (unrelated < 0) return -1;
+    if (unrelated == 0) { execl("/bin/sleep", "sleep", "20", NULL); _exit(127); }
+    usleep(100000);
+    struct timespec start, end;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    int outcome = 1;
+    for (int attempt = 0; attempt < 100; attempt++) {
+        if (ptrace_attach_only(unrelated) != 1) { outcome = -1; break; }
+    }
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    stop_and_reap(unrelated);
+    unsigned long long elapsed_ns = (unsigned long long)(end.tv_sec - start.tv_sec) * 1000000000ULL +
+        (unsigned long long)(end.tv_nsec - start.tv_nsec);
+    dprintf(STDOUT_FILENO, "LPS6_UNRELATED_PTRACE_BENCH_100_NS=%llu\n", elapsed_ns);
+    return outcome;
+}
+
+static const char *operation_label(const char *operation) {
+    if (!strcmp(operation, "ptrace")) return "PTRACE";
+    if (!strcmp(operation, "process_vm_readv")) return "PROCESS_VM_READV";
+    if (!strcmp(operation, "process_vm_writev")) return "PROCESS_VM_WRITEV";
+    if (!strcmp(operation, "proc_mem")) return "PROC_MEM";
+    if (!strcmp(operation, "unrelated_ptrace")) return "UNRELATED_PTRACE";
+    if (!strcmp(operation, "unrelated_ptrace_benchmark")) return "UNRELATED_PTRACE_BENCHMARK";
+    return NULL;
+}
+
 static int parse_id(const char *name, const char *text, unsigned long *out) {
     char *end = NULL; errno = 0;
     unsigned long value = strtoul(text, &end, 10);
@@ -106,6 +192,11 @@ int main(int argc, char **argv) {
     }
     if (geteuid() != 0) { fprintf(stderr, "LPS1 requires root only to load its temporary BPF LSM program\n"); return 2; }
     bool enabled = !strcmp(argv[1], "on");
+    bool force_stale_target = getenv("LPS_FORCE_STALE_TARGET") != NULL;
+    const char *operation = getenv("LPS_OPERATION");
+    if (!operation || !operation[0]) operation = "ptrace";
+    const char *label = operation_label(operation);
+    if (!label) { fprintf(stderr, "unsupported LPS_OPERATION: %s\n", operation); return 2; }
     uid_t uid; gid_t gid;
     if (test_identity(&uid, &gid)) return 2;
 
@@ -128,7 +219,10 @@ int main(int argc, char **argv) {
         close(release_pipe[0]);
         pid_t ready_target = 0; uint8_t canary[64]; uintptr_t address = 0;
         for (int retry = 0; retry < 100 && read_ready(argv[3], &ready_target, canary, &address); retry++) usleep(10000);
-        int outcome = ready_target == target && address ? ptrace_read(target, address, canary) : -2;
+        int outcome = ready_target == target && address ?
+            (!strcmp(operation, "unrelated_ptrace") ? unrelated_ptrace_remains_allowed() :
+             !strcmp(operation, "unrelated_ptrace_benchmark") ? unrelated_ptrace_benchmark() :
+             perform_operation(operation, target, address, canary)) : -2;
         stop_and_reap(target);
         _exit(outcome == 1 ? 0 : outcome < 0 ? 3 : 4);
     }
@@ -151,6 +245,7 @@ int main(int argc, char **argv) {
         if (libbpf_get_error(object) || bpf_object__load(object)) { fprintf(stderr, "BPF load failed\n"); goto done; }
         struct bpf_map *map = bpf_object__find_map_by_name(object, "targets");
         struct target_instance value = { proc_start_jiffies(target), (uint32_t)sysconf(_SC_CLK_TCK) };
+        if (force_stale_target) value.start_jiffies++;
         uint32_t key = target;
         if (!map || !value.start_jiffies || bpf_map_update_elem(bpf_map__fd(map), &key, &value, BPF_ANY)) {
             fprintf(stderr, "target map update failed: %s (fd=%d type=%d start=%llu hz=%u)\n",
@@ -172,11 +267,31 @@ int main(int argc, char **argv) {
     int status = 0;
     if (waitpid(attacker, &status, 0) < 0) { perror("wait attacker"); goto done; }
     if (ring) ring_buffer__poll(ring, 250);
-    if (!enabled && WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-        puts("LPS1_OFF_SAME_UID_PTRACE_CANARY_RECOVERED=PASS"); result = 0;
+    if (enabled && force_stale_target && WIFEXITED(status) && WEXITSTATUS(status) == 0 && !audit.seen) {
+        puts("LPS6_STALE_INSTANCE_ENTRY_DOES_NOT_BIND_NEW_TARGET=PASS"); result = 0;
+    } else if (enabled && !strcmp(operation, "unrelated_ptrace_benchmark") && WIFEXITED(status) && WEXITSTATUS(status) == 0 && !audit.seen) {
+        puts("LPS6_UNRELATED_PTRACE_BENCHMARK_ON=PASS"); result = 0;
+    } else if (!enabled && WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        if (!strcmp(operation, "ptrace"))
+            puts("LPS1_OFF_SAME_UID_PTRACE_CANARY_RECOVERED=PASS");
+        else if (!strcmp(operation, "unrelated_ptrace"))
+            puts("LPS5_UNRELATED_NORMAL_PROCESS_OFF_UNCHANGED=PASS");
+        else if (!strcmp(operation, "unrelated_ptrace_benchmark"))
+            puts("LPS6_UNRELATED_PTRACE_BENCHMARK_OFF=PASS");
+        else if (!strcmp(operation, "process_vm_writev"))
+            puts("LPS5_PROCESS_VM_WRITEV_OFF_SYNTHETIC_WRITE_SUCCEEDED=PASS");
+        else
+            printf("LPS5_%s_OFF_CANARY_RECOVERED=PASS\n", label);
+        result = 0;
+    } else if (enabled && !strcmp(operation, "unrelated_ptrace") && WIFEXITED(status) && WEXITSTATUS(status) == 0 && !audit.seen) {
+        puts("LPS5_UNRELATED_NORMAL_PROCESS_ON_UNCHANGED=PASS"); result = 0;
     } else if (enabled && WIFEXITED(status) && WEXITSTATUS(status) == 3 && audit.seen &&
-               audit.requester_pid == (uint32_t)attacker && audit.target_pid == (uint32_t)target) {
-        puts("LPS1_ON_SAME_UID_PTRACE_DENIED_AUDITED_CANARY_RECOVERY=0 PASS"); result = 0;
+               audit.requester_pid == (uint32_t)attacker && audit.target_pid == (uint32_t)target && audit.kind != 0) {
+        if (!strcmp(operation, "ptrace"))
+            puts("LPS1_ON_SAME_UID_PTRACE_DENIED_AUDITED_CANARY_RECOVERY=0 PASS");
+        else
+            printf("LPS5_%s_ON_DENIED_AUDITED_CANARY_RECOVERY=0 PASS\n", label);
+        result = 0;
     } else {
         fprintf(stderr, "LPS1 oracle mismatch enabled=%d attacker_status=%d audit=%d requester=%u target=%u\n",
                 enabled, status, audit.seen, audit.requester_pid, audit.target_pid);

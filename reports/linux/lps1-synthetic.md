@@ -1,16 +1,17 @@
 # LPS1 — Synthetic Same-UID BPF LSM Process-Control Oracle
 
-Date: 2026-08-20. This is a narrow synthetic causality test, not a browser
-compatibility or full Process Shield acceptance claim.
+Date: 2026-08-20. This is the original narrow synthetic causality test, not a
+browser compatibility or full Process Shield acceptance claim by itself.
 
 ## Verdict
 
 - `ptrace` on one exact synthetic process instance: **PREVENTED** on the
   physical host.
-- `process_vm_readv`, `process_vm_writev`, and `/proc/PID/mem`: **NOT
-  ACCEPTED**. LPS1 does not claim that their paths traverse this LSM hook.
-- Current product Process Shield: **DISABLED / not integrated**. The BPF
-  program below is a test-only, short-lived LPS1 oracle and pins no map or
+- `process_vm_readv`, `process_vm_writev`, and `/proc/PID/mem`: LPS1 did not
+  accept them. Their later product-object results are recorded separately in
+  `lps5-adversarial.md`.
+- Current product Process Shield is optional and implemented. This historical
+  LPS1 test program remains a short-lived test-only oracle; it pins no map or
   link after exit.
 - Capsule process-control live result: **REDUCED / NOT HOST-EQUIVALENT**. Its
   LPS0 BPF program-load probe fails with `EPERM`, so it cannot establish this
@@ -60,12 +61,11 @@ LPS1_SAME_NONROOT_UID_PTRACE_ORACLE=PASS
 
 The direct normal-user invocation correctly exits `2` (BLOCKED), proving the
 test does not silently claim BPF privilege. The physical-host result proves
-only the current host kernel's `ptrace_access_check` path; namespaces,
-container policy, and the other process-memory primitives remain outside this
-acceptance.
+the original current-host `ptrace_access_check` path. Namespace/container
+policy remains outside this acceptance; see `lps5-adversarial.md` for later
+per-primitive scope.
 
 ## Next phase
 
-LPS2 must derive Browser SecretAuthority from real File Shield ALLOW events on
-disposable Firefox data. No browser identity or allow exception is implied by
-this synthetic test.
+LPS2 through LPS5 are now completed. This test still does not itself infer a
+browser identity or allow exception.

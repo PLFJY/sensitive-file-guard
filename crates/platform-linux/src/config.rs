@@ -338,4 +338,14 @@ mod tests {
         .unwrap();
         assert_eq!(config.config_version, CONFIG_VERSION);
     }
+
+    #[test]
+    fn process_shield_defaults_off_without_changing_file_shield_policy() {
+        let config: EnforcementConfig = serde_json::from_str(
+            r#"{"enforcement_mode":"conservative","browsers":[],"enrolled_exes":["/synthetic/exe"],"ssh_keys":[]}"#,
+        )
+        .unwrap();
+        assert!(!config.process_shield_enabled);
+        assert_eq!(config.policy().enrolled_exes, config.enrolled_exes);
+    }
 }

@@ -4,11 +4,13 @@ Date: 2026-08-20.
 
 ## Verdict
 
-**IMPLEMENTED, REDUCED (ptrace-only).** The product attaches its BPF LSM link
+**IMPLEMENTED, REDUCED (`ptrace_access_check` boundary).** The product attaches its BPF LSM link
 only when `process_shield_enabled: true`; File Shield-only configurations leave
-this optional layer disabled. The current product policy prevents `ptrace` for
-an admitted exact Firefox Main instance. It does not claim prevention for
-`process_vm_readv`, `process_vm_writev`, or `/proc/PID/mem`.
+this optional layer disabled. The current product policy prevents operations
+which reach that hook for an admitted exact Firefox Main instance. LPS5
+separately provides current-host evidence for ptrace, `process_vm_readv`,
+`process_vm_writev`, and `/proc/PID/mem`; it does not generalize that
+acceptance beyond those paths.
 
 ## Admission boundary
 
@@ -37,8 +39,8 @@ browser-family allow exception exists.
 
 The first-secret-open boundary removes the polling admission window. A process
 already traced before its first protected open remains a residual limitation on
-kernels whose ordinary ptrace policy permits that relation; LPS5 must retain
-this as not accepted unless an earlier safe lifecycle admission is evidenced.
+kernels whose ordinary ptrace policy permits that relation; it is not accepted
+without earlier safe lifecycle admission evidence.
 
 ## Fresh physical-host evidence
 
@@ -78,9 +80,9 @@ The latest Firefox metadata-only matrix is at:
 - Chromium, Chrome, and Zen remain **NOT ACCEPTED / NOT INSTALLED**.
 - The nspawn capsule still returns `EPERM` for BPF program loading, so these
   results are physical-host evidence only, not capsule/namespace equivalence.
-- Process Shield remains `REDUCED` in status because only ptrace has a claimed
-  LSM hook. File Shield status remains independent.
-- LPS4 must run a disposable Firefox workload with this layer enabled and
-  establish zero unexplained Process Shield denials. LPS5 must separately test
-  every claimed process-control primitive; unhooked primitives stay NOT
-  ACCEPTED.
+- Process Shield remains `REDUCED` in status: the accepted current-host scope
+  is the `ptrace_access_check` boundary only. File Shield status remains
+  independent. See `lps5-adversarial.md` for the four per-primitive results.
+- LPS4 established zero unexplained Process Shield denials on the disposable
+  Firefox workload. LPS5 separately tests every currently claimed primitive;
+  unhooked primitives remain NOT ACCEPTED.

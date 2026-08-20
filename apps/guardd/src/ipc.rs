@@ -283,8 +283,9 @@ fn handle_status(state: &IpcState, creds: PeerCreds) -> Response {
             // Process Shield is optional and never changes File Shield's
             // independently derived posture.
             process_shield: if state.process_shield_active.load(Ordering::Acquire) {
-                // LPS3 consumes ptrace ring events, but does not cover the
-                // other process-memory primitives, so it is never complete.
+                // The optional current-host acceptance is limited to the
+                // ptrace_access_check boundary; it must never be advertised
+                // as complete platform-wide process mediation.
                 "REDUCED".to_owned()
             } else {
                 "DISABLED".to_owned()

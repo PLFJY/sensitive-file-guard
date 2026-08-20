@@ -27,8 +27,8 @@ goals/LINUX_PLATFORM_FREEZE.md
   - 再完整完成 `LINUX_PROCESS_SHIELD_FREEZE`；
   - 最后做跨层 acceptance。
   - File Shield 已在 `77dcd75edc3a10b95e4aa3051cd48fe29654e407` 重新 freeze；
-    当前第一个未完成 sub-goal 是 `LINUX_PROCESS_SHIELD_FREEZE` 的 LPS5
-    adversarial process-control matrix。LPS4 Firefox disposable compatibility
-    已通过；整体 Process Shield 仍是 REDUCED。
+    当前第一个未完成 sub-goal 是 `LINUX_PROCESS_SHIELD_FREEZE` 的 LPS6
+    lifecycle / truthful capability / full quality closure。LPS5 adversarial
+    matrix 已在实体机通过；整体 Process Shield 仍是 REDUCED。
 
 如果用户修改了这里的 Goal，按新的 Goal 执行；不要继续旧 Goal。
