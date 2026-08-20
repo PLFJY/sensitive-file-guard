@@ -1,7 +1,7 @@
 # Maintainer: PLFJY <https://github.com/PLFJY>
 
 pkgname=sensitive-file-guard-git
-pkgver=0.1.0.r94.ga56b0e8
+pkgver=0.1.0.r175.g84df427
 pkgrel=1
 pkgdesc='Pre-open local access firewall for browser authentication data and SSH private keys'
 arch=('x86_64')
@@ -19,6 +19,10 @@ conflicts=('sensitive-file-guard')
 source=('git+https://github.com/PLFJY/sensitive-file-guard.git')
 sha256sums=('SKIP')
 
+# `makepkg` normally writes the result of this function back to `pkgver=`.
+# That is useful for an AUR checkout but noisy when this repository is used as
+# the local build source. Use `./packaging/aur/build.sh` (or `makepkg
+# --holdver`) when the source checkout must remain clean.
 pkgver() {
   cd "$srcdir/sensitive-file-guard"
   printf '%s.r%s.g%s' \
@@ -32,7 +36,10 @@ build() {
   # libsqlite3-sys compiles bundled SQLite as a static C archive. Arch's GCC
   # LTO archive cannot be linked by Rust's lld final linker, so package-wide
   # LTO is disabled above while normal makepkg hardening flags remain enabled.
-  GUARDD_BUILD_ID="$pkgver" cargo build --frozen --release --workspace --exclude guard-test-probe
+  # Keep the runtime build identity truthful even when the local wrapper uses
+  # --holdver and intentionally leaves the package filename version unchanged.
+  GUARDD_BUILD_ID="$(git rev-parse --verify HEAD)" \
+    cargo build --frozen --release --workspace --exclude guard-test-probe
 }
 
 check() {
