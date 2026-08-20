@@ -1671,9 +1671,15 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
                         config_state.mode.set_active_id(Some(mode.as_str()));
                     }
                     if platform_service::shows_linux_mode() {
-                        config_state.detail.set_text(
-                            "No saved Linux policy exists yet. Select a browser or SSH key, then apply it before enabling protection.",
-                        );
+                        if platform_service::active_configuration_present() {
+                            config_state.detail.set_text(
+                                "guardd is unavailable. The saved Linux policy was loaded for review; choose the desktop-safe mode if needed, then Apply before enabling protection.",
+                            );
+                        } else {
+                            config_state.detail.set_text(
+                                "No saved Linux policy exists yet. Select a browser or SSH key, then apply it before enabling protection.",
+                            );
+                        }
                     } else {
                         config_state.detail.set_text(
                             "No saved macOS policy exists yet. Select protected resources and apply the policy.",

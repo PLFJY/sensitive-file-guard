@@ -452,6 +452,10 @@ pub const fn apply_button_label() -> &'static str {
 
 pub fn initial_configuration_if_missing(backend_reachable: bool) -> Option<EditableConfiguration> {
     #[cfg(target_os = "linux")]
+    if active_configuration_present() {
+        return stored_configuration();
+    }
+    #[cfg(target_os = "linux")]
     if !active_configuration_present() {
         return Some(linux_initial_configuration());
     }
@@ -470,6 +474,15 @@ pub fn initial_configuration_if_missing(backend_reachable: bool) -> Option<Edita
     } else {
         None
     }
+}
+
+#[cfg(target_os = "linux")]
+fn stored_configuration() -> Option<EditableConfiguration> {
+    // Linux config contains enrollment metadata (paths and identities), not
+    // browser database rows or private-key bytes. Reading it lets the GUI
+    // repair an old configuration while guardd is temporarily unavailable.
+    let bytes = std::fs::read("/etc/guardd/config.json").ok()?;
+    serde_json::from_slice(&bytes).ok()
 }
 
 #[cfg(target_os = "linux")]
