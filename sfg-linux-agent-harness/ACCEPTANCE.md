@@ -54,7 +54,8 @@ Guard causality NOT VERIFIED
   授权且 capsule 差异阻止最终结论，可对单一已审查 host gate 使用 polkit，且不得
   请求、接收、缓存或管道传递密码；
 - `/stage` 只读，破坏性 fixture/evidence 只在 `/testfs`；
-- 不得使用 interactive sudo、`sudo -S`、`pkexec` 或密码缓存；
+- 不得使用 interactive sudo、`sudo -S`、密码缓存；`pkexec` 仅限用户明确授权的
+  单一已审查 host gate，且不得请求、接收或传递密码；
 - root test exit code 非 0 时必须输出 stage + evidence dir。
 
 每个 script 统一：

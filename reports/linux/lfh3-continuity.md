@@ -3,7 +3,7 @@
 ## Baseline
 - commit: 84a1bd133c78c41911d82dac5ffd1989a7722f5b
 - kernel: 7.1.8-arch1-3 (x86_64)
-- privileged environment: sfg-test-capsule (systemd-nspawn) — seccomp blocks fanotify (EPERM, verified). Fanotify live tests BLOCKED in this environment; host pkexec prohibited while capsule is available.
+- historical privileged environment note: this phase predates the capsule fanotify allow-list update. Current fanotify evidence is in `harness-state.md`; an explicitly user-authorized minimal polkit host fallback is permitted when capsule differences prevent a final conclusion.
 
 ## Threat / invariant
 Separate "now healthy" from "no verifiable gap since start". A fanotify queue overflow or required-mark loss breaks continuity; the daemon must not erase the historical loss when enforcement later recovers, and must revoke ALL live authority (leases, pending confirmations, grace) at the moment of loss.

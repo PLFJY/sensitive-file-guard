@@ -92,8 +92,8 @@ sudo -n /usr/local/sbin/sfg-test-capsule stop
 - `/stage` 是只读；破坏性/live workspace 只能在 `/testfs`。测试脚本应接受
   `BIN_DIR` 和 evidence/output override，不能假设 source repo 可写。
 - capsule 只证明其 kernel/namespace/seccomp 条件下的结果。若 nspawn 限制了
-  机制，记录精确命令和错误，结论为 `REDUCED`/`NOT ACCEPTED`/`BLOCKED`，不能
-  改走 host root。
+  机制，记录精确命令和错误，结论为 `REDUCED`/`NOT ACCEPTED`/`BLOCKED`；只有用户
+  明确授权时，才可为已审查的最小 host gate 使用 polkit，并分开记录 host 证据。
 
 ---
 

@@ -4,7 +4,7 @@
 - commit: 84a1bd133c78c41911d82dac5ffd1989a7722f5b
 - kernel: 7.1.8-arch1-3 (x86_64)
 - relevant capabilities: FAN_REPORT_PIDFD supported by this kernel (LFH0 capability probe: group creation with the flag accepted on host root); `name_to_handle_at` supported
-- privileged environment: sfg-test-capsule (systemd-nspawn). Its default seccomp whitelist **excludes fanotify_init/fanotify_mark** (verified by direct syscall probes: 300/301 → EPERM with CAP_SYS_ADMIN; confirmed in systemd v261 `nspawn-seccomp.c` "knowingly excluded" comment). Fanotify live tests therefore cannot run inside the capsule.
+- historical privileged environment note: this phase originally observed nspawn seccomp excluding `fanotify_init`/`fanotify_mark`. It is superseded: the current capsule allows fanotify and pidfd_getfd; if its namespace/seccomp still prevents a final conclusion, an explicitly user-authorized minimal polkit host gate is permitted and must be reported separately.
 
 ## Threat / invariant
 Process authority must move from `PID + /proc pathname reopen` to:

@@ -4,7 +4,7 @@
 - commit: 84a1bd133c78c41911d82dac5ffd1989a7722f5b
 - kernel: 7.1.8-arch1-3 (x86_64); / ext4
 - relevant capabilities: `name_to_handle_at` supported (LFH0 probe); MAX_HANDLE_SZ=128
-- privileged environment: sfg-test-capsule (systemd-nspawn) — seccomp blocks fanotify; fanotify live tests BLOCKED in this environment (see LFH1 report). /tmp is tmpfs → object-handle unit fixtures live under the workspace target dir (ext4).
+- historical privileged environment note: this phase predates the capsule fanotify allow-list update. Current capsule behavior and any explicitly user-authorized minimal polkit host fallback are recorded in the harness state; historical BLOCKED wording here is not a current instruction.
 
 ## Threat / invariant
 Close BOTH:
@@ -57,7 +57,7 @@ LFH0 strict suite recorded `OBSERVED: an inode moved through a sensitive name wi
 
 ### Privileged / live
 - `scripts/linux/test-object-identity-root.sh` written (rename-out denied; unrelated file at reused name opens; delete/recreate no false positive; no log leak).
-- **NOT RUN in this environment — BLOCKED**: nspawn seccomp blocks fanotify (EPERM, verified); host pkexec prohibited while capsule is available. Deterministic script provided for a real host.
+- **HISTORICAL / SUPERSEDED**: this early capsule run was blocked by nspawn seccomp. Current capsule and explicitly user-authorized minimal polkit host evidence are recorded separately in `harness-state.md`.
 
 ## Adversarial findings
 1. Zero-length `file_handle` UB (out-of-bounds payload read) caught by the rename-away unit test failing on real handles — fixed with sized buffers.

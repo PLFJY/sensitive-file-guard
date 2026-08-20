@@ -3,7 +3,7 @@
 ## Baseline
 - commit: 84a1bd133c78c41911d82dac5ffd1989a7722f5b
 - kernel: 7.1.8-arch1-3 (x86_64)
-- privileged environment: sfg-test-capsule (systemd-nspawn) — seccomp blocks `fanotify_init`/`fanotify_mark` (EPERM with CAP_SYS_ADMIN present; verified by syscall probes 300/301 and nspawn-seccomp.c whitelist). Fanotify live tests CANNOT run inside the capsule; host pkexec is prohibited while the capsule is available.
+- historical privileged environment note: this phase predates the capsule fanotify allow-list update. Current systemd/fdstore evidence is in `harness-state.md`; an explicitly user-authorized minimal polkit host fallback is permitted when capsule differences prevent a final conclusion.
 
 ## Threat / invariant
 fanotify permission events: queued unread → read by listener → moves to internal permission-wait list → response written OR group fd fully closed. Question: can systemd fdstore hold a duplicate of the fanotify group fd so a daemon crash does not fail open (the group stays alive and the kernel keeps the opener blocked)? Split into Experiment A (crash before event read) and Experiment B (crash after read, before response).

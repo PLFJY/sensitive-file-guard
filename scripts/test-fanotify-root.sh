@@ -26,7 +26,7 @@ note_fail() { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "ERROR: this script must be run as root (needs CAP_SYS_ADMIN for fanotify)."
-  echo "       run this script through sfg-test-capsule; never host sudo"
+  echo "       run through sfg-test-capsule; physical-host execution requires explicit polkit authorization"
   exit 2
 fi
 

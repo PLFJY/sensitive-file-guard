@@ -3,7 +3,7 @@
 ## Baseline
 - commit: 84a1bd133c78c41911d82dac5ffd1989a7722f5b (HEAD at phase start; LFH5 work is on top of this tree)
 - kernel: 7.1.8-arch1-3 (x86_64)
-- privileged environment: sfg-test-capsule (systemd-nspawn) — seccomp blocks `fanotify_init`/`fanotify_mark` (EPERM with CAP_SYS_ADMIN present). All fanotify live gates BLOCKED in this environment; host pkexec is prohibited while the capsule is available. Deterministic root scripts are provided for a real host.
+- historical privileged environment note: this phase predates the capsule fanotify allow-list update. Current fanotify evidence is in `harness-state.md`; an explicitly user-authorized minimal polkit host fallback is permitted when capsule differences prevent a final conclusion.
 
 ## Threat / invariant
 "tree membership = SecretAuthority" is too broad a lease: binding a lease to a browser root and authorizing *any descendant* lets an unenrolled helper (or a process that merely shares an ancestor) read protected cookies. LFH5 replaces this with **EXACT READER INSTANCE**: a lease authorizes exactly one process instance (PID + starttime + executed image identity + UID + BrowserId), a helper may read only if it is the exact descendant observed at bind time (post-bind observed exact descendant), pre-existing unobserved descendants never auto-upgrade, every lease is bound to the protection-continuity generation it was minted under, and Linux migration never claims read-only.
