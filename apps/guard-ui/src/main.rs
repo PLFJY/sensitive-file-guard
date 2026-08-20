@@ -940,6 +940,12 @@ fn configuration_snapshot_changed(
     serde_json::to_value(updated).ok() != serde_json::to_value(current).ok()
 }
 
+fn configuration_has_enrollment(configuration: &platform_service::EditableConfiguration) -> bool {
+    !configuration.browsers.is_empty()
+        || !configuration.ssh_keys.is_empty()
+        || !configuration.enrolled_exes.is_empty()
+}
+
 fn hydrate_configuration_from_daemon(state: &UiState, info: guard_ipc::ConfigurationInfo) -> bool {
     // A directly readable config is authoritative for this UI session. When it
     // is root-readable only, replace the first-run placeholder with guardd's
@@ -1653,9 +1659,15 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
                 let initialized = initial.is_some();
                 if let Some(initial) = initial {
                     *config_state.candidate.borrow_mut() = Some(initial);
-                    config_state.detail.set_text(
-                        "No saved macOS policy exists yet. Select protected resources and apply the policy.",
-                    );
+                    if platform_service::shows_linux_mode() {
+                        config_state.detail.set_text(
+                            "No saved Linux policy exists yet. Select a browser or SSH key, then apply it before enabling protection.",
+                        );
+                    } else {
+                        config_state.detail.set_text(
+                            "No saved macOS policy exists yet. Select protected resources and apply the policy.",
+                        );
+                    }
                 }
                 initialized
             } else {
@@ -1727,14 +1739,18 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
                     row.set_active(requested_active);
                     protection_syncing.set(false);
                 }
-                row.set_sensitive(
-                    platform_service::shows_linux_mode()
-                        || config_state.candidate.borrow().as_ref().is_some_and(|candidate| {
-                            !candidate.browsers.is_empty()
-                                || !candidate.ssh_keys.is_empty()
-                                || !candidate.enrolled_exes.is_empty()
-                        }),
-                );
+                let candidate_has_enrollment = config_state
+                    .candidate
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(configuration_has_enrollment);
+                let linux_can_start = platform_service::active_configuration_present()
+                    || candidate_has_enrollment;
+                row.set_sensitive(if platform_service::shows_linux_mode() {
+                    linux_can_start
+                } else {
+                    candidate_has_enrollment
+                });
             }
             // MCH0: independent Process Shield toggle. Synchronized with the
             // applied policy while suppressing its callback; it stays available
@@ -2918,6 +2934,23 @@ mod tests {
             ssh_key_subtitle(false, true),
             "Configured — not active in the current guardd process"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_protection_requires_a_reviewed_resource_before_first_start() {
+        let empty = platform_service::EditableConfiguration {
+            enforcement_mode: Some(platform_service::LinuxEnforcementMode::StrictFilesystem),
+            policy_enabled: false,
+            browsers: Vec::new(),
+            enrolled_exes: Vec::new(),
+            ssh_keys: Vec::new(),
+        };
+        assert!(!configuration_has_enrollment(&empty));
+
+        let mut enrolled = empty;
+        enrolled.enrolled_exes.push("/usr/bin/firefox".into());
+        assert!(configuration_has_enrollment(&enrolled));
     }
 
     #[test]

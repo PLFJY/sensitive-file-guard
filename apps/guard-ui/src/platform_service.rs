@@ -451,6 +451,10 @@ pub const fn apply_button_label() -> &'static str {
 }
 
 pub fn initial_configuration_if_missing(backend_reachable: bool) -> Option<EditableConfiguration> {
+    #[cfg(target_os = "linux")]
+    if !active_configuration_present() {
+        return Some(linux_initial_configuration());
+    }
     if cfg!(target_os = "macos") && backend_reachable {
         Some(EditableConfiguration {
             enforcement_mode: None,
@@ -465,6 +469,17 @@ pub fn initial_configuration_if_missing(backend_reachable: bool) -> Option<Edita
         })
     } else {
         None
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_initial_configuration() -> EditableConfiguration {
+    EditableConfiguration {
+        enforcement_mode: Some(LinuxEnforcementMode::StrictFilesystem),
+        policy_enabled: false,
+        browsers: Vec::new(),
+        enrolled_exes: Vec::new(),
+        ssh_keys: Vec::new(),
     }
 }
 
@@ -632,13 +647,29 @@ pub fn set_protection_enabled(
 ) -> anyhow::Result<EditableConfiguration> {
     #[cfg(target_os = "linux")]
     {
-        let candidate = candidate.ok_or_else(|| anyhow::anyhow!("active policy is unavailable"))?;
+        let candidate = candidate.unwrap_or_else(linux_initial_configuration);
         let verb = if enabled {
             ServiceOperation::Start
         } else {
             ServiceOperation::Stop
         };
         if enabled {
+            // A first-run GUI draft is deliberately empty until the user
+            // selects a browser/key. Once a resource is selected, the
+            // protection switch can finish the same authenticated setup flow
+            // as the Apply button: write and health-check the config first,
+            // then enable/start both service layers.
+            if !active_configuration_present() {
+                anyhow::ensure!(
+                    configuration_has_enrollment(&candidate),
+                    "select at least one browser or SSH key and apply it before enabling protection"
+                );
+                let bytes = serde_json::to_vec(&candidate)?;
+                apply_config(&bytes)?;
+            }
+            // `apply-config` restarts the daemon for health validation, but
+            // does not persist the user's service-on choice. Enable/start it
+            // here so the GUI switch also survives the next boot.
             apply(verb)?;
             if let Err(error) = apply_notifications(verb) {
                 let _ = apply(ServiceOperation::Stop);
@@ -1318,6 +1349,7 @@ pub fn status() -> anyhow::Result<ServiceStatus> {
 
 #[cfg(target_os = "linux")]
 pub fn apply(operation: ServiceOperation) -> anyhow::Result<()> {
+    ensure_unit_available("guardd.service", false)?;
     let status = std::process::Command::new("pkexec")
         .args(["guardctl", "privileged", "service", verb(operation)])
         .status()?;
@@ -1327,6 +1359,7 @@ pub fn apply(operation: ServiceOperation) -> anyhow::Result<()> {
 
 #[cfg(target_os = "linux")]
 pub fn apply_notifications(operation: ServiceOperation) -> anyhow::Result<()> {
+    ensure_unit_available("guard-notify.service", true)?;
     let status = std::process::Command::new("guardctl")
         .args(["notification-service", verb(operation)])
         .status()?;
@@ -1335,10 +1368,42 @@ pub fn apply_notifications(operation: ServiceOperation) -> anyhow::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
+fn ensure_unit_available(unit: &str, user: bool) -> anyhow::Result<()> {
+    let mut command = std::process::Command::new("systemctl");
+    if user {
+        command.arg("--user");
+    }
+    let output = command.args(["cat", "--no-pager", unit]).output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "{unit} is not installed; install the Linux release or AUR package first"
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+pub fn active_configuration_present() -> bool {
+    std::path::Path::new("/etc/guardd/config.json").is_file()
+}
+
+#[cfg(not(target_os = "linux"))]
+pub const fn active_configuration_present() -> bool {
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn configuration_has_enrollment(configuration: &EditableConfiguration) -> bool {
+    !configuration.browsers.is_empty()
+        || !configuration.ssh_keys.is_empty()
+        || !configuration.enrolled_exes.is_empty()
+}
+
+#[cfg(target_os = "linux")]
 pub fn apply_config(bytes: &[u8]) -> anyhow::Result<()> {
     use std::io::Write;
     use std::process::Stdio;
 
+    ensure_unit_available("guardd.service", false)?;
     let mut child = std::process::Command::new("pkexec")
         .args(["guardctl", "privileged", "apply-config"])
         .stdin(Stdio::piped())

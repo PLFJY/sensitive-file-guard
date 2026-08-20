@@ -44,6 +44,13 @@ guardctl status
 
 `guardctl setup` 会根据当前用户已验证的浏览器可执行文件和 profile 元数据生成严格配置，并且不会猜测或自动加入 SSH 私钥。空配置不代表防护已启用；必须存在经过审阅的非空 `/etc/guardd/config.json`。
 
+也可以直接打开 `guard-ui` 完成首次配置：Linux 首次运行会展示发现的浏览器和 SSH
+候选项；勾选并确认资源后点击 Apply。然后点击 Overview 页的“Protection +
+notifications”开关，GUI 会通过 polkit 写入并健康检查配置，并执行
+`systemctl enable --now guardd.service` 与 `systemctl --user enable --now
+guard-notify.service`。GUI 不会自行安装发行版 package；若 unit 不存在，会提示先
+安装 release/AUR 包。
+
 如果当前 enrollment 是已经接受的原生 Firefox，并且内核确实具备已验证的 BPF LSM
 能力，可以在首次生成配置时显式请求可选的 Process Shield：
 

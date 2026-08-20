@@ -653,13 +653,14 @@ fn run_privileged(action: &PrivilegedAction) -> anyhow::Result<()> {
     }
     match action {
         PrivilegedAction::Service { action } => {
-            let verb = match action {
-                ServiceAction::Start => "start",
-                ServiceAction::Stop => "stop",
-                ServiceAction::Restart => "restart",
+            let args: &[&str] = match action {
+                ServiceAction::Start => &["enable", "--now", "guardd.service"],
+                ServiceAction::Stop => &["disable", "--now", "guardd.service"],
+                ServiceAction::Restart => &["restart", "guardd.service"],
             };
+            let verb = args[0];
             let status = std::process::Command::new("systemctl")
-                .args([verb, "guardd.service"])
+                .args(args)
                 .status()?;
             anyhow::ensure!(status.success(), "systemctl {verb} guardd.service failed");
             Ok(())
