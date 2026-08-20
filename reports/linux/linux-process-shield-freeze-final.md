@@ -1,8 +1,9 @@
 # Linux Process Shield — Implementation Freeze
 
-Verdict: **IMPLEMENTATION FREEZE (REDUCED, optional current-host scope).**
+Verdict: **REOPENED — product-object scope is proven, but daemon-integrated
+attack causality is not yet accepted.**
 
-The frozen implementation is commit
+The reviewed implementation is commit
 `8bb2213b026dba367138aa4bd28f35517a3ae7a0`. Its fresh physical-host formal
 manifest is:
 
@@ -55,6 +56,6 @@ persist ordinary ALLOW events. The manifest records SHA-256 for both sets.
   Shield. Requesting it on an unsupported environment fails daemon startup
   rather than silently claiming it is enabled.
 
-The next required work is cross-layer `LINUX_PLATFORM_FREEZE`; it must refresh
-File Shield evidence at the current code, exercise Process Shield ON/OFF and
-unsupported/disabled independence, then publish a separate platform verdict.
+Required next work: a daemon-integrated same-UID adversarial oracle against a
+live File-Shield-admitted disposable SecretAuthority. Only after that causal
+proof can LPS5/LPS6 and cross-layer `LINUX_PLATFORM_FREEZE` close.
