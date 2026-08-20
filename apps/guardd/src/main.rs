@@ -18,6 +18,9 @@ mod ipc;
 #[cfg(target_os = "linux")]
 mod pending;
 #[cfg(target_os = "linux")]
+#[allow(dead_code)] // LPS3 loader is staged until exact-instance admission is wired.
+mod process_shield;
+#[cfg(target_os = "linux")]
 mod strict;
 #[cfg(target_os = "linux")]
 mod topology_learner;

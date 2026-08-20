@@ -48,5 +48,8 @@ fn main() {
         .arg(&object)
         .status()
         .expect("clang is required to build guardd's Linux Process Shield BPF object");
-    assert!(status.success(), "guardd Process Shield BPF compilation failed");
+    assert!(
+        status.success(),
+        "guardd Process Shield BPF compilation failed"
+    );
 }
