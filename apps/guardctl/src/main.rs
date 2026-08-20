@@ -1181,7 +1181,7 @@ fn run_setup(
 
     println!("Review the browser instance(s) below before enrollment.");
     println!(
-        "The following strict-filesystem configuration will be written to {}:\n",
+        "The following conservative configuration will be written to {}:\n",
         config_path.display()
     );
     println!("{rendered}");
@@ -1288,7 +1288,12 @@ fn setup_config(discovery: &BrowserDiscovery, process_shield: bool) -> anyhow::R
         .collect::<anyhow::Result<Vec<_>>>()?;
     Ok(SetupConfig {
         config_version: platform_linux::config::CONFIG_VERSION,
-        enforcement_mode: "strict-filesystem",
+        // A user's home directory normally shares the root filesystem. The
+        // strict backend deliberately refuses that layout because its
+        // FAN_MARK_FILESYSTEM boundary would gate every host open. Keep the
+        // ordinary setup path usable; strict remains an explicit choice for a
+        // dedicated non-root filesystem.
+        enforcement_mode: "conservative",
         browsers,
         enrolled_exes: Vec::new(),
         ssh_keys: Vec::new(),
@@ -2669,7 +2674,7 @@ mod tests {
     }
 
     #[test]
-    fn setup_generates_nonempty_strict_config_without_uid_or_ssh_guesses() {
+    fn setup_generates_nonempty_conservative_config_without_uid_or_ssh_guesses() {
         let discovery = BrowserDiscovery {
             browsers: vec![BrowserSuggestion {
                 id: "firefox-esr".to_owned(),
@@ -2682,7 +2687,7 @@ mod tests {
 
         let config = setup_config(&discovery, false).unwrap();
         let value = serde_json::to_value(config).unwrap();
-        assert_eq!(value["enforcement_mode"], "strict-filesystem");
+        assert_eq!(value["enforcement_mode"], "conservative");
         assert_eq!(
             value["config_version"],
             serde_json::json!(platform_linux::config::CONFIG_VERSION)

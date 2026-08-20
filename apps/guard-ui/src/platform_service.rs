@@ -475,7 +475,10 @@ pub fn initial_configuration_if_missing(backend_reachable: bool) -> Option<Edita
 #[cfg(target_os = "linux")]
 fn linux_initial_configuration() -> EditableConfiguration {
     EditableConfiguration {
-        enforcement_mode: Some(LinuxEnforcementMode::StrictFilesystem),
+        // A normal desktop puts $HOME on the root filesystem. Conservative
+        // mode uses scoped file/tree marks and is the safe product default;
+        // strict-filesystem remains an explicit choice for a dedicated FS.
+        enforcement_mode: Some(LinuxEnforcementMode::Conservative),
         policy_enabled: false,
         browsers: Vec::new(),
         enrolled_exes: Vec::new(),
@@ -654,6 +657,7 @@ pub fn set_protection_enabled(
             ServiceOperation::Stop
         };
         if enabled {
+            ensure_linux_configuration_startable(&candidate)?;
             // A first-run GUI draft is deliberately empty until the user
             // selects a browser/key. Once a resource is selected, the
             // protection switch can finish the same authenticated setup flow
@@ -670,7 +674,12 @@ pub fn set_protection_enabled(
             // `apply-config` restarts the daemon for health validation, but
             // does not persist the user's service-on choice. Enable/start it
             // here so the GUI switch also survives the next boot.
-            apply(verb)?;
+            if let Err(error) = apply(verb) {
+                // Do not leave a user notification process retrying a daemon
+                // socket that does not exist when the main service failed.
+                let _ = apply_notifications(ServiceOperation::Stop);
+                return Err(error);
+            }
             if let Err(error) = apply_notifications(verb) {
                 let _ = apply(ServiceOperation::Stop);
                 return Err(error);
@@ -1399,10 +1408,41 @@ fn configuration_has_enrollment(configuration: &EditableConfiguration) -> bool {
 }
 
 #[cfg(target_os = "linux")]
+fn ensure_linux_configuration_startable(
+    configuration: &EditableConfiguration,
+) -> anyhow::Result<()> {
+    if configuration.enforcement_mode != Some(LinuxEnforcementMode::StrictFilesystem) {
+        return Ok(());
+    }
+
+    use std::os::unix::fs::MetadataExt;
+
+    let root_device = std::fs::metadata("/")?.dev();
+    let browser_on_root = configuration.browsers.iter().any(|browser| {
+        std::fs::canonicalize(&browser.profile_root)
+            .and_then(std::fs::metadata)
+            .is_ok_and(|metadata| metadata.dev() == root_device)
+    });
+    let ssh_on_root = configuration.ssh_keys.iter().any(|key| {
+        std::fs::canonicalize(key)
+            .and_then(std::fs::metadata)
+            .is_ok_and(|metadata| metadata.dev() == root_device)
+    });
+    anyhow::ensure!(
+        !browser_on_root && !ssh_on_root,
+        "strict-filesystem requires the protected browser profile and SSH key filesystem to be separate from /; move the resource to a dedicated filesystem or select Conservative mode"
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 pub fn apply_config(bytes: &[u8]) -> anyhow::Result<()> {
     use std::io::Write;
     use std::process::Stdio;
 
+    let candidate: EditableConfiguration = serde_json::from_slice(bytes)
+        .map_err(|error| anyhow::anyhow!("invalid Linux GUI configuration: {error}"))?;
+    ensure_linux_configuration_startable(&candidate)?;
     ensure_unit_available("guardd.service", false)?;
     let mut child = std::process::Command::new("pkexec")
         .args(["guardctl", "privileged", "apply-config"])

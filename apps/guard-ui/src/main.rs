@@ -227,9 +227,12 @@ fn build_ui(app: &adw::Application, pending_only: bool, layout_smoke_page: Optio
     apply.set_sensitive(false);
     let mode = gtk::ComboBoxText::new();
     if platform_service::shows_linux_mode() {
-        mode.append(Some("strict-filesystem"), "Strict Filesystem (recommended)");
-        mode.append(Some("conservative"), "Conservative (compatibility)");
-        mode.set_active_id(Some("strict-filesystem"));
+        mode.append(
+            Some("strict-filesystem"),
+            "Strict Filesystem (dedicated filesystem)",
+        );
+        mode.append(Some("conservative"), "Conservative (normal desktop)");
+        mode.set_active_id(Some("conservative"));
     }
     let browsers = gtk::ListBox::new();
     browsers.set_selection_mode(gtk::SelectionMode::None);
@@ -1659,6 +1662,14 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
                 let initialized = initial.is_some();
                 if let Some(initial) = initial {
                     *config_state.candidate.borrow_mut() = Some(initial);
+                    if let Some(mode) = config_state
+                        .candidate
+                        .borrow()
+                        .as_ref()
+                        .and_then(|candidate| candidate.enforcement_mode)
+                    {
+                        config_state.mode.set_active_id(Some(mode.as_str()));
+                    }
                     if platform_service::shows_linux_mode() {
                         config_state.detail.set_text(
                             "No saved Linux policy exists yet. Select a browser or SSH key, then apply it before enabling protection.",

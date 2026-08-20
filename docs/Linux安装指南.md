@@ -42,7 +42,7 @@ systemctl --user enable --now guard-notify
 guardctl status
 ```
 
-`guardctl setup` 会根据当前用户已验证的浏览器可执行文件和 profile 元数据生成严格配置，并且不会猜测或自动加入 SSH 私钥。空配置不代表防护已启用；必须存在经过审阅的非空 `/etc/guardd/config.json`。
+`guardctl setup` 会根据当前用户已验证的浏览器可执行文件和 profile 元数据生成适合普通桌面 `/home` 的 conservative 配置，并且不会猜测或自动加入 SSH 私钥。空配置不代表防护已启用；必须存在经过审阅的非空 `/etc/guardd/config.json`。需要 strict-filesystem 强保证时，应在独立的非根文件系统上显式选择该模式。
 
 也可以直接打开 `guard-ui` 完成首次配置：Linux 首次运行会展示发现的浏览器和 SSH
 候选项；勾选并确认资源后点击 Apply。然后点击 Overview 页的“Protection +
