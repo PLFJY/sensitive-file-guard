@@ -113,13 +113,7 @@ SUMMARY="$EVIDENCE_ROOT/summary-${FORMAL_MODE}.txt"
 : > "$SUMMARY"
 printf 'formal_mode=%s\nbin_dir=%s\n' "$FORMAL_MODE" "$BIN_DIR" >> "$SUMMARY"
 printf 'git_commit=%s\nkernel=%s\nartifacts:\n' "$SFG_GIT_COMMIT" "$(uname -a)" >> "$SUMMARY"
-for artifact in guardd guardctl guard-test-probe guard-notify guard-fdstore; do
-  if [ -x "$BIN_DIR/$artifact" ]; then
-    sha256sum "$BIN_DIR/$artifact" >> "$SUMMARY"
-  else
-    printf 'MISSING %s\n' "$artifact" >> "$SUMMARY"
-  fi
-done
+find "$BIN_DIR" -maxdepth 1 -type f -executable -print0 | sort -z | xargs -r -0 sha256sum >> "$SUMMARY"
 printf 'manifest:\n' >> "$SUMMARY"
 printf '  %s\n' "${FORMAL_MANIFEST[@]}" >> "$SUMMARY"
 
