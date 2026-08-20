@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Formal Linux File Shield privileged manifest. Execute only through
-# `sudo -n /usr/local/sbin/sfg-test-capsule`; never invoke with pkexec or host
-# sudo. /stage may be read-only, so evidence defaults to /testfs.
+# Formal Linux File Shield privileged manifest. The normal execution path is
+# `sudo -n /usr/local/sbin/sfg-test-capsule`; /stage may be read-only, so
+# evidence defaults to /testfs. An explicitly user-authorized physical-host
+# fallback is a separate, narrowly reviewed command and must record its
+# namespace/capability difference instead of being represented by this runner.
 #
 # FORMAL_MODE=oneshot runs capsule-safe gates; FORMAL_MODE=systemd runs only
 # PID-1 gates after `sfg-test-capsule boot`. The capsule host wrapper combines
@@ -13,6 +15,7 @@ BIN_DIR="${BIN_DIR:-$REPO/bin}"
 if [ ! -d "$BIN_DIR" ] && [ -d /stage/bin ]; then BIN_DIR=/stage/bin; fi
 EVIDENCE_ROOT="${EVIDENCE_ROOT:-/testfs/sfg-formal-evidence/$(date +%Y%m%d-%H%M%S)}"
 FORMAL_MODE="${FORMAL_MODE:-oneshot}"
+SFG_GIT_COMMIT="${SFG_GIT_COMMIT:-unknown}"
 mkdir -p "$EVIDENCE_ROOT"
 
 # The volatile nspawn root can omit a passwd entry for uid 0. OpenSSH's
@@ -108,7 +111,16 @@ MANDATORY_PASS=0; MANDATORY_FAIL=0; MANDATORY_BLOCKED=0; MANDATORY_SELECTED=0
 OBSERVATION_PASS=0; OBSERVATION_PARTIAL=0; OBSERVATION_FAIL=0; OBSERVATION_BLOCKED=0
 SUMMARY="$EVIDENCE_ROOT/summary-${FORMAL_MODE}.txt"
 : > "$SUMMARY"
-printf 'formal_mode=%s\nbin_dir=%s\nmanifest:\n' "$FORMAL_MODE" "$BIN_DIR" >> "$SUMMARY"
+printf 'formal_mode=%s\nbin_dir=%s\n' "$FORMAL_MODE" "$BIN_DIR" >> "$SUMMARY"
+printf 'git_commit=%s\nkernel=%s\nartifacts:\n' "$SFG_GIT_COMMIT" "$(uname -a)" >> "$SUMMARY"
+for artifact in guardd guardctl guard-test-probe guard-notify guard-fdstore; do
+  if [ -x "$BIN_DIR/$artifact" ]; then
+    sha256sum "$BIN_DIR/$artifact" >> "$SUMMARY"
+  else
+    printf 'MISSING %s\n' "$artifact" >> "$SUMMARY"
+  fi
+done
+printf 'manifest:\n' >> "$SUMMARY"
 printf '  %s\n' "${FORMAL_MANIFEST[@]}" >> "$SUMMARY"
 
 requirement_for() {

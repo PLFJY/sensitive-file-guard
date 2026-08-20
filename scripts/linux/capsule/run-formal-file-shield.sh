@@ -8,11 +8,14 @@ set -euo pipefail
 CAPSULE=/usr/local/sbin/sfg-test-capsule
 STAMP="$(date +%Y%m%d-%H%M%S)"
 EVIDENCE_ROOT="${EVIDENCE_ROOT:-/testfs/sfg-formal-evidence/$STAMP}"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+SFG_GIT_COMMIT="$(git -C "$REPO" rev-parse HEAD)"
 
 run_mode() {
   local mode="$1"
   sudo -n "$CAPSULE" "$2" env \
     FORMAL_MODE="$mode" EVIDENCE_ROOT="$EVIDENCE_ROOT" BIN_DIR=/stage/bin \
+    SFG_GIT_COMMIT="$SFG_GIT_COMMIT" \
     /stage/scripts/linux/run-all-root-gates.sh
 }
 
