@@ -8,7 +8,7 @@
 # Build as an unprivileged user first with `cargo build --release`, then run
 # this script with sudo.  It installs already-built artifacts and deliberately
 # does not enable or start the daemon: `guardctl setup` creates a reviewed,
-# non-empty strict configuration for the intended desktop user first.
+# non-empty protection configuration for the intended desktop user first.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -107,7 +107,7 @@ install -Dm0644 "$ICON_SRC" /usr/share/icons/hicolor/scalable/apps/io.github.plf
 echo "    Installed: $GUARDD_DST, $GUARDCTL_DST, $GUARD_NOTIFY_DST, $GUARD_UI_DST"
 
 # 3. Install a non-active example. Never create /etc/guardd/config.json here:
-# an empty strict config would look configured while protecting no resources.
+# an empty protection config would look configured while protecting no resources.
 install -Dm0644 "$CONFIG_EXAMPLE" "$CONFIG_EXAMPLE_DST"
 if [ -e "$CONFIG_DST" ]; then
   echo "    Preserved: $CONFIG_DST (already exists)"
@@ -134,7 +134,7 @@ echo "    Installed: $UNIT_DST, $POLKIT_DST"
 
 echo
 echo "==> Install complete. Next steps:"
-echo "    1. Create reviewed strict config: sudo guardctl setup --home /home/USER"
+echo "    1. Create reviewed protection config: sudo guardctl setup --home /home/USER"
 echo "    2. Optionally choose an existing key: guardctl ssh suggest"
 echo "    3. Start: sudo systemctl enable --now guardd"
 echo "    4. Verify: guardctl status"

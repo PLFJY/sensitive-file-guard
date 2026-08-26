@@ -72,29 +72,8 @@ fn render_loader_cache(template: &str, app: &std::path::Path) -> String {
     template.replace("@GUARD_APP@", &escaped)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum LinuxEnforcementMode {
-    #[serde(alias = "conservative")]
-    Scoped,
-    StrictMount,
-    StrictFilesystem,
-}
-
-impl LinuxEnforcementMode {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Scoped => "scoped",
-            Self::StrictMount => "strict-mount",
-            Self::StrictFilesystem => "strict-filesystem",
-        }
-    }
-}
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EditableConfiguration {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enforcement_mode: Option<LinuxEnforcementMode>,
     #[serde(default)]
     pub policy_enabled: bool,
     pub browsers: Vec<guard_platform::config::BrowserEnrollmentConfig>,
@@ -105,7 +84,7 @@ pub struct EditableConfiguration {
     pub mac_allowlist: platform_macos::config::MacAllowlistConfig,
 }
 
-pub const fn shows_linux_mode() -> bool {
+pub const fn is_linux_backend() -> bool {
     cfg!(target_os = "linux")
 }
 
@@ -254,20 +233,13 @@ pub fn overview_detail(
             )
         },
         |status| {
-            let mode = status.mode.as_deref().unwrap_or("platform-default");
-            let marks = match (status.marked_filesystems, status.required_filesystems) {
-                (Some(marked), Some(required)) => format!(" · marks: {marked}/{required}"),
-                _ => String::new(),
-            };
             format!(
-                "Backend: {} · mode: {} · browsers: {} · SSH keys: {} · allowed: {} · denied: {}{} · service: {} · notifications: {}",
+                "Backend: {} · browsers: {} · SSH keys: {} · allowed: {} · denied: {} · service: {} · notifications: {}",
                 status.backend_kind,
-                mode,
                 status.browsers,
                 status.ssh_protected_keys,
                 status.allowed,
                 status.denied,
-                marks,
                 service_state,
                 notification_state
             )
@@ -419,7 +391,6 @@ pub const fn apply_button_label() -> &'static str {
 pub fn initial_configuration_if_missing(backend_reachable: bool) -> Option<EditableConfiguration> {
     if cfg!(target_os = "macos") && backend_reachable {
         Some(EditableConfiguration {
-            enforcement_mode: None,
             policy_enabled: false,
             browsers: Vec::new(),
             enrolled_exes: Vec::new(),
@@ -673,16 +644,6 @@ pub fn set_user_agent_enabled(_enabled: bool) -> anyhow::Result<()> {
 }
 
 pub fn editable_from_metadata(info: guard_ipc::ConfigurationInfo) -> Option<EditableConfiguration> {
-    #[cfg(target_os = "linux")]
-    let enforcement_mode = Some(match info.enforcement_mode.as_deref()? {
-        "scoped" | "conservative" => LinuxEnforcementMode::Scoped,
-        "strict-mount" => LinuxEnforcementMode::StrictMount,
-        "strict-filesystem" => LinuxEnforcementMode::StrictFilesystem,
-        _ => return None,
-    });
-    #[cfg(not(target_os = "linux"))]
-    let enforcement_mode = None;
-
     let mut browsers = Vec::with_capacity(info.browsers.len());
     for browser in info.browsers {
         let family = match browser.family.as_str() {
@@ -739,7 +700,6 @@ pub fn editable_from_metadata(info: guard_ipc::ConfigurationInfo) -> Option<Edit
     };
 
     Some(EditableConfiguration {
-        enforcement_mode,
         policy_enabled: info.policy_enabled.unwrap_or(cfg!(target_os = "linux")),
         browsers,
         enrolled_exes: info.enrolled_exes.into_iter().map(Into::into).collect(),

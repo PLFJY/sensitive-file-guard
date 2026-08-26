@@ -380,27 +380,16 @@ pub struct StatusInfo {
     ///   (e.g. config-check mode, or the group failed to initialize).
     #[serde(default)]
     pub status: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mode: Option<String>,
+    /// Total permission events delivered by the backend's authorization group.
+    #[cfg(target_os = "linux")]
     #[serde(default)]
-    pub marked_filesystems: Option<usize>,
-    #[serde(default)]
-    pub required_filesystems: Option<usize>,
-    pub filesystem_marks_healthy: Option<bool>,
-    #[serde(default)]
-    pub strict_events_total: Option<u64>,
-    #[serde(default)]
-    pub strict_fast_allowed: Option<u64>,
+    pub permission_events_total: Option<u64>,
     #[serde(default)]
     pub protected_events: u64,
     #[serde(default)]
     pub fanotify_overflows: Option<u64>,
     #[serde(default)]
     pub classifier_failures: Option<u64>,
-    #[serde(default)]
-    pub strict_alias_scans: Option<u64>,
-    #[serde(default)]
-    pub strict_alias_matches: Option<u64>,
     #[serde(default)]
     pub topology_degraded: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -416,6 +405,34 @@ pub struct StatusInfo {
     pub unclassified: u64,
     pub audit_dropped: u64,
     pub peer_uid: u32,
+
+    // These fields are retained only for the macOS IPC build, whose existing
+    // backend emits them as absent optional values. Linux has no such
+    // concepts; they are not part of the Linux wire struct.
+    #[cfg(target_os = "macos")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[cfg(target_os = "macos")]
+    #[serde(default)]
+    pub marked_filesystems: Option<usize>,
+    #[cfg(target_os = "macos")]
+    #[serde(default)]
+    pub required_filesystems: Option<usize>,
+    #[cfg(target_os = "macos")]
+    #[serde(default)]
+    pub filesystem_marks_healthy: Option<bool>,
+    #[cfg(target_os = "macos")]
+    #[serde(default)]
+    pub strict_events_total: Option<u64>,
+    #[cfg(target_os = "macos")]
+    #[serde(default)]
+    pub strict_fast_allowed: Option<u64>,
+    #[cfg(target_os = "macos")]
+    #[serde(default)]
+    pub strict_alias_scans: Option<u64>,
+    #[cfg(target_os = "macos")]
+    #[serde(default)]
+    pub strict_alias_matches: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -460,6 +477,7 @@ pub struct BrowserInfo {
 /// browser database rows, SSH key bytes, cookies, or credentials.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigurationInfo {
+    #[cfg(target_os = "macos")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enforcement_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -843,17 +861,11 @@ mod tests {
             enforcement_active: true,
             read_only_guaranteed: None,
             status: "ACTIVE".into(),
-            mode: Some("strict-filesystem".into()),
-            marked_filesystems: Some(1),
-            required_filesystems: Some(1),
-            filesystem_marks_healthy: Some(true),
-            strict_events_total: Some(10),
-            strict_fast_allowed: Some(8),
+            #[cfg(target_os = "linux")]
+            permission_events_total: Some(10),
             protected_events: 2,
             fanotify_overflows: Some(0),
             classifier_failures: Some(0),
-            strict_alias_scans: Some(3),
-            strict_alias_matches: Some(2),
             topology_degraded: Some(false),
             mac_health: None,
             protected_files: 6,
@@ -891,8 +903,8 @@ mod tests {
         }"#;
         let status: StatusInfo = serde_json::from_str(json).unwrap();
         assert_eq!(status.backend_kind, "macos-endpoint-security");
-        assert!(status.mode.is_none());
-        assert!(status.marked_filesystems.is_none());
+        #[cfg(target_os = "linux")]
+        assert!(status.permission_events_total.is_none());
         assert!(status.fanotify_overflows.is_none());
     }
 

@@ -107,7 +107,6 @@ struct UiState {
     status: gtk::Label,
     detail: gtk::Label,
     apply: gtk::Button,
-    mode: gtk::ComboBoxText,
     browsers: gtk::ListBox,
     keys: gtk::ListBox,
     events: gtk::ListBox,
@@ -222,16 +221,6 @@ fn build_ui(app: &adw::Application, pending_only: bool, layout_smoke_page: Optio
     detail.set_xalign(0.0);
     let apply = gtk::Button::with_label(platform_service::apply_button_label());
     apply.set_sensitive(false);
-    let mode = gtk::ComboBoxText::new();
-    if platform_service::shows_linux_mode() {
-        mode.append(Some("scoped"), "Scoped (recommended)");
-        mode.append(Some("strict-mount"), "Strict Mount");
-        mode.append(
-            Some("strict-filesystem"),
-            "Strict Filesystem (high overhead)",
-        );
-        mode.set_active_id(Some("scoped"));
-    }
     let browsers = gtk::ListBox::new();
     browsers.set_selection_mode(gtk::SelectionMode::None);
     let keys = gtk::ListBox::new();
@@ -275,7 +264,6 @@ fn build_ui(app: &adw::Application, pending_only: bool, layout_smoke_page: Optio
         status: status.clone(),
         detail: detail.clone(),
         apply: apply.clone(),
-        mode: mode.clone(),
         browsers: browsers.clone(),
         keys: keys.clone(),
         events: events.clone(),
@@ -508,27 +496,13 @@ fn protection_page(state: &UiState) -> gtk::Box {
     page.set_margin_bottom(20);
     page.set_margin_start(20);
     page.set_margin_end(20);
-    if platform_service::shows_linux_mode() {
-        let heading = gtk::Label::new(Some("Enforcement strategy"));
+    if platform_service::is_linux_backend() {
+        let heading = gtk::Label::new(Some(
+            "Linux protects configured browser files and trees only.",
+        ));
         heading.set_xalign(0.0);
-        heading.add_css_class("title-2");
+        heading.set_wrap(true);
         page.append(&heading);
-        page.append(&state.mode);
-        let mode = state.mode.clone();
-        let candidate = state.candidate.clone();
-        let apply = state.apply.clone();
-        mode.connect_changed(move |m| {
-            if let Some(cfg) = candidate.borrow_mut().as_mut() {
-                cfg.enforcement_mode = Some(match m.active_id().as_deref() {
-                    Some("strict-filesystem") => {
-                        platform_service::LinuxEnforcementMode::StrictFilesystem
-                    }
-                    Some("strict-mount") => platform_service::LinuxEnforcementMode::StrictMount,
-                    _ => platform_service::LinuxEnforcementMode::Scoped,
-                });
-                apply.set_sensitive(true);
-            }
-        });
     } else {
         let heading = gtk::Label::new(Some("Protection setup"));
         heading.set_xalign(0.0);
@@ -874,9 +848,6 @@ fn hydrate_configuration_from_daemon(state: &UiState, info: guard_ipc::Configura
             return false;
         };
         *state.candidate.borrow_mut() = Some(cfg.clone());
-        if let Some(mode) = cfg.enforcement_mode {
-            state.mode.set_active_id(Some(mode.as_str()));
-        }
         state.apply.set_sensitive(false);
         state.apply.set_tooltip_text(None);
         return true;
@@ -1584,7 +1555,7 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
             }
             let health = health_from_evidence(
                 overview.service_active
-                    && (platform_service::shows_linux_mode() || overview.policy_enabled),
+                    && (platform_service::is_linux_backend() || overview.policy_enabled),
                 overview.helper_running,
                 daemon.as_ref(),
             );
@@ -1594,7 +1565,7 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
             // while suppressing its callback so a refresh never starts a new
             // privileged operation.
             if let Some(row) = protection.borrow().as_ref() {
-                let requested_active = if platform_service::shows_linux_mode() {
+                let requested_active = if platform_service::is_linux_backend() {
                     overview.service_active && overview.helper_running
                 } else {
                     overview.policy_enabled
@@ -1605,7 +1576,7 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
                     protection_syncing.set(false);
                 }
                 row.set_sensitive(
-                    platform_service::shows_linux_mode()
+                    platform_service::is_linux_backend()
                         || config_state.candidate.borrow().as_ref().is_some_and(|candidate| {
                             !candidate.browsers.is_empty()
                                 || !candidate.ssh_keys.is_empty()
@@ -2517,7 +2488,6 @@ mod tests {
     #[test]
     fn daemon_configuration_preserves_ssh_enrollment_for_the_ui() {
         let config = configuration_from_daemon(guard_ipc::ConfigurationInfo {
-            enforcement_mode: Some("strict-filesystem".into()),
             policy_enabled: None,
             browsers: vec![guard_ipc::ConfiguredBrowserInfo {
                 id: "firefox".into(),
@@ -2533,10 +2503,6 @@ mod tests {
         })
         .expect("supported daemon snapshot");
         assert_eq!(
-            config.enforcement_mode,
-            Some(platform_service::LinuxEnforcementMode::StrictFilesystem)
-        );
-        assert_eq!(
             config.ssh_keys,
             vec![PathBuf::from("/home/test/.ssh/id_ed25519")]
         );
@@ -2547,7 +2513,6 @@ mod tests {
     #[test]
     fn mac_configuration_has_policy_state_and_no_linux_mode() {
         let config = configuration_from_daemon(guard_ipc::ConfigurationInfo {
-            enforcement_mode: None,
             policy_enabled: Some(true),
             browsers: vec![guard_ipc::ConfiguredBrowserInfo {
                 id: "firefox".into(),
@@ -2562,9 +2527,8 @@ mod tests {
             mac_trusted_tools: Vec::new(),
         })
         .unwrap();
-        assert_eq!(config.enforcement_mode, None);
         assert!(config.policy_enabled);
-        assert!(!platform_service::shows_linux_mode());
+        assert!(!platform_service::is_linux_backend());
     }
 
     #[test]
@@ -2685,17 +2649,11 @@ mod tests {
             enforcement_active: true,
             read_only_guaranteed: None,
             status: "ACTIVE".into(),
-            mode: Some("strict-filesystem".into()),
-            marked_filesystems: Some(1),
-            required_filesystems: Some(1),
-            filesystem_marks_healthy: Some(true),
-            strict_events_total: Some(0),
-            strict_fast_allowed: Some(0),
+            #[cfg(target_os = "linux")]
+            permission_events_total: Some(0),
             protected_events: 0,
             fanotify_overflows: Some(0),
             classifier_failures: Some(0),
-            strict_alias_scans: Some(0),
-            strict_alias_matches: Some(0),
             topology_degraded: Some(false),
             mac_health: None,
             protected_files: 1,

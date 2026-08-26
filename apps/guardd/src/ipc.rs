@@ -35,7 +35,7 @@ use guard_ipc::{Request, RequestOp};
 use platform_linux::fanotify::FanotifyGroup;
 use platform_linux::ipc::{read_request, write_response, IpcServer, PeerCreds};
 
-use crate::enforce::{EnforcementEngine, SshAgentBinding};
+use crate::enforce::{BackendMetrics, EnforcementEngine, SshAgentBinding};
 use crate::pending::{PendingMigrationStore, PendingSshReadStore};
 
 static NEXT_AGENT_PIN: AtomicU64 = AtomicU64::new(1);
@@ -57,7 +57,7 @@ pub struct IpcState {
     /// Root-protected hardlinks pin verified ssh-agent socket inodes until the
     /// corresponding one-shot lease is revoked/used/expired.
     pub ssh_agent_pins: Arc<Mutex<HashMap<String, PathBuf>>>,
-    pub backend_metrics: Arc<crate::strict::BackendMetrics>,
+    pub backend_metrics: Arc<BackendMetrics>,
     pub pending_migrations: Arc<Mutex<PendingMigrationStore>>,
     pub pending_ssh_reads: Arc<Mutex<PendingSshReadStore>>,
 }
@@ -177,19 +177,6 @@ fn handle_status(state: &IpcState, creds: PeerCreds) -> Response {
     let engine = state.engine.lock().expect("engine mutex poisoned");
     let audit_dropped = state.audit.dropped();
     let backend = state.backend_metrics.snapshot();
-    let required_filesystems = backend.marked_filesystems;
-    let (marked_filesystems, filesystem_marks_healthy) = if required_filesystems == 0 {
-        (0, true)
-    } else {
-        match state
-            .group
-            .as_ref()
-            .map(|group| group.filesystem_mark_count())
-        {
-            Some(Ok(observed)) => (observed, observed >= required_filesystems),
-            _ => (0, false),
-        }
-    };
     // Phase 14: compute a human-readable enforcement state.
     // - NOT_ENFORCING: no fanotify group (daemon running without enforcement).
     // - DEGRADED: enforcement is active but audit events were dropped,
@@ -202,7 +189,6 @@ fn handle_status(state: &IpcState, creds: PeerCreds) -> Response {
         || engine.topology_degraded
         || backend.fanotify_overflows > 0
         || backend.classifier_failures > 0
-        || !filesystem_marks_healthy
     {
         "DEGRADED"
     } else {
@@ -216,17 +202,10 @@ fn handle_status(state: &IpcState, creds: PeerCreds) -> Response {
         enforcement_active: state.group.is_some(),
         read_only_guaranteed: None,
         status: status.to_string(),
-        mode: Some(state.backend_metrics.mode.as_str().to_owned()),
-        marked_filesystems: Some(marked_filesystems),
-        required_filesystems: Some(required_filesystems),
-        filesystem_marks_healthy: Some(filesystem_marks_healthy),
-        strict_events_total: Some(backend.strict_events_total),
-        strict_fast_allowed: Some(backend.strict_fast_allowed),
+        permission_events_total: Some(backend.permission_events_total),
         protected_events: backend.protected_events,
         fanotify_overflows: Some(backend.fanotify_overflows),
         classifier_failures: Some(backend.classifier_failures),
-        strict_alias_scans: Some(backend.strict_alias_scans),
-        strict_alias_matches: Some(backend.strict_alias_matches),
         topology_degraded: Some(engine.topology_degraded),
         mac_health: None,
         protected_files: engine.registry().file_count(),
@@ -300,7 +279,6 @@ fn handle_configuration_get(state: &IpcState, _creds: PeerCreds) -> Response {
     let engine = state.engine.lock().expect("engine mutex poisoned");
     let cfg = engine.configuration();
     Response::ok(ResponseBody::Configuration(ConfigurationInfo {
-        enforcement_mode: Some(cfg.enforcement_mode.as_str().to_owned()),
         policy_enabled: None,
         browsers: cfg
             .browsers
@@ -1544,7 +1522,7 @@ fn incident_to_info(incident: &guard_core::SshExposureIncident) -> SshIncidentIn
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::enforce::{EnforcementConfig, EnforcementEngine, EnforcementMode};
+    use crate::enforce::{EnforcementConfig, EnforcementEngine};
     use std::ffi::OsStr;
     use std::os::fd::AsRawFd;
 
@@ -1552,7 +1530,6 @@ mod tests {
     fn ssh_read_approval_releases_engine_lock_and_keeps_audit_metadata_only() {
         let fixture = guard_test_fixtures::SshFixture::create().expect("SSH fixture");
         let config = EnforcementConfig {
-            enforcement_mode: EnforcementMode::Scoped,
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![fixture.private_key.clone()],

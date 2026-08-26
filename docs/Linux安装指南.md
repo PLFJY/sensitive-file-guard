@@ -26,7 +26,7 @@ systemctl --user enable --now guard-notify
 guardctl status
 ```
 
-`guardctl setup` 会生成默认 `scoped` 配置：根据当前用户已验证的浏览器可执行文件和 profile 元数据设置窄范围保护，并且不会猜测或自动加入 SSH 私钥。需要更强的新对象首次打开覆盖时，可在复核后选择 `strict-mount` 或高开销的 `strict-filesystem`。空配置不代表防护已启用；必须存在经过审阅的非空 `/etc/guardd/config.json`。
+`guardctl setup` 会根据当前用户已验证的浏览器可执行文件和 profile 元数据生成窄范围配置，并且不会猜测或自动加入 SSH 私钥。Linux 只保护配置中的具体浏览器文件、目录树和 SSH 读取；无关的文件与程序不会进入同步 permission 路径。Topology watcher 会刷新替换对象和新目录的标记，但新建嵌套目录在 watcher 发现前存在一个狭窄的首次打开竞态。空配置不代表防护已启用；必须存在经过审阅的非空 `/etc/guardd/config.json`。
 
 ## 检查和卸载
 

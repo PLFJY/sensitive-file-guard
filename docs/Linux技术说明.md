@@ -6,25 +6,20 @@
 
 Linux 的 authoritative backend 是 root 身份运行的 `guardd`，通过 fanotify permission events 在文件打开前作出决定。服务需要 `CAP_SYS_ADMIN`，并通过 systemd 管理生命周期；polkit 负责需要修改配置、迁移授权和 SSH 操作的敏感请求。
 
-## 防护模式
+## 防护范围
 
-| 模式 | permission 范围 | 普通系统 I/O 成本 | 递归/新对象保证 |
-| --- | --- | --- | --- |
-| `scoped`（默认） | 仅受保护的文件和目录树 | 受保护命名空间外接近零 | topology watcher 刷新；新建嵌套目录仍有狭窄发现/标记竞态 |
-| `strict-mount` | 包含浏览器 profile 的现有 mount | 这些 mount 上的所有 open 都要经过 permission round trip | mount 范围的广覆盖 |
-| `strict-filesystem` | 包含浏览器 profile 的整个 filesystem | 可能很高；共享 FS 时会影响 `/usr` 和系统 exec | filesystem 范围的广覆盖 |
+Linux 只对已配置的具体浏览器资源和受保护目录树安装 fanotify permission
+mark：具体认证文件使用精确文件标记，Sessions、Session Storage、Local
+Storage、IndexedDB 以及 Firefox/Zen 的对应存储树使用
+`FAN_OPEN_PERM | FAN_EVENT_ON_CHILD`，SSH 私钥使用精确的
+`FAN_ACCESS_PERM`。不会安装 filesystem 或 mount mark，因此无关的文件打开和
+程序执行不会进入 guardd 的同步 permission 路径。
 
-`scoped` 不安装 filesystem 或 mount mark。它保留精确文件、SSH
-`FAN_ACCESS_PERM` 和已发现目录树标记；watcher 会重建替换对象的标记，但
-fanotify 目录标记不会自动继承给未来的新子目录，因此不能把它描述为无竞态的
-递归覆盖。旧 JSON 值 `conservative` 仅作为输入兼容，解析为 `scoped`；daemon
-启动时不会重写配置。
-
-Btrfs 上 `/` 和 `/home` 可以是同一文件系统中的不同 subvolume mount。
-`strict-mount` 标记实际的 `/home` mount，因而可以避开 `/`；
-`strict-filesystem` 则会标记整个 Btrfs filesystem，并可能拦截 `/usr/bin/*`。
-若 profile 本身在 `/`，strict-mount 也会有相应的广泛开销。记录的约 15–17 ms
-exec 回归仅是开发主机实测，不是通用平台延迟承诺。
+Topology watcher 观察 profile 和 SSH 资源拓扑，在替换对象或新目录出现后重建
+索引并重新应用标记。fanotify 的目录标记不会自动继承给未来的新嵌套目录，因而
+在 watcher 发现并标记之前存在一个狭窄的首次打开竞态。这里不通过扩大到整个
+filesystem 或 mount 来消除该竞态；本产品是本地敏感文件访问防火墙，不是内核级
+反恶意软件/EDR。
 
 没有非空、经过审阅的 `/etc/guardd/config.json` 时，服务不得显示为已配置或已保护。
 
@@ -42,9 +37,9 @@ Linux fanotify 不总能提供打开者原始的读写标志，因此迁移授�
 
 `guardctl setup --home "$HOME"` 只根据已发现并验证的浏览器元数据生成配置，不猜测 SSH 私钥，也不会覆盖已有配置。审计日志只保存决策、资源类别和进程元数据，不保存 Cookie、密码、session token、数据库行或私钥内容。
 
-手动迁移：把 `"enforcement_mode": "strict-filesystem"` 改为 `"scoped"`
-即可采用默认的低开销范围；若浏览器 profile 位于合适的独立 mount，且需要更强的
-首次打开覆盖，可选择 `"strict-mount"`。已有 `strict-filesystem` 配置保持原行为。
+旧配置中的 `enforcement_mode` 已废弃，不会被静默转换；启动或配置校验会给出迁移
+错误，删除该字段后再重试。Linux 配置只描述浏览器、已登记可执行文件和 SSH 私钥
+资源。
 
 审计数据库最多保留最新 1000 条事件。写入器在每次批量提交时自动删除更早的记录；查询接口的 `limit` 只是返回数量上限。若写入队列瞬时满载，系统会丢弃新事件并增加 `audit_dropped` 计数，不会删除已经保存的旧事件。
 
@@ -55,3 +50,8 @@ Linux fanotify 不总能提供打开者原始的读写标志，因此迁移授�
 ## 验收重点
 
 使用合成浏览器 profile 和临时 SSH key 验证：未知进程读取被拒绝；自有浏览器访问允许；迁移和 SSH 读取弹出确认并受 lease 期限约束；daemon 重启、配置错误、队列压力和 fanotify 溢出均进入可见的降级状态。
+
+性能与范围回归使用 `sudo bash scripts/benchmark-linux-root.sh`。该基准只比较
+guardd 不运行和使用 Linux 唯一的窄范围架构两种状态；无关文件打开和程序执行的
+permission-event 增量必须为 0，受保护资源的允许/拒绝结果、队列溢出和 topology
+健康状态是硬断言，耗时仅作参考。

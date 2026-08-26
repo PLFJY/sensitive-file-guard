@@ -27,6 +27,7 @@
 use std::collections::HashMap;
 use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -43,7 +44,7 @@ use guard_core::resource::{BrowserId, ProfileId, ProtectedResource, ProtectedRes
 pub use guard_platform::config::BrowserEnrollmentConfig;
 use guard_runtime::AuthorizationRuntime;
 pub use guard_runtime::{MigrationPendingDetails, SshPendingDetails};
-pub use platform_linux::config::{EnforcementConfig, EnforcementMode};
+pub use platform_linux::config::EnforcementConfig;
 use platform_linux::enrollment::EnrollmentStore;
 use platform_linux::fanotify;
 use platform_linux::identity as linux_identity;
@@ -65,6 +66,43 @@ pub const DEFAULT_SSH_LOAD_DURATION_SECS: u64 = 30;
 pub const MAX_SSH_LOAD_DURATION_SECS: u64 = 300;
 
 pub type InodeIndex = Arc<RwLock<HashMap<(u64, u64), ProtectedResource>>>;
+
+/// Generic Linux fanotify health counters. Every delivered permission event is
+/// already within a protected scope; unrelated filesystem activity is not
+/// counted because it never reaches this group.
+pub struct BackendMetrics {
+    pub permission_events_total: AtomicU64,
+    pub protected_events: AtomicU64,
+    pub fanotify_overflows: AtomicU64,
+    pub classifier_failures: AtomicU64,
+}
+
+impl BackendMetrics {
+    pub fn new() -> Self {
+        Self {
+            permission_events_total: AtomicU64::new(0),
+            protected_events: AtomicU64::new(0),
+            fanotify_overflows: AtomicU64::new(0),
+            classifier_failures: AtomicU64::new(0),
+        }
+    }
+
+    pub fn snapshot(&self) -> BackendSnapshot {
+        BackendSnapshot {
+            permission_events_total: self.permission_events_total.load(Ordering::Relaxed),
+            protected_events: self.protected_events.load(Ordering::Relaxed),
+            fanotify_overflows: self.fanotify_overflows.load(Ordering::Relaxed),
+            classifier_failures: self.classifier_failures.load(Ordering::Relaxed),
+        }
+    }
+}
+
+pub struct BackendSnapshot {
+    pub permission_events_total: u64,
+    pub protected_events: u64,
+    pub fanotify_overflows: u64,
+    pub classifier_failures: u64,
+}
 
 /// The enforcement engine. Owns the registry, identity cache, enrollment store,
 /// fd-identity index, and the active lease set. `decide` is the hot-path entry.
@@ -189,10 +227,6 @@ impl EnforcementEngine {
     }
     pub fn browser_exe_count(&self) -> usize {
         self.browser_exes.len()
-    }
-
-    pub fn inode_index(&self) -> InodeIndex {
-        Arc::clone(&self.fd_index)
     }
 
     /// Browser enrollment config (for IPC `browsers list`).
@@ -500,23 +534,6 @@ impl EnforcementEngine {
         Ok(n)
     }
 
-    /// Install exact-file SSH read marks in strict modes, whose broad browser
-    /// open marks intentionally remain browser-focused. The duplicate inode
-    /// mark is small and is re-applied after topology refresh so a replaced
-    /// runtime-enrolled key cannot silently lose its narrow read mediation.
-    pub fn mark_ssh_read_files(&self, group: &fanotify::FanotifyGroup) -> std::io::Result<usize> {
-        let mut n = 0;
-        for resource in self
-            .registry
-            .files()
-            .filter(|resource| resource.kind == ProtectedResourceKind::SshPrivateKey)
-        {
-            group.mark_file(libc::FAN_ACCESS_PERM, &resource.path)?;
-            n += 1;
-        }
-        Ok(n)
-    }
-
     /// Mark all protected directory trees recursively. Each subdir is marked
     /// with `FAN_OPEN_PERM | FAN_EVENT_ON_CHILD` so opens of direct children
     /// fire. Recursive coverage requires marking every subdir; a new subdir
@@ -539,7 +556,6 @@ impl EnforcementEngine {
     pub fn refresh_browser_resources(
         &mut self,
         group: &fanotify::FanotifyGroup,
-        mark_objects: bool,
     ) -> anyhow::Result<(usize, usize)> {
         let ssh_resources: Vec<ProtectedResource> = self
             .registry
@@ -565,21 +581,16 @@ impl EnforcementEngine {
             registry.enroll_file(resource);
         }
 
-        // Extend under one write lock. Strict classification promotes new
-        // structural hits concurrently with topology refresh; replacing the
-        // map from an earlier read snapshot could otherwise erase a promotion
-        // just before its permission response is sent.
+        // Extend under one write lock so a refresh cannot erase an inode entry
+        // for a concrete resource that is being handled concurrently.
         extend_fd_index(
             &mut self.fd_index.write().expect("inode index lock poisoned"),
             &registry,
         );
         self.registry = registry;
 
-        let (files, directories) = if mark_objects {
-            (self.mark_files(group)?, self.mark_trees(group)?)
-        } else {
-            (0, 0)
-        };
+        let files = self.mark_files(group)?;
+        let directories = self.mark_trees(group)?;
         Ok((files, directories))
     }
 
@@ -650,9 +661,8 @@ impl EnforcementEngine {
             }
         };
         if resource.kind == ProtectedResourceKind::SshPrivateKey && !ssh_read_event {
-            // A strict filesystem FAN_OPEN_PERM mark can also observe the key's
-            // open. The behavioral contract begins at the subsequent exact
-            // FAN_ACCESS_PERM read event, so do not arm/audit twice.
+            // The behavioral contract begins at the exact FAN_ACCESS_PERM read
+            // event, so an open-only event does not arm or audit twice.
             self.allowed += 1;
             return (Decision::Allow, None);
         }
@@ -1103,7 +1113,6 @@ mod tests {
             b.exe_paths.push(exe.to_path_buf());
         }
         EnforcementConfig {
-            enforcement_mode: EnforcementMode::Scoped,
             browsers: vec![b],
             enrolled_exes: vec![],
             ssh_keys: vec![],
@@ -1118,7 +1127,6 @@ mod tests {
     ) -> EnforcementConfig {
         let uid = unsafe { libc::getuid() };
         EnforcementConfig {
-            enforcement_mode: EnforcementMode::Scoped,
             browsers: vec![
                 BrowserEnrollmentConfig {
                     id: "chrome".into(),
@@ -1399,7 +1407,6 @@ mod tests {
     #[test]
     fn unclassified_ssh_access_event_fails_closed() {
         let cfg = EnforcementConfig {
-            enforcement_mode: EnforcementMode::Scoped,
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![],
@@ -1444,7 +1451,6 @@ mod tests {
     fn migration_config(chrome_root: &Path, ff_root: &Path, ff_exe: &Path) -> EnforcementConfig {
         let uid = unsafe { libc::getuid() };
         EnforcementConfig {
-            enforcement_mode: EnforcementMode::Scoped,
             browsers: vec![
                 BrowserEnrollmentConfig {
                     id: "chrome".into(),
@@ -1720,7 +1726,6 @@ mod tests {
 
     fn ssh_config(ssh_key: &Path) -> EnforcementConfig {
         EnforcementConfig {
-            enforcement_mode: EnforcementMode::Scoped,
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![ssh_key.to_path_buf()],
@@ -1743,7 +1748,6 @@ mod tests {
         let s = guard_test_fixtures::SshFixture::create().unwrap();
         // Empty config (no ssh_keys); enroll at runtime via protect_ssh_key.
         let cfg = EnforcementConfig {
-            enforcement_mode: EnforcementMode::Scoped,
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![],
@@ -1761,7 +1765,6 @@ mod tests {
     fn ssh_protect_rejects_pub_file() {
         let s = guard_test_fixtures::SshFixture::create().unwrap();
         let cfg = EnforcementConfig {
-            enforcement_mode: EnforcementMode::Scoped,
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![],
@@ -1775,7 +1778,6 @@ mod tests {
     fn ssh_protect_rejects_reserved_name() {
         let s = guard_test_fixtures::SshFixture::create().unwrap();
         let cfg = EnforcementConfig {
-            enforcement_mode: EnforcementMode::Scoped,
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![],
@@ -2085,7 +2087,6 @@ mod tests {
         // Authorizing a lease on a key that was never enrolled must error.
         let s = guard_test_fixtures::SshFixture::create().unwrap();
         let cfg = EnforcementConfig {
-            enforcement_mode: EnforcementMode::Scoped,
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![],
@@ -2222,7 +2223,6 @@ mod tests {
         std::fs::write(&cookies, b"synthetic").unwrap();
 
         let cfg = EnforcementConfig {
-            enforcement_mode: EnforcementMode::Scoped,
             browsers: vec![BrowserEnrollmentConfig {
                 id: "chrome".into(),
                 family: BrowserFamily::Chromium,

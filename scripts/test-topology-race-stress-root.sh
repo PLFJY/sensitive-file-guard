@@ -10,7 +10,6 @@ fi
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ITERATIONS="${ITERATIONS:-10000}"
-ENFORCEMENT_MODE="${ENFORCEMENT_MODE:-scoped}"
 KEEP_WORK="${KEEP_WORK:-0}"
 WORK="$(mktemp -d -t guard-topology-race-XXXXXX)"
 DAEMON_PID=""
@@ -31,11 +30,6 @@ trap cleanup EXIT
 case "$ITERATIONS" in
   ''|*[!0-9]*|0) echo "ERROR: ITERATIONS must be a positive integer"; exit 2 ;;
 esac
-case "$ENFORCEMENT_MODE" in
-  scoped|strict-mount|strict-filesystem) ;;
-  *) echo "ERROR: ENFORCEMENT_MODE must be scoped, strict-mount, or strict-filesystem"; exit 2 ;;
-esac
-
 GUARDD="$REPO/target/debug/guardd"
 PROBE="$REPO/target/debug/guard-test-probe"
 echo "==> Checking pre-built topology race probe and daemon"
@@ -56,7 +50,6 @@ printf '%s' 'SDF_CANARY_TOPOLOGY_INITIAL' > "$COOKIE"
 CONFIG="$WORK/config.json"
 printf '%s\n' \
   '{' \
-  "  \"enforcement_mode\": \"$ENFORCEMENT_MODE\"," \
   '  "browsers": [' \
   '    {' \
   '      "id": "synthetic-chromium",' \
@@ -112,23 +105,7 @@ if r['iterations'] != r['successful_unauthorized_reads'] + r['denied_reads']:
     raise SystemExit("measurement accounting mismatch")
 PY
 
-if [ "$ENFORCEMENT_MODE" = strict-mount ] || [ "$ENFORCEMENT_MODE" = strict-filesystem ]; then
-  if python3 - "$RESULT" <<'PY'
-import json, sys
-r = json.load(open(sys.argv[1], encoding="utf-8"))
-raise SystemExit(0 if r["successful_unauthorized_reads"] == 0 and
-                        r["denied_reads"] == r["iterations"] and
-                        r["other_errors"] == 0 else 1)
-PY
-  then
-    echo "PASS: strict mode denied every immediate replacement read"
-  else
-    echo "FAIL: strict mode allowed at least one immediate replacement read"
-    exit 1
-  fi
-fi
-
-# Scoped mode permits a bounded race, but must converge. The last
+# Scoped directory marks permit a bounded race, but must converge. The last
 # inode must become denied within two seconds after the stress run.
 CONVERGED=0
 for _ in $(seq 1 200); do
@@ -144,8 +121,4 @@ if [ "$CONVERGED" -ne 1 ]; then
 fi
 
 echo "PASS: empirical topology-race measurement completed and final inode converged"
-if [ "$ENFORCEMENT_MODE" = scoped ]; then
-  echo "NOTE: successful_unauthorized_reads is a measured known gap, not a test PASS claim."
-else
-  echo "NOTE: strict PASS requires zero successful unauthorized reads."
-fi
+echo "NOTE: successful_unauthorized_reads measures the documented new-nested-directory race."

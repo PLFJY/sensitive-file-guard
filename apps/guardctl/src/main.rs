@@ -525,8 +525,7 @@ fn validate_candidate_bytes(
         "configuration input exceeds {} bytes",
         MAX_CONFIG_STDIN
     );
-    let cfg: platform_linux::config::EnforcementConfig = serde_json::from_slice(bytes)
-        .map_err(|e| anyhow::anyhow!("malformed configuration: {e}"))?;
+    let cfg = platform_linux::config::parse_config(bytes)?;
     cfg.validate()?;
     Ok(cfg)
 }
@@ -661,7 +660,6 @@ struct SetupBrowserConfig {
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[cfg(any(target_os = "linux", test))]
 struct SetupConfig {
-    enforcement_mode: &'static str,
     browsers: Vec<SetupBrowserConfig>,
     enrolled_exes: Vec<String>,
     ssh_keys: Vec<String>,
@@ -721,7 +719,7 @@ fn run_setup(home: Option<&Path>, config_path: &Path, assume_yes: bool) -> anyho
     let rendered = serde_json::to_string_pretty(&config)?;
 
     println!(
-        "The following scoped configuration will be written to {}:\n",
+        "The following Linux protection configuration will be written to {}:\n",
         config_path.display()
     );
     println!("{rendered}");
@@ -808,7 +806,6 @@ fn setup_config(discovery: &BrowserDiscovery) -> anyhow::Result<SetupConfig> {
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     Ok(SetupConfig {
-        enforcement_mode: "scoped",
         browsers,
         enrolled_exes: Vec::new(),
         ssh_keys: Vec::new(),
@@ -1020,13 +1017,10 @@ fn print_human(resp: &Response) {
         Some(ResponseBody::Resources(rs)) => print_resources(rs),
         Some(ResponseBody::Browsers(bs)) => print_browsers(bs),
         Some(ResponseBody::Configuration(configuration)) => {
-            println!(
-                "Active configuration: {}",
-                configuration
-                    .enforcement_mode
-                    .as_deref()
-                    .unwrap_or("platform-default")
-            );
+            #[cfg(target_os = "linux")]
+            println!("Active Linux configuration: scoped resource protection");
+            #[cfg(not(target_os = "linux"))]
+            println!("Active configuration");
             println!("  browsers : {}", configuration.browsers.len());
             println!("  SSH keys : {}", configuration.ssh_keys.len());
         }
@@ -1118,20 +1112,8 @@ fn print_status(s: &StatusInfo) {
             &s.backend_kind
         }
     );
-    if let Some(mode) = &s.mode {
-        println!("  mode            : {mode}");
-    }
     if let Some(read_only) = s.read_only_guaranteed {
         println!("  migration_read_only_guaranteed: {read_only}");
-    }
-    if let (Some(marked), Some(required), Some(healthy)) = (
-        s.marked_filesystems,
-        s.required_filesystems,
-        s.filesystem_marks_healthy,
-    ) {
-        println!("  marked_filesystems: {marked}");
-        println!("  required_filesystems: {required}");
-        println!("  filesystem_marks_healthy: {healthy}");
     }
     println!("  protected_files : {}", s.protected_files);
     println!("  ssh_protected_keys: {}", s.ssh_protected_keys);
@@ -1141,11 +1123,8 @@ fn print_status(s: &StatusInfo) {
     println!("  allowed         : {}", s.allowed);
     println!("  denied          : {}", s.denied);
     println!("  unclassified    : {}", s.unclassified);
-    if let Some(value) = s.strict_events_total {
+    if let Some(value) = s.permission_events_total {
         println!("  permission_events: {value}");
-    }
-    if let Some(value) = s.strict_fast_allowed {
-        println!("  strict_fast_allow: {value}");
     }
     println!("  protected_events: {}", s.protected_events);
     if let Some(value) = s.fanotify_overflows {
@@ -1153,12 +1132,6 @@ fn print_status(s: &StatusInfo) {
     }
     if let Some(value) = s.classifier_failures {
         println!("  classifier_failures: {value}");
-    }
-    if let Some(value) = s.strict_alias_scans {
-        println!("  strict_alias_scans: {value}");
-    }
-    if let Some(value) = s.strict_alias_matches {
-        println!("  strict_alias_matches: {value}");
     }
     if let Some(value) = s.topology_degraded {
         println!("  topology_degraded: {value}");
@@ -1924,7 +1897,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn privileged_candidate_validation_rejects_relative_and_unsupported_modes() {
+    fn privileged_candidate_validation_rejects_obsolete_field_and_relative_path() {
         assert!(validate_candidate_bytes(
             br#"{"enforcement_mode":"other","browsers":[],"ssh_keys":["relative-key"]}"#
         )
@@ -2018,7 +1991,7 @@ mod tests {
     }
 
     #[test]
-    fn setup_generates_nonempty_scoped_config_without_uid_or_ssh_guesses() {
+    fn setup_generates_nonempty_narrow_config_without_uid_or_ssh_guesses() {
         let discovery = BrowserDiscovery {
             browsers: vec![BrowserSuggestion {
                 id: "firefox-esr".to_owned(),
@@ -2031,7 +2004,7 @@ mod tests {
 
         let config = setup_config(&discovery).unwrap();
         let value = serde_json::to_value(config).unwrap();
-        assert_eq!(value["enforcement_mode"], "scoped");
+        assert!(value.get("enforcement_mode").is_none());
         assert_eq!(value["browsers"][0]["family"], "firefox");
         assert!(value["browsers"][0].get("owner_uid").is_none());
         assert_eq!(value["ssh_keys"], serde_json::json!([]));
@@ -2066,10 +2039,10 @@ mod tests {
 
         let temp = tempfile::tempdir().unwrap();
         let config = temp.path().join("guardd/config.json");
-        write_new_config(&config, "{\"enforcement_mode\":\"strict-filesystem\"}\n").unwrap();
+        write_new_config(&config, "{\"browsers\":[]}\n").unwrap();
         assert_eq!(
             std::fs::read_to_string(&config).unwrap(),
-            "{\"enforcement_mode\":\"strict-filesystem\"}\n"
+            "{\"browsers\":[]}\n"
         );
         assert_eq!(
             std::fs::metadata(&config).unwrap().permissions().mode() & 0o777,

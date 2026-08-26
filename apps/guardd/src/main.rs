@@ -5,9 +5,9 @@
 //! ResourceRegistry + PolicyEngine (`--enforce-browser-config`).
 //! Phase 07: IPC server + SQLite audit persistence.
 //!
-//! Both enforcement modes require `CAP_SYS_ADMIN` for `FAN_CLASS_CONTENT`.
-//! Without it the daemon prints a precise error and exits 2 — it never silently
-//! falls back to notification-only while claiming enforcement.
+//! Linux enforcement uses one narrow scoped fanotify architecture. Without
+//! `CAP_SYS_ADMIN` the daemon prints a precise error and exits 2 — it never
+//! silently falls back to notification-only while claiming enforcement.
 
 #![deny(clippy::significant_drop_in_scrutinee)]
 
@@ -17,8 +17,6 @@ mod enforce;
 mod ipc;
 #[cfg(target_os = "linux")]
 mod pending;
-#[cfg(target_os = "linux")]
-mod strict;
 
 #[cfg(target_os = "linux")]
 use std::io::Write;
@@ -149,15 +147,14 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
 
     let cfg_bytes = std::fs::read(cfg_path)
         .map_err(|e| anyhow::anyhow!("reading config {}: {e}", cfg_path.display()))?;
-    let cfg: enforce::EnforcementConfig = serde_json::from_slice(&cfg_bytes)
+    let cfg = platform_linux::config::parse_config(&cfg_bytes)
         .map_err(|e| anyhow::anyhow!("parsing config {}: {e}", cfg_path.display()))?;
     // Validate the shared public contract before constructing enforcement state.
     cfg.validate()?;
 
     let engine = enforce::EnforcementEngine::from_config(&cfg)?;
 
-    // Open audit/config/state dependencies before installing any broad strict
-    // permission mark. The event loop must be ready before it can receive one.
+    // Open audit/config/state dependencies before installing permission marks.
     let audit_path = cli
         .audit_db
         .clone()
@@ -170,17 +167,7 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
         }
     };
 
-    let backend_metrics = Arc::new(strict::BackendMetrics::new(cfg.enforcement_mode));
-    let strict_classifier =
-        if strict::mark_plan(cfg.enforcement_mode) != strict::MarkPlan::ScopedObjects {
-            Some(Arc::new(strict::StrictClassifier::new(
-                &cfg,
-                engine.inode_index(),
-                Arc::clone(&backend_metrics),
-            )?))
-        } else {
-            None
-        };
+    let backend_metrics = Arc::new(enforce::BackendMetrics::new());
 
     // Start observing before the initial fanotify marking pass so a resource
     // replacement concurrent with startup is queued and triggers rediscovery.
@@ -198,53 +185,10 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
         .map_err(|e| anyhow::anyhow!("initializing browser topology watcher: {e}"))?;
 
     let group = fanotify::FanotifyGroup::new_content()?;
-    // Scoped uses only exact object/tree marks. Strict modes use browser
-    // profile scopes and leave SSH at exact FAN_ACCESS_PERM.
-    let (n_files, n_dirs, n_filesystems, n_mounts) = if let Some(classifier) = &strict_classifier {
-        let scope_paths = match strict::mark_plan(cfg.enforcement_mode) {
-            strict::MarkPlan::Mounts => classifier.browser_scope_paths(),
-            strict::MarkPlan::Filesystems => classifier.filesystem_scope_paths(),
-            strict::MarkPlan::ScopedObjects => unreachable!("scoped has no strict classifier"),
-        };
-        for path in scope_paths {
-            match strict::mark_plan(cfg.enforcement_mode) {
-                strict::MarkPlan::Mounts => {
-                    group
-                        .mark_mount(libc::FAN_OPEN_PERM, path)
-                        .map_err(|error| {
-                            anyhow::anyhow!(
-                                "strict mount mark failed for {}: {error}",
-                                path.display()
-                            )
-                        })?
-                }
-                strict::MarkPlan::Filesystems => group
-                    .mark_filesystem(libc::FAN_OPEN_PERM, path)
-                    .map_err(|error| {
-                    anyhow::anyhow!(
-                        "strict filesystem mark failed for {}: {error}",
-                        path.display()
-                    )
-                })?,
-                strict::MarkPlan::ScopedObjects => unreachable!("scoped has no strict classifier"),
-            }
-        }
-        // Strict's broad browser scope is deliberately `FAN_OPEN_PERM` for
-        // browser classification.  Add only exact SSH `FAN_ACCESS_PERM` marks
-        // rather than turning every ordinary file read into a round trip.
-        let ssh_read_marks = engine.mark_ssh_read_files(&group)?;
-        let scopes = scope_paths.len();
-        match strict::mark_plan(cfg.enforcement_mode) {
-            strict::MarkPlan::Mounts => (ssh_read_marks, 0, 0, scopes),
-            strict::MarkPlan::Filesystems => (ssh_read_marks, 0, scopes, 0),
-            strict::MarkPlan::ScopedObjects => unreachable!("scoped has no strict classifier"),
-        }
-    } else {
-        (engine.mark_files(&group)?, engine.mark_trees(&group)?, 0, 0)
-    };
-    backend_metrics
-        .marked_filesystems
-        .store(n_filesystems, std::sync::atomic::Ordering::Relaxed);
+    // The only production path: exact browser files, recursively marked
+    // protected trees, and exact SSH FAN_ACCESS_PERM marks.
+    let n_files = engine.mark_files(&group)?;
+    let n_dirs = engine.mark_trees(&group)?;
 
     // Wrap the fanotify group in Arc so the IPC `SshProtect` handler can add
     // runtime `FAN_OPEN_PERM` marks. `mark_file`/`read`/`respond` all take
@@ -263,7 +207,6 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
     // cover every enrolled profile root.
     let topology_engine = Arc::clone(&engine);
     let topology_group = Arc::clone(&group);
-    let topology_marks_objects = cfg.enforcement_mode == enforce::EnforcementMode::Scoped;
     let topology_handle = std::thread::Builder::new()
         .name("guardd-topology".into())
         .spawn(move || {
@@ -294,7 +237,7 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                 let refreshed = topology_engine
                     .lock()
                     .expect("engine mutex poisoned")
-                    .refresh_browser_resources(&topology_group, topology_marks_objects);
+                    .refresh_browser_resources(&topology_group);
                 match refreshed {
                     Ok((files, directories)) => {
                         topology_engine
@@ -357,14 +300,11 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
         (engine.registry().file_count(), engine.browser_exe_count())
     };
     println!(
-        "guardd: enforcement ACTIVE — mode={} browsers={} protected_files={} marked_files={} marked_tree_dirs={} marked_filesystems={} marked_mounts={} browser_exes={} (fanotify fd={})",
-        cfg.enforcement_mode.as_str(),
+        "guardd: enforcement ACTIVE — browsers={} protected_files={} marked_files={} marked_tree_dirs={} browser_exes={} (fanotify fd={})",
         cfg.browsers.len(),
         protected_files,
         n_files,
         n_dirs,
-        n_filesystems,
-        n_mounts,
         browser_exes,
         group.raw_fd()
     );
@@ -374,19 +314,15 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
     }
     tracing::info!(
         browsers = cfg.browsers.len(),
-        mode = cfg.enforcement_mode.as_str(),
         protected_files,
         marked_files = n_files,
         marked_tree_dirs = n_dirs,
-        marked_filesystems = n_filesystems,
-        marked_mounts = n_mounts,
         ipc_socket = ?cli.ipc_socket,
         "enforcement active"
     );
 
     let mut buf = vec![0u8; 65536];
     let mut processed: u64 = 0;
-    let daemon_pid = std::process::id() as i32;
     loop {
         if signal::is_shutdown() {
             let eng = engine.lock().expect("engine");
@@ -469,7 +405,7 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
         let events = fanotify::parse_events(&buf[..n])?;
         for ev in events {
             backend_metrics
-                .strict_events_total
+                .permission_events_total
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if ev.overflow {
                 backend_metrics
@@ -482,70 +418,28 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                 continue;
             }
 
-            let (decision, mut audit_record) = if let Some(classifier) = &strict_classifier {
-                // Kernel PID, not a process name, identifies guardd's own
-                // threads. Respond before any engine lock so topology refresh
-                // and audit/config/state I/O cannot recursively deadlock.
-                if ev.pid == daemon_pid {
-                    backend_metrics
-                        .strict_fast_allowed
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    (guard_core::policy::Decision::Allow, None)
-                } else {
-                    match classifier.classify_fd(ev.fd) {
-                        strict::StrictClassification::Protected(resource) => {
-                            backend_metrics
-                                .protected_events
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            // A broad browser scope can see the SSH open as
-                            // well as the exact-file access mark. The actual
-                            // read remains the sole SSH mediation point.
-                            if resource.kind == guard_core::ProtectedResourceKind::SshPrivateKey
-                                && ev.is_open_perm()
-                            {
-                                (guard_core::policy::Decision::Allow, None)
-                            } else {
-                                engine.lock().expect("engine").decide_protected(
-                                    ev.pid,
-                                    resource,
-                                    "strict_inode_or_path",
-                                )
-                            }
-                        }
-                        strict::StrictClassification::Unrelated => {
-                            backend_metrics
-                                .strict_fast_allowed
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            (guard_core::policy::Decision::Allow, None)
-                        }
-                        strict::StrictClassification::Error(error) => {
-                            backend_metrics
-                                .classifier_failures
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            engine.lock().expect("engine").unclassified += 1;
-                            tracing::error!(%error, pid = ev.pid, "protected event classification failed closed");
-                            (
-                                guard_core::policy::Decision::Deny(
-                                    guard_core::policy::DenyReason::UnknownProcess,
-                                ),
-                                None,
-                            )
-                        }
-                    }
-                }
-            } else {
-                // Scoped installs permission marks only for protected browser
-                // objects/trees and exact SSH reads. Therefore every delivered
-                // non-overflow event is a protected-resource event; this makes
-                // the status counter a direct regression invariant.
-                backend_metrics
-                    .protected_events
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // Scoped marks only cover protected resources, so every delivered
+            // non-overflow event is a protected-resource event.
+            backend_metrics
+                .protected_events
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let (decision, mut audit_record) =
                 engine
                     .lock()
                     .expect("engine")
-                    .decide_event(ev.pid, ev.fd, ev.is_access_perm())
-            };
+                    .decide_event(ev.pid, ev.fd, ev.is_access_perm());
+            if audit_record.is_none()
+                && matches!(
+                    &decision,
+                    guard_core::policy::Decision::Deny(
+                        guard_core::policy::DenyReason::UnknownProcess
+                    )
+                )
+            {
+                backend_metrics
+                    .classifier_failures
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             let allow = matches!(
                 &decision,
                 guard_core::policy::Decision::Allow | guard_core::policy::Decision::AllowByLease(_)
