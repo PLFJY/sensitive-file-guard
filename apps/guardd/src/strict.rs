@@ -1,6 +1,6 @@
-//! Strict filesystem-wide event classification.
+//! Strict broad-scope event classification.
 //!
-//! A filesystem mark causes unrelated opens to reach guardd. This classifier
+//! A mount or filesystem mark can cause unrelated opens to reach guardd. This classifier
 //! performs only fstat, a read lock over the small protected-inode index, and
 //! `/proc/self/fd` readlink/path matching. Process identity and policy are
 //! intentionally deferred until a protected candidate is found.
@@ -19,9 +19,28 @@ use platform_linux::fanotify;
 
 use crate::enforce::{EnforcementConfig, EnforcementMode, InodeIndex};
 
+/// Startup mark scope. Keeping this pure makes it difficult for the default
+/// mode to accidentally acquire a broad fanotify mark during refactors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkPlan {
+    ScopedObjects,
+    Mounts,
+    Filesystems,
+}
+
+pub const fn mark_plan(mode: EnforcementMode) -> MarkPlan {
+    match mode {
+        EnforcementMode::Scoped => MarkPlan::ScopedObjects,
+        EnforcementMode::StrictMount => MarkPlan::Mounts,
+        EnforcementMode::StrictFilesystem => MarkPlan::Filesystems,
+    }
+}
+
 pub struct BackendMetrics {
     pub mode: EnforcementMode,
     pub marked_filesystems: AtomicUsize,
+    /// Every permission event delivered by this group, irrespective of mode.
+    /// The stable IPC field retains its historical `strict_events_total` name.
     pub strict_events_total: AtomicU64,
     pub strict_fast_allowed: AtomicU64,
     pub protected_events: AtomicU64,
@@ -100,7 +119,8 @@ pub struct StrictClassifier {
     browsers: Vec<BrowserNamespace>,
     ssh: Vec<SshNamespace>,
     inode_index: InodeIndex,
-    filesystem_paths: Vec<PathBuf>,
+    browser_scope_paths: Vec<PathBuf>,
+    filesystem_scope_paths: Vec<PathBuf>,
     metrics: std::sync::Arc<BackendMetrics>,
 }
 
@@ -112,8 +132,9 @@ impl StrictClassifier {
     ) -> anyhow::Result<Self> {
         let mut browsers = Vec::with_capacity(cfg.browsers.len());
         let mut ssh = Vec::with_capacity(cfg.ssh_keys.len());
-        let mut filesystem_paths = Vec::new();
-        let mut devices = HashSet::new();
+        let mut browser_scope_paths = Vec::new();
+        let mut filesystem_scope_paths = Vec::new();
+        let mut filesystem_devices = HashSet::new();
 
         for browser in &cfg.browsers {
             let root = std::fs::canonicalize(&browser.profile_root).map_err(|error| {
@@ -130,9 +151,12 @@ impl StrictClassifier {
                 root: root.clone(),
                 owner_uid,
             });
-            if devices.insert(metadata.dev()) {
-                filesystem_paths.push(root);
+            if filesystem_devices.insert(metadata.dev()) {
+                filesystem_scope_paths.push(root.clone());
             }
+            // Do not deduplicate mount marks by st_dev: Btrfs subvolume mounts
+            // can share a device while remaining separate VFS mounts.
+            browser_scope_paths.push(root);
         }
 
         for configured in &cfg.ssh_keys {
@@ -147,26 +171,31 @@ impl StrictClassifier {
                 path: path.clone(),
                 owner_uid: metadata.uid(),
             });
-            if devices.insert(metadata.dev()) {
-                filesystem_paths.push(path);
-            }
         }
 
-        if filesystem_paths.is_empty() {
-            anyhow::bail!("strict-filesystem mode has no protected filesystem to mark");
+        if browser_scope_paths.is_empty() {
+            anyhow::bail!("strict mode has no enrolled browser profile mount to mark");
         }
 
         Ok(Self {
             browsers,
             ssh,
             inode_index,
-            filesystem_paths,
+            browser_scope_paths,
+            filesystem_scope_paths,
             metrics,
         })
     }
 
-    pub fn filesystem_paths(&self) -> &[PathBuf] {
-        &self.filesystem_paths
+    /// Browser profile paths that select broad strict scopes. SSH keys are
+    /// intentionally absent: their boundary stays exact FAN_ACCESS_PERM.
+    pub fn browser_scope_paths(&self) -> &[PathBuf] {
+        &self.browser_scope_paths
+    }
+
+    /// One path per browser-containing filesystem for compatibility mode.
+    pub fn filesystem_scope_paths(&self) -> &[PathBuf] {
+        &self.filesystem_scope_paths
     }
 
     pub fn classify_fd(&self, fd: RawFd) -> StrictClassification {
@@ -492,6 +521,16 @@ fn resource(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mode_mark_plan_keeps_scoped_narrow() {
+        assert_eq!(mark_plan(EnforcementMode::Scoped), MarkPlan::ScopedObjects);
+        assert_eq!(mark_plan(EnforcementMode::StrictMount), MarkPlan::Mounts);
+        assert_eq!(
+            mark_plan(EnforcementMode::StrictFilesystem),
+            MarkPlan::Filesystems
+        );
+    }
     use std::os::fd::AsRawFd;
 
     fn chromium_config(root: &Path) -> EnforcementConfig {
@@ -661,7 +700,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_configuration_requires_an_existing_protected_filesystem() {
+    fn strict_configuration_requires_an_existing_browser_profile() {
         let temp = tempfile::tempdir().unwrap();
         let missing = temp.path().join("missing");
         let metrics = std::sync::Arc::new(BackendMetrics::new(EnforcementMode::StrictFilesystem));

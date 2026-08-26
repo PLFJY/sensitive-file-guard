@@ -75,7 +75,7 @@ enum Command {
         #[command(subcommand)]
         action: BrowserAction,
     },
-    /// Create a reviewed strict-filesystem configuration for one explicitly
+    /// Create a reviewed scoped configuration for one explicitly
     /// selected user's native browser profiles. This does not start guardd.
     Setup {
         /// Home directory whose profiles are to be protected. Required when
@@ -721,7 +721,7 @@ fn run_setup(home: Option<&Path>, config_path: &Path, assume_yes: bool) -> anyho
     let rendered = serde_json::to_string_pretty(&config)?;
 
     println!(
-        "The following strict-filesystem configuration will be written to {}:\n",
+        "The following scoped configuration will be written to {}:\n",
         config_path.display()
     );
     println!("{rendered}");
@@ -808,7 +808,7 @@ fn setup_config(discovery: &BrowserDiscovery) -> anyhow::Result<SetupConfig> {
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     Ok(SetupConfig {
-        enforcement_mode: "strict-filesystem",
+        enforcement_mode: "scoped",
         browsers,
         enrolled_exes: Vec::new(),
         ssh_keys: Vec::new(),
@@ -1142,7 +1142,7 @@ fn print_status(s: &StatusInfo) {
     println!("  denied          : {}", s.denied);
     println!("  unclassified    : {}", s.unclassified);
     if let Some(value) = s.strict_events_total {
-        println!("  strict_events   : {value}");
+        println!("  permission_events: {value}");
     }
     if let Some(value) = s.strict_fast_allowed {
         println!("  strict_fast_allow: {value}");
@@ -2018,7 +2018,7 @@ mod tests {
     }
 
     #[test]
-    fn setup_generates_nonempty_strict_config_without_uid_or_ssh_guesses() {
+    fn setup_generates_nonempty_scoped_config_without_uid_or_ssh_guesses() {
         let discovery = BrowserDiscovery {
             browsers: vec![BrowserSuggestion {
                 id: "firefox-esr".to_owned(),
@@ -2031,7 +2031,7 @@ mod tests {
 
         let config = setup_config(&discovery).unwrap();
         let value = serde_json::to_value(config).unwrap();
-        assert_eq!(value["enforcement_mode"], "strict-filesystem");
+        assert_eq!(value["enforcement_mode"], "scoped");
         assert_eq!(value["browsers"][0]["family"], "firefox");
         assert!(value["browsers"][0].get("owner_uid").is_none());
         assert_eq!(value["ssh_keys"], serde_json::json!([]));

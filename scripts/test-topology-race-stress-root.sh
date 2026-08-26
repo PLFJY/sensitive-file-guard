@@ -10,7 +10,7 @@ fi
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ITERATIONS="${ITERATIONS:-10000}"
-ENFORCEMENT_MODE="${ENFORCEMENT_MODE:-conservative}"
+ENFORCEMENT_MODE="${ENFORCEMENT_MODE:-scoped}"
 KEEP_WORK="${KEEP_WORK:-0}"
 WORK="$(mktemp -d -t guard-topology-race-XXXXXX)"
 DAEMON_PID=""
@@ -32,8 +32,8 @@ case "$ITERATIONS" in
   ''|*[!0-9]*|0) echo "ERROR: ITERATIONS must be a positive integer"; exit 2 ;;
 esac
 case "$ENFORCEMENT_MODE" in
-  conservative|strict-filesystem) ;;
-  *) echo "ERROR: ENFORCEMENT_MODE must be conservative or strict-filesystem"; exit 2 ;;
+  scoped|strict-mount|strict-filesystem) ;;
+  *) echo "ERROR: ENFORCEMENT_MODE must be scoped, strict-mount, or strict-filesystem"; exit 2 ;;
 esac
 
 echo "==> Building topology race probe and daemon"
@@ -107,7 +107,7 @@ if r['iterations'] != r['successful_unauthorized_reads'] + r['denied_reads']:
     raise SystemExit("measurement accounting mismatch")
 PY
 
-if [ "$ENFORCEMENT_MODE" = strict-filesystem ]; then
+if [ "$ENFORCEMENT_MODE" = strict-mount ] || [ "$ENFORCEMENT_MODE" = strict-filesystem ]; then
   if python3 - "$RESULT" <<'PY'
 import json, sys
 r = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -123,7 +123,7 @@ PY
   fi
 fi
 
-# The conservative model permits a bounded race, but must converge. The last
+# Scoped mode permits a bounded race, but must converge. The last
 # inode must become denied within two seconds after the stress run.
 CONVERGED=0
 for _ in $(seq 1 200); do
@@ -139,7 +139,7 @@ if [ "$CONVERGED" -ne 1 ]; then
 fi
 
 echo "PASS: empirical topology-race measurement completed and final inode converged"
-if [ "$ENFORCEMENT_MODE" = conservative ]; then
+if [ "$ENFORCEMENT_MODE" = scoped ]; then
   echo "NOTE: successful_unauthorized_reads is a measured known gap, not a test PASS claim."
 else
   echo "NOTE: strict PASS requires zero successful unauthorized reads."

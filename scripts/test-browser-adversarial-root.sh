@@ -14,10 +14,10 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ENFORCEMENT_MODE="${ENFORCEMENT_MODE:-conservative}"
+ENFORCEMENT_MODE="${ENFORCEMENT_MODE:-scoped}"
 case "$ENFORCEMENT_MODE" in
-  conservative|strict-filesystem) ;;
-  *) echo "ERROR: ENFORCEMENT_MODE must be conservative or strict-filesystem"; exit 2 ;;
+  scoped|strict-mount|strict-filesystem) ;;
+  *) echo "ERROR: ENFORCEMENT_MODE must be scoped, strict-mount, or strict-filesystem"; exit 2 ;;
 esac
 GUARDD="$REPO/target/release/guardd"
 GUARDCTL="$REPO/target/release/guardctl"
@@ -549,7 +549,7 @@ make_cookie_db "$REPLACEMENT_TMP" "$REPLACEMENT_CANARY"
 chown "$TEST_UID:$TEST_GID" "$REPLACEMENT_TMP"
 chmod 0600 "$REPLACEMENT_TMP"
 run_as_test_user mv -f "$REPLACEMENT_TMP" "$CHROME_DB"
-if [ "$ENFORCEMENT_MODE" = conservative ]; then sleep 0.5; fi
+if [ "$ENFORCEMENT_MODE" = scoped ]; then sleep 0.5; fi
 assert_firewall_denied "atomic replacement inode" "$REPLACEMENT_CANARY" \
   "$PROBE" sqlite "$CHROME_DB"
 
@@ -561,7 +561,7 @@ chmod 0700 "$NEW_TREE_SOURCE" "$NEW_TREE_SOURCE/nested"
 chmod 0600 "$NEW_TREE_SOURCE/nested/Session_2"
 run_as_test_user mv "$NEW_TREE_SOURCE" "$CHROME_PROFILE/Sessions/new"
 NEW_NESTED="$CHROME_PROFILE/Sessions/new/nested/Session_2"
-if [ "$ENFORCEMENT_MODE" = conservative ]; then sleep 0.5; fi
+if [ "$ENFORCEMENT_MODE" = scoped ]; then sleep 0.5; fi
 assert_firewall_denied "new nested session resource" "$CHROME_SESSION_CANARY" \
   "$PROBE" read "$NEW_NESTED"
 

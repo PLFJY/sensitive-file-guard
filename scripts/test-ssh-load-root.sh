@@ -17,10 +17,10 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ENFORCEMENT_MODE="${ENFORCEMENT_MODE:-conservative}"
+ENFORCEMENT_MODE="${ENFORCEMENT_MODE:-scoped}"
 case "$ENFORCEMENT_MODE" in
-  conservative|strict-filesystem) ;;
-  *) echo "ERROR: ENFORCEMENT_MODE must be conservative or strict-filesystem"; exit 2 ;;
+  scoped|strict-mount|strict-filesystem) ;;
+  *) echo "ERROR: ENFORCEMENT_MODE must be scoped, strict-mount, or strict-filesystem"; exit 2 ;;
 esac
 GUARDD="$REPO/target/release/guardd"
 GUARDCTL="$REPO/target/release/guardctl"

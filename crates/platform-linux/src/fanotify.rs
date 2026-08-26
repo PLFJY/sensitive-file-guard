@@ -20,8 +20,8 @@ use std::sync::Arc;
 use libc::{
     fanotify_event_metadata, fanotify_init, fanotify_mark, fanotify_response, AT_FDCWD,
     FAN_ACCESS_PERM, FAN_ALLOW, FAN_CLASS_CONTENT, FAN_CLOEXEC, FAN_DENY, FAN_EVENT_ON_CHILD,
-    FAN_MARK_ADD, FAN_MARK_FILESYSTEM, FAN_NOFD, FAN_OPEN_PERM, FAN_Q_OVERFLOW, O_LARGEFILE,
-    O_RDONLY,
+    FAN_MARK_ADD, FAN_MARK_FILESYSTEM, FAN_MARK_MOUNT, FAN_NOFD, FAN_OPEN_PERM, FAN_Q_OVERFLOW,
+    O_LARGEFILE, O_RDONLY,
 };
 
 /// Kernel UAPI version of `fanotify_event_metadata.vers`.
@@ -144,6 +144,29 @@ impl FanotifyGroup {
             fanotify_mark(
                 self.fd,
                 FAN_MARK_ADD | FAN_MARK_FILESYSTEM,
+                mask,
+                AT_FDCWD,
+                c.as_ptr(),
+            )
+        };
+        if rc < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Mark the existing mount containing `path`. This does not create or
+    /// otherwise manage mounts; Linux selects the mount from the path.
+    pub fn mark_mount(&self, mask: u64, path: &Path) -> io::Result<()> {
+        let c = std::ffi::CString::new(path.to_string_lossy().as_bytes())
+            .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+        // SAFETY: self.fd is a valid fanotify group fd and `c` remains live for
+        // the syscall. FAN_MARK_MOUNT asks Linux to select the existing mount
+        // containing path; no userspace mount manipulation occurs.
+        let rc = unsafe {
+            fanotify_mark(
+                self.fd,
+                FAN_MARK_ADD | FAN_MARK_MOUNT,
                 mask,
                 AT_FDCWD,
                 c.as_ptr(),

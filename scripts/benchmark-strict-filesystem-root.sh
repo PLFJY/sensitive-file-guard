@@ -91,21 +91,31 @@ bench absent browser "$ENROLLED" "$COOKIE" "$ALLOWED_ITERATIONS"
 bench absent denied "$PROBE" "$COOKIE" "$DENIED_ITERATIONS"
 cargo_wall absent
 
-echo "==> B. conservative mode"
-start_daemon conservative
-bench conservative unprotected "$PROBE" "$ORDINARY" "$OPEN_ITERATIONS"
-bench conservative browser "$ENROLLED" "$COOKIE" "$ALLOWED_ITERATIONS"
-bench conservative denied "$PROBE" "$COOKIE" "$DENIED_ITERATIONS"
-cargo_wall conservative
+echo "==> B. scoped mode"
+start_daemon scoped
+bench scoped unprotected "$PROBE" "$ORDINARY" "$OPEN_ITERATIONS"
+bench scoped browser "$ENROLLED" "$COOKIE" "$ALLOWED_ITERATIONS"
+bench scoped denied "$PROBE" "$COOKIE" "$DENIED_ITERATIONS"
+cargo_wall scoped
+"$GUARDCTL" --socket "$WORK/guardd.sock" --json status >"$WORK/scoped-status.json"
 stop_daemon
 
-echo "==> C. strict-filesystem mode"
+echo "==> C. strict-mount mode"
+start_daemon strict-mount
+bench strict-mount unprotected "$PROBE" "$ORDINARY" "$OPEN_ITERATIONS"
+bench strict-mount browser "$ENROLLED" "$COOKIE" "$ALLOWED_ITERATIONS"
+bench strict-mount denied "$PROBE" "$COOKIE" "$DENIED_ITERATIONS"
+cargo_wall strict-mount
+"$GUARDCTL" --socket "$WORK/guardd.sock" --json status >"$WORK/strict-mount-status.json"
+stop_daemon
+
+echo "==> D. strict-filesystem mode"
 start_daemon strict-filesystem
-bench strict unprotected "$PROBE" "$ORDINARY" "$OPEN_ITERATIONS"
-bench strict browser "$ENROLLED" "$COOKIE" "$ALLOWED_ITERATIONS"
-bench strict denied "$PROBE" "$COOKIE" "$DENIED_ITERATIONS"
-cargo_wall strict
-"$GUARDCTL" --socket "$WORK/guardd.sock" --json status >"$WORK/strict-status.json"
+bench strict-filesystem unprotected "$PROBE" "$ORDINARY" "$OPEN_ITERATIONS"
+bench strict-filesystem browser "$ENROLLED" "$COOKIE" "$ALLOWED_ITERATIONS"
+bench strict-filesystem denied "$PROBE" "$COOKIE" "$DENIED_ITERATIONS"
+cargo_wall strict-filesystem
+"$GUARDCTL" --socket "$WORK/guardd.sock" --json status >"$WORK/strict-filesystem-status.json"
 stop_daemon
 
 python3 - "$WORK" <<'PY'
@@ -115,7 +125,7 @@ def load(state, workload):
     d=json.load(open(w/f"{state}-{workload}.json", encoding="utf-8"))
     return d
 rows=[]
-for state in ("absent","conservative","strict"):
+for state in ("absent","scoped","strict-mount","strict-filesystem"):
     for workload in ("unprotected","browser","denied"):
         rows.append((state,workload,load(state,workload)))
 baseline={(workload):d["elapsed_ns"] for state,workload,d in rows if state=="absent"}
@@ -131,19 +141,26 @@ for state,workload,d in rows:
           f"{lat['p50']/1e3:.1f}/{lat['p95']/1e3:.1f}/{lat['p99']/1e3:.1f}/{lat['max']/1e3:.1f} | "
           + overhead_text)
 print("cargo check wall seconds:")
-for state in ("absent","conservative","strict"):
+for state in ("absent","scoped","strict-mount","strict-filesystem"):
     print(f"  {state}: {(w/f'{state}-cargo.time').read_text().strip()}")
-status=json.load(open(w/"strict-status.json", encoding="utf-8"))["data"]
-print("Strict queue health:")
-for key in ("strict_events_total","strict_fast_allowed","protected_events",
-            "fanotify_overflows","audit_dropped","classifier_failures",
-            "strict_alias_scans","strict_alias_matches"):
-    print(f"  {key}: {status[key]}")
-if status["fanotify_overflows"] or status["classifier_failures"]:
-    raise SystemExit("strict benchmark degraded enforcement")
-denied=json.load(open(w/"strict-denied.json", encoding="utf-8"))
-if denied["denied"] != denied["iterations"] or denied["successful"]:
-    raise SystemExit("denied benchmark did not deny every protected open")
+for state in ("scoped", "strict-mount", "strict-filesystem"):
+    status=json.load(open(w/f"{state}-status.json", encoding="utf-8"))["data"]
+    print(f"{state} queue health:")
+    for key in ("strict_events_total","strict_fast_allowed","protected_events",
+                "fanotify_overflows","audit_dropped","classifier_failures"):
+        print(f"  {key}: {status[key]}")
+    if status["fanotify_overflows"] or status["classifier_failures"] or status["topology_degraded"]:
+        raise SystemExit(f"{state} benchmark degraded enforcement")
+    denied=json.load(open(w/f"{state}-denied.json", encoding="utf-8"))
+    if denied["denied"] != denied["iterations"] or denied["successful"]:
+        raise SystemExit(f"{state} denied benchmark did not deny every protected open")
+
+# `strict_events_total` is the stable status field for every permission event.
+# It starts at zero at daemon launch; scoped's three protected workloads must
+# account for all events, while the unrelated sibling workload contributes none.
+scoped=json.load(open(w/"scoped-status.json", encoding="utf-8"))["data"]
+if scoped["strict_events_total"] != scoped["protected_events"]:
+    raise SystemExit("scoped unrelated workload produced a permission event")
 PY
 
 echo "PASS: performance benchmark completed with no fanotify overflow or classifier failure"

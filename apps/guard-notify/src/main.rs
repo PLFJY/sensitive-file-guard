@@ -474,6 +474,21 @@ fn notification_text(event: &EventInfo) -> (String, String, &'static str) {
 
 #[cfg(target_os = "linux")]
 fn notify(summary: &str, body: &str, urgency: &str) -> std::io::Result<()> {
+    match notify_once(summary, body, urgency) {
+        Ok(()) => Ok(()),
+        Err(error) if notification_rate_limited(&error) => {
+            // Desktop servers legitimately protect themselves against a burst
+            // of distinct security events. Retry privately so a temporary UI
+            // rate limit cannot turn an audited denial into a dropped alert.
+            std::thread::sleep(Duration::from_secs(1));
+            notify_once(summary, body, urgency)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn notify_once(summary: &str, body: &str, urgency: &str) -> std::io::Result<()> {
     let output = Command::new("notify-send")
         .args([
             "--app-name=guardd",
@@ -496,6 +511,11 @@ fn notify(summary: &str, body: &str, urgency: &str) -> std::io::Result<()> {
             stderr.trim()
         )))
     }
+}
+
+#[cfg(target_os = "linux")]
+fn notification_rate_limited(error: &std::io::Error) -> bool {
+    error.to_string().contains("ExcessNotificationGeneration")
 }
 
 #[cfg(target_os = "linux")]
@@ -584,6 +604,18 @@ mod tests {
         second.backend_diag = "ssh_key_access_confirmation_required;request=ssh-0001".into();
         assert!(should_notify(&mut sent, &first, 1_000));
         assert!(!should_notify(&mut sent, &second, 1_001));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn recognizes_desktop_notification_rate_limit() {
+        let limited = std::io::Error::other(
+            "notify-send exited exit status: 1: GDBus.Error:org.freedesktop.Notifications.Error:ExcessNotificationGeneration",
+        );
+        assert!(notification_rate_limited(&limited));
+        assert!(!notification_rate_limited(&std::io::Error::other(
+            "permission denied"
+        )));
     }
 
     #[cfg(target_os = "macos")]

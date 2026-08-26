@@ -156,9 +156,8 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
 
     let engine = enforce::EnforcementEngine::from_config(&cfg)?;
 
-    // Open audit/config/state dependencies before installing a filesystem-wide
-    // permission mark. Strict Mode must not block startup waiting for an event
-    // loop which has not started yet.
+    // Open audit/config/state dependencies before installing any broad strict
+    // permission mark. The event loop must be ready before it can receive one.
     let audit_path = cli
         .audit_db
         .clone()
@@ -172,15 +171,16 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
     };
 
     let backend_metrics = Arc::new(strict::BackendMetrics::new(cfg.enforcement_mode));
-    let strict_classifier = if cfg.enforcement_mode == enforce::EnforcementMode::StrictFilesystem {
-        Some(Arc::new(strict::StrictClassifier::new(
-            &cfg,
-            engine.inode_index(),
-            Arc::clone(&backend_metrics),
-        )?))
-    } else {
-        None
-    };
+    let strict_classifier =
+        if strict::mark_plan(cfg.enforcement_mode) != strict::MarkPlan::ScopedObjects {
+            Some(Arc::new(strict::StrictClassifier::new(
+                &cfg,
+                engine.inode_index(),
+                Arc::clone(&backend_metrics),
+            )?))
+        } else {
+            None
+        };
 
     // Start observing before the initial fanotify marking pass so a resource
     // replacement concurrent with startup is queued and triggers rediscovery.
@@ -198,27 +198,49 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
         .map_err(|e| anyhow::anyhow!("initializing browser topology watcher: {e}"))?;
 
     let group = fanotify::FanotifyGroup::new_content()?;
-    // Mark before wrapping in Arc<Mutex>. Conservative mode preserves the
-    // existing object/tree marks. Strict mode marks each distinct filesystem;
-    // any required mark failure aborts startup rather than claiming ACTIVE.
-    let (n_files, n_dirs, n_filesystems) = if let Some(classifier) = &strict_classifier {
-        for path in classifier.filesystem_paths() {
-            group
-                .mark_filesystem(libc::FAN_OPEN_PERM, path)
-                .map_err(|error| {
+    // Scoped uses only exact object/tree marks. Strict modes use browser
+    // profile scopes and leave SSH at exact FAN_ACCESS_PERM.
+    let (n_files, n_dirs, n_filesystems, n_mounts) = if let Some(classifier) = &strict_classifier {
+        let scope_paths = match strict::mark_plan(cfg.enforcement_mode) {
+            strict::MarkPlan::Mounts => classifier.browser_scope_paths(),
+            strict::MarkPlan::Filesystems => classifier.filesystem_scope_paths(),
+            strict::MarkPlan::ScopedObjects => unreachable!("scoped has no strict classifier"),
+        };
+        for path in scope_paths {
+            match strict::mark_plan(cfg.enforcement_mode) {
+                strict::MarkPlan::Mounts => {
+                    group
+                        .mark_mount(libc::FAN_OPEN_PERM, path)
+                        .map_err(|error| {
+                            anyhow::anyhow!(
+                                "strict mount mark failed for {}: {error}",
+                                path.display()
+                            )
+                        })?
+                }
+                strict::MarkPlan::Filesystems => group
+                    .mark_filesystem(libc::FAN_OPEN_PERM, path)
+                    .map_err(|error| {
                     anyhow::anyhow!(
                         "strict filesystem mark failed for {}: {error}",
                         path.display()
                     )
-                })?;
+                })?,
+                strict::MarkPlan::ScopedObjects => unreachable!("scoped has no strict classifier"),
+            }
         }
-        // Strict's broad filesystem mark is deliberately `FAN_OPEN_PERM` for
+        // Strict's broad browser scope is deliberately `FAN_OPEN_PERM` for
         // browser classification.  Add only exact SSH `FAN_ACCESS_PERM` marks
         // rather than turning every ordinary file read into a round trip.
         let ssh_read_marks = engine.mark_ssh_read_files(&group)?;
-        (ssh_read_marks, 0, classifier.filesystem_paths().len())
+        let scopes = scope_paths.len();
+        match strict::mark_plan(cfg.enforcement_mode) {
+            strict::MarkPlan::Mounts => (ssh_read_marks, 0, 0, scopes),
+            strict::MarkPlan::Filesystems => (ssh_read_marks, 0, scopes, 0),
+            strict::MarkPlan::ScopedObjects => unreachable!("scoped has no strict classifier"),
+        }
     } else {
-        (engine.mark_files(&group)?, engine.mark_trees(&group)?, 0)
+        (engine.mark_files(&group)?, engine.mark_trees(&group)?, 0, 0)
     };
     backend_metrics
         .marked_filesystems
@@ -241,7 +263,7 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
     // cover every enrolled profile root.
     let topology_engine = Arc::clone(&engine);
     let topology_group = Arc::clone(&group);
-    let topology_marks_objects = cfg.enforcement_mode == enforce::EnforcementMode::Conservative;
+    let topology_marks_objects = cfg.enforcement_mode == enforce::EnforcementMode::Scoped;
     let topology_handle = std::thread::Builder::new()
         .name("guardd-topology".into())
         .spawn(move || {
@@ -335,13 +357,14 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
         (engine.registry().file_count(), engine.browser_exe_count())
     };
     println!(
-        "guardd: enforcement ACTIVE — mode={} browsers={} protected_files={} marked_files={} marked_tree_dirs={} marked_filesystems={} browser_exes={} (fanotify fd={})",
+        "guardd: enforcement ACTIVE — mode={} browsers={} protected_files={} marked_files={} marked_tree_dirs={} marked_filesystems={} marked_mounts={} browser_exes={} (fanotify fd={})",
         cfg.enforcement_mode.as_str(),
         cfg.browsers.len(),
         protected_files,
         n_files,
         n_dirs,
         n_filesystems,
+        n_mounts,
         browser_exes,
         group.raw_fd()
     );
@@ -356,6 +379,7 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
         marked_files = n_files,
         marked_tree_dirs = n_dirs,
         marked_filesystems = n_filesystems,
+        marked_mounts = n_mounts,
         ipc_socket = ?cli.ipc_socket,
         "enforcement active"
     );
@@ -444,6 +468,9 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
 
         let events = fanotify::parse_events(&buf[..n])?;
         for ev in events {
+            backend_metrics
+                .strict_events_total
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if ev.overflow {
                 backend_metrics
                     .fanotify_overflows
@@ -456,9 +483,6 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
             }
 
             let (decision, mut audit_record) = if let Some(classifier) = &strict_classifier {
-                backend_metrics
-                    .strict_events_total
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 // Kernel PID, not a process name, identifies guardd's own
                 // threads. Respond before any engine lock so topology refresh
                 // and audit/config/state I/O cannot recursively deadlock.
@@ -510,6 +534,13 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                     }
                 }
             } else {
+                // Scoped installs permission marks only for protected browser
+                // objects/trees and exact SSH reads. Therefore every delivered
+                // non-overflow event is a protected-resource event; this makes
+                // the status counter a direct regression invariant.
+                backend_metrics
+                    .protected_events
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 engine
                     .lock()
                     .expect("engine")

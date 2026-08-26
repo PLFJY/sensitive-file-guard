@@ -6,7 +6,7 @@
 
 | 平台 | 交付方式 | 状态 |
 | --- | --- | --- |
-| Linux | root `guardd` + fanotify + systemd | 在记录的 Arch `strict-filesystem` 主机上有 Alpha 验收记录 |
+| Linux | root `guardd` + fanotify + systemd | 默认 `scoped`；`strict-mount` 和高开销 `strict-filesystem` 为显式模式 |
 | macOS | `Guard.app` + Endpoint Security system extension | 自用实验路径；需要 SIP 关闭、开发模式、本地签名和用户授权 |
 
 macOS 自用路径是当前首选开发路径，故意不等待 Apple provisioning、Developer ID 或公证。它不是 SIP 开启的消费者分发包。Guard 不会自动关闭 SIP、修改 TCC 数据库或自动授予完全磁盘访问权限。

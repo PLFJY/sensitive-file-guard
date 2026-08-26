@@ -17,14 +17,17 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "kebab-case")]
 pub enum EnforcementMode {
     #[default]
-    Conservative,
+    #[serde(alias = "conservative")]
+    Scoped,
+    StrictMount,
     StrictFilesystem,
 }
 
 impl EnforcementMode {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Conservative => "conservative",
+            Self::Scoped => "scoped",
+            Self::StrictMount => "strict-mount",
             Self::StrictFilesystem => "strict-filesystem",
         }
     }
@@ -55,7 +58,10 @@ impl EnforcementConfig {
 
     pub fn validate(&self) -> anyhow::Result<()> {
         self.policy().validate()?;
-        if self.enforcement_mode == EnforcementMode::StrictFilesystem {
+        if matches!(
+            self.enforcement_mode,
+            EnforcementMode::StrictMount | EnforcementMode::StrictFilesystem
+        ) {
             for browser in &self.browsers {
                 if !browser.profile_root.is_dir() {
                     anyhow::bail!(
@@ -252,7 +258,7 @@ mod tests {
 
     fn config() -> EnforcementConfig {
         EnforcementConfig {
-            enforcement_mode: EnforcementMode::Conservative,
+            enforcement_mode: EnforcementMode::Scoped,
             browsers: Vec::new(),
             enrolled_exes: vec![PathBuf::from("/synthetic/exe")],
             ssh_keys: Vec::new(),
@@ -271,5 +277,34 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.enrolled_exes, vec![PathBuf::from("/synthetic/exe")]);
+    }
+
+    #[test]
+    fn enforcement_mode_serde_is_canonical_and_backward_compatible() {
+        let base = r#""browsers":[],"enrolled_exes":[],"ssh_keys":[]"#;
+        let parse = |mode: Option<&str>| {
+            let input = match mode {
+                Some(mode) => format!(r#"{{"enforcement_mode":{mode},{base}}}"#),
+                None => format!(r#"{{{base}}}"#),
+            };
+            serde_json::from_str::<EnforcementConfig>(&input)
+                .unwrap()
+                .enforcement_mode
+        };
+        assert_eq!(parse(None), EnforcementMode::Scoped);
+        assert_eq!(parse(Some("\"scoped\"")), EnforcementMode::Scoped);
+        assert_eq!(parse(Some("\"conservative\"")), EnforcementMode::Scoped);
+        assert_eq!(
+            parse(Some("\"strict-mount\"")),
+            EnforcementMode::StrictMount
+        );
+        assert_eq!(
+            parse(Some("\"strict-filesystem\"")),
+            EnforcementMode::StrictFilesystem
+        );
+        assert_eq!(
+            serde_json::to_string(&EnforcementMode::Scoped).unwrap(),
+            "\"scoped\""
+        );
     }
 }

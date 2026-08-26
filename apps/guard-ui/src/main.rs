@@ -224,9 +224,13 @@ fn build_ui(app: &adw::Application, pending_only: bool, layout_smoke_page: Optio
     apply.set_sensitive(false);
     let mode = gtk::ComboBoxText::new();
     if platform_service::shows_linux_mode() {
-        mode.append(Some("strict-filesystem"), "Strict Filesystem (recommended)");
-        mode.append(Some("conservative"), "Conservative (compatibility)");
-        mode.set_active_id(Some("strict-filesystem"));
+        mode.append(Some("scoped"), "Scoped (recommended)");
+        mode.append(Some("strict-mount"), "Strict Mount");
+        mode.append(
+            Some("strict-filesystem"),
+            "Strict Filesystem (high overhead)",
+        );
+        mode.set_active_id(Some("scoped"));
     }
     let browsers = gtk::ListBox::new();
     browsers.set_selection_mode(gtk::SelectionMode::None);
@@ -515,12 +519,13 @@ fn protection_page(state: &UiState) -> gtk::Box {
         let apply = state.apply.clone();
         mode.connect_changed(move |m| {
             if let Some(cfg) = candidate.borrow_mut().as_mut() {
-                cfg.enforcement_mode =
-                    Some(if m.active_id().as_deref() == Some("strict-filesystem") {
+                cfg.enforcement_mode = Some(match m.active_id().as_deref() {
+                    Some("strict-filesystem") => {
                         platform_service::LinuxEnforcementMode::StrictFilesystem
-                    } else {
-                        platform_service::LinuxEnforcementMode::Conservative
-                    });
+                    }
+                    Some("strict-mount") => platform_service::LinuxEnforcementMode::StrictMount,
+                    _ => platform_service::LinuxEnforcementMode::Scoped,
+                });
                 apply.set_sensitive(true);
             }
         });

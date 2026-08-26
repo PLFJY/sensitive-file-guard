@@ -8,9 +8,25 @@ Linux 的 authoritative backend 是 root 身份运行的 `guardd`，通过 fanot
 
 ## 防护模式
 
-- `strict-filesystem` 是 Linux 的主要防护模式，使用严格的文件系统资源索引和 inode 身份。
-- `conservative` 保留兼容性，但不应被描述为与严格模式等价的安全验收后端。
-- 没有非空、经过审阅的 `/etc/guardd/config.json` 时，服务不得显示为已配置或已保护。
+| 模式 | permission 范围 | 普通系统 I/O 成本 | 递归/新对象保证 |
+| --- | --- | --- | --- |
+| `scoped`（默认） | 仅受保护的文件和目录树 | 受保护命名空间外接近零 | topology watcher 刷新；新建嵌套目录仍有狭窄发现/标记竞态 |
+| `strict-mount` | 包含浏览器 profile 的现有 mount | 这些 mount 上的所有 open 都要经过 permission round trip | mount 范围的广覆盖 |
+| `strict-filesystem` | 包含浏览器 profile 的整个 filesystem | 可能很高；共享 FS 时会影响 `/usr` 和系统 exec | filesystem 范围的广覆盖 |
+
+`scoped` 不安装 filesystem 或 mount mark。它保留精确文件、SSH
+`FAN_ACCESS_PERM` 和已发现目录树标记；watcher 会重建替换对象的标记，但
+fanotify 目录标记不会自动继承给未来的新子目录，因此不能把它描述为无竞态的
+递归覆盖。旧 JSON 值 `conservative` 仅作为输入兼容，解析为 `scoped`；daemon
+启动时不会重写配置。
+
+Btrfs 上 `/` 和 `/home` 可以是同一文件系统中的不同 subvolume mount。
+`strict-mount` 标记实际的 `/home` mount，因而可以避开 `/`；
+`strict-filesystem` 则会标记整个 Btrfs filesystem，并可能拦截 `/usr/bin/*`。
+若 profile 本身在 `/`，strict-mount 也会有相应的广泛开销。记录的约 15–17 ms
+exec 回归仅是开发主机实测，不是通用平台延迟承诺。
+
+没有非空、经过审阅的 `/etc/guardd/config.json` 时，服务不得显示为已配置或已保护。
 
 ## 事件与决策
 
@@ -25,6 +41,10 @@ Linux fanotify 不总能提供打开者原始的读写标志，因此迁移授�
 ## 配置与审计
 
 `guardctl setup --home "$HOME"` 只根据已发现并验证的浏览器元数据生成配置，不猜测 SSH 私钥，也不会覆盖已有配置。审计日志只保存决策、资源类别和进程元数据，不保存 Cookie、密码、session token、数据库行或私钥内容。
+
+手动迁移：把 `"enforcement_mode": "strict-filesystem"` 改为 `"scoped"`
+即可采用默认的低开销范围；若浏览器 profile 位于合适的独立 mount，且需要更强的
+首次打开覆盖，可选择 `"strict-mount"`。已有 `strict-filesystem` 配置保持原行为。
 
 审计数据库最多保留最新 1000 条事件。写入器在每次批量提交时自动删除更早的记录；查询接口的 `limit` 只是返回数量上限。若写入队列瞬时满载，系统会丢弃新事件并增加 `audit_dropped` 计数，不会删除已经保存的旧事件。
 

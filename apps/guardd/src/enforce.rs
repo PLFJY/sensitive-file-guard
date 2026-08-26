@@ -1103,7 +1103,7 @@ mod tests {
             b.exe_paths.push(exe.to_path_buf());
         }
         EnforcementConfig {
-            enforcement_mode: EnforcementMode::Conservative,
+            enforcement_mode: EnforcementMode::Scoped,
             browsers: vec![b],
             enrolled_exes: vec![],
             ssh_keys: vec![],
@@ -1118,7 +1118,7 @@ mod tests {
     ) -> EnforcementConfig {
         let uid = unsafe { libc::getuid() };
         EnforcementConfig {
-            enforcement_mode: EnforcementMode::Conservative,
+            enforcement_mode: EnforcementMode::Scoped,
             browsers: vec![
                 BrowserEnrollmentConfig {
                     id: "chrome".into(),
@@ -1399,7 +1399,7 @@ mod tests {
     #[test]
     fn unclassified_ssh_access_event_fails_closed() {
         let cfg = EnforcementConfig {
-            enforcement_mode: EnforcementMode::Conservative,
+            enforcement_mode: EnforcementMode::Scoped,
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![],
@@ -1444,7 +1444,7 @@ mod tests {
     fn migration_config(chrome_root: &Path, ff_root: &Path, ff_exe: &Path) -> EnforcementConfig {
         let uid = unsafe { libc::getuid() };
         EnforcementConfig {
-            enforcement_mode: EnforcementMode::Conservative,
+            enforcement_mode: EnforcementMode::Scoped,
             browsers: vec![
                 BrowserEnrollmentConfig {
                     id: "chrome".into(),
@@ -1720,7 +1720,7 @@ mod tests {
 
     fn ssh_config(ssh_key: &Path) -> EnforcementConfig {
         EnforcementConfig {
-            enforcement_mode: EnforcementMode::Conservative,
+            enforcement_mode: EnforcementMode::Scoped,
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![ssh_key.to_path_buf()],
@@ -1743,7 +1743,7 @@ mod tests {
         let s = guard_test_fixtures::SshFixture::create().unwrap();
         // Empty config (no ssh_keys); enroll at runtime via protect_ssh_key.
         let cfg = EnforcementConfig {
-            enforcement_mode: EnforcementMode::Conservative,
+            enforcement_mode: EnforcementMode::Scoped,
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![],
@@ -1761,7 +1761,7 @@ mod tests {
     fn ssh_protect_rejects_pub_file() {
         let s = guard_test_fixtures::SshFixture::create().unwrap();
         let cfg = EnforcementConfig {
-            enforcement_mode: EnforcementMode::Conservative,
+            enforcement_mode: EnforcementMode::Scoped,
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![],
@@ -1775,7 +1775,7 @@ mod tests {
     fn ssh_protect_rejects_reserved_name() {
         let s = guard_test_fixtures::SshFixture::create().unwrap();
         let cfg = EnforcementConfig {
-            enforcement_mode: EnforcementMode::Conservative,
+            enforcement_mode: EnforcementMode::Scoped,
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![],
@@ -2085,7 +2085,7 @@ mod tests {
         // Authorizing a lease on a key that was never enrolled must error.
         let s = guard_test_fixtures::SshFixture::create().unwrap();
         let cfg = EnforcementConfig {
-            enforcement_mode: EnforcementMode::Conservative,
+            enforcement_mode: EnforcementMode::Scoped,
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![],
@@ -2222,7 +2222,7 @@ mod tests {
         std::fs::write(&cookies, b"synthetic").unwrap();
 
         let cfg = EnforcementConfig {
-            enforcement_mode: EnforcementMode::Conservative,
+            enforcement_mode: EnforcementMode::Scoped,
             browsers: vec![BrowserEnrollmentConfig {
                 id: "chrome".into(),
                 family: BrowserFamily::Chromium,

@@ -75,14 +75,17 @@ fn render_loader_cache(template: &str, app: &std::path::Path) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum LinuxEnforcementMode {
-    Conservative,
+    #[serde(alias = "conservative")]
+    Scoped,
+    StrictMount,
     StrictFilesystem,
 }
 
 impl LinuxEnforcementMode {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Conservative => "conservative",
+            Self::Scoped => "scoped",
+            Self::StrictMount => "strict-mount",
             Self::StrictFilesystem => "strict-filesystem",
         }
     }
@@ -672,8 +675,9 @@ pub fn set_user_agent_enabled(_enabled: bool) -> anyhow::Result<()> {
 pub fn editable_from_metadata(info: guard_ipc::ConfigurationInfo) -> Option<EditableConfiguration> {
     #[cfg(target_os = "linux")]
     let enforcement_mode = Some(match info.enforcement_mode.as_deref()? {
+        "scoped" | "conservative" => LinuxEnforcementMode::Scoped,
+        "strict-mount" => LinuxEnforcementMode::StrictMount,
         "strict-filesystem" => LinuxEnforcementMode::StrictFilesystem,
-        "conservative" => LinuxEnforcementMode::Conservative,
         _ => return None,
     });
     #[cfg(not(target_os = "linux"))]

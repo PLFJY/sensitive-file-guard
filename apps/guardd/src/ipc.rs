@@ -1552,7 +1552,7 @@ mod tests {
     fn ssh_read_approval_releases_engine_lock_and_keeps_audit_metadata_only() {
         let fixture = guard_test_fixtures::SshFixture::create().expect("SSH fixture");
         let config = EnforcementConfig {
-            enforcement_mode: EnforcementMode::Conservative,
+            enforcement_mode: EnforcementMode::Scoped,
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![fixture.private_key.clone()],
