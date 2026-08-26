@@ -173,10 +173,6 @@ impl StrictClassifier {
             });
         }
 
-        if browser_scope_paths.is_empty() {
-            anyhow::bail!("strict mode has no enrolled browser profile mount to mark");
-        }
-
         Ok(Self {
             browsers,
             ssh,
@@ -709,5 +705,30 @@ mod tests {
             .err()
             .expect("missing root must fail strict startup");
         assert!(error.to_string().contains("requires existing browser root"));
+    }
+
+    #[test]
+    fn strict_ssh_only_configuration_has_no_broad_scope() {
+        let temp = tempfile::tempdir().unwrap();
+        let key = temp.path().join("id_synthetic");
+        std::fs::write(&key, "synthetic fixture").unwrap();
+        let cfg = EnforcementConfig {
+            enforcement_mode: EnforcementMode::StrictMount,
+            browsers: Vec::new(),
+            enrolled_exes: Vec::new(),
+            ssh_keys: vec![key.clone()],
+        };
+        let metrics = std::sync::Arc::new(BackendMetrics::new(EnforcementMode::StrictMount));
+        let index = std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+        let classifier = StrictClassifier::new(&cfg, index, metrics).unwrap();
+
+        assert!(classifier.browser_scope_paths().is_empty());
+        assert!(classifier.filesystem_scope_paths().is_empty());
+        let file = std::fs::File::open(key).unwrap();
+        assert!(matches!(
+            classifier.classify_fd(file.as_raw_fd()),
+            StrictClassification::Protected(resource)
+                if resource.kind == ProtectedResourceKind::SshPrivateKey
+        ));
     }
 }

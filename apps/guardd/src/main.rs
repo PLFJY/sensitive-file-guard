@@ -497,7 +497,7 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                             backend_metrics
                                 .protected_events
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            // Strict's filesystem mark sees the SSH open as
+                            // A broad browser scope can see the SSH open as
                             // well as the exact-file access mark. The actual
                             // read remains the sole SSH mediation point.
                             if resource.kind == guard_core::ProtectedResourceKind::SshPrivateKey

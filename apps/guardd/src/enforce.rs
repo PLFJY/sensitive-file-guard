@@ -500,8 +500,8 @@ impl EnforcementEngine {
         Ok(n)
     }
 
-    /// Install exact-file SSH read marks in Strict mode, whose filesystem-wide
-    /// open marks intentionally remain browser-focused.  The duplicate inode
+    /// Install exact-file SSH read marks in strict modes, whose broad browser
+    /// open marks intentionally remain browser-focused. The duplicate inode
     /// mark is small and is re-applied after topology refresh so a replaced
     /// runtime-enrolled key cannot silently lose its narrow read mediation.
     pub fn mark_ssh_read_files(&self, group: &fanotify::FanotifyGroup) -> std::io::Result<usize> {

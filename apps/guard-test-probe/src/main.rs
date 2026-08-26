@@ -18,6 +18,7 @@ const MAX_CANARY_LEN: usize = 256;
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
+        Some("noop") if args.len() == 2 => ExitCode::SUCCESS,
         Some("read") if args.len() == 3 => do_read(Path::new(&args[2])),
         Some("mmap") if args.len() == 3 => do_mmap(Path::new(&args[2])),
         Some("sqlite") if args.len() == 3 => do_sqlite(Path::new(&args[2])),
@@ -95,6 +96,7 @@ fn print_usage() {
     eprintln!(
         "usage: guard-test-probe COMMAND ...\n\
          commands:\n\
+           noop\n\
            read PATH\n\
            mmap PATH\n\
            sqlite DATABASE\n\

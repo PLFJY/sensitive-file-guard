@@ -36,10 +36,15 @@ case "$ENFORCEMENT_MODE" in
   *) echo "ERROR: ENFORCEMENT_MODE must be scoped, strict-mount, or strict-filesystem"; exit 2 ;;
 esac
 
-echo "==> Building topology race probe and daemon"
-cargo build --manifest-path "$REPO/Cargo.toml" -p guardd -p guard-test-probe
 GUARDD="$REPO/target/debug/guardd"
 PROBE="$REPO/target/debug/guard-test-probe"
+echo "==> Checking pre-built topology race probe and daemon"
+for artifact in "$GUARDD" "$PROBE"; do
+  [ -x "$artifact" ] || {
+    echo "ERROR: missing $artifact; run cargo build -p guardd -p guard-test-probe as the normal user first"
+    exit 2
+  }
+done
 
 PROFILE_ROOT="$WORK/disposable-chromium"
 COOKIE="$PROFILE_ROOT/Default/Network/Cookies"
