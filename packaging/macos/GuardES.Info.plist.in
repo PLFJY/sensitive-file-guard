@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleDisplayName</key>
-    <string>Guard Endpoint Security</string>
+    <string>Sensitive File Guard Endpoint Security</string>
     <key>CFBundleExecutable</key>
     <string>guard-es</string>
     <key>CFBundleIdentifier</key>
@@ -21,7 +21,7 @@
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>NSSystemExtensionUsageDescription</key>
-    <string>Guard uses Endpoint Security to authorize access to explicitly protected local browser and SSH resources before data is disclosed.</string>
+    <string>Sensitive File Guard uses Endpoint Security to authorize access to explicitly protected local browser and SSH resources before data is disclosed.</string>
     <key>NSEndpointSecurityMachServiceName</key>
     <string>@XPC_SERVICE_NAME@</string>
 </dict>

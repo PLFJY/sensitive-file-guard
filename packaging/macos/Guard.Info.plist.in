@@ -3,17 +3,17 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleDisplayName</key>
-    <string>Guard</string>
+    <string>Sensitive File Guard</string>
     <key>CFBundleExecutable</key>
-    <string>Guard</string>
+    <string>SensitiveFileGuard</string>
     <key>CFBundleIdentifier</key>
     <string>@APP_BUNDLE_ID@</string>
     <key>CFBundleIconFile</key>
-    <string>Guard.icns</string>
+    <string>SensitiveFileGuard.icns</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>Guard</string>
+    <string>Sensitive File Guard</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

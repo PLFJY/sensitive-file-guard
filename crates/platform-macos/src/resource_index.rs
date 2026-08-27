@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+use std::path::PathBuf;
 
 use guard_browser::{CustomProfile, ProtectedResourceRegistry, TreeRoot};
 use guard_core::resource::{
@@ -9,6 +10,39 @@ use guard_core::resource::{
 use crate::browser_trust::MacBrowserEnrollment;
 
 pub const DEFAULT_ALIAS_CAPACITY: usize = 65_536;
+
+/// A native Endpoint Security target-path rule.  This deliberately stays
+/// close to the SDK terminology: the resource index owns *what* is selected;
+/// the C boundary owns the Endpoint Security call itself.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TargetPathRule {
+    pub path: PathBuf,
+    pub prefix: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TargetSelectionPlan {
+    rules: Vec<TargetPathRule>,
+}
+
+impl TargetSelectionPlan {
+    pub fn rules(&self) -> &[TargetPathRule] {
+        &self.rules
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rules.is_empty()
+    }
+
+    pub fn from_rules(rules: impl IntoIterator<Item = TargetPathRule>) -> Self {
+        let rules = rules
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        Self { rules }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamespaceScope {
@@ -32,6 +66,7 @@ pub struct MacResourceIndex {
     ssh_paths: HashMap<std::path::PathBuf, ProtectedResource>,
     alias_capacity: usize,
     alias_saturated: bool,
+    unresolved_external_hardlinks: usize,
 }
 
 impl Default for MacResourceIndex {
@@ -44,6 +79,7 @@ impl Default for MacResourceIndex {
             ssh_paths: HashMap::new(),
             alias_capacity: DEFAULT_ALIAS_CAPACITY,
             alias_saturated: false,
+            unresolved_external_hardlinks: 0,
         }
     }
 }
@@ -251,14 +287,13 @@ impl MacResourceIndex {
 
         self.aliases.clear();
         self.alias_saturated = false;
-        let roots = self
-            .profiles
-            .iter()
-            .map(|profile| profile.root.clone())
-            .chain(self.tree_roots.values().map(|tree| tree.dir.clone()))
-            .collect::<Vec<_>>();
+        self.unresolved_external_hardlinks = 0;
+        let roots = self.namespace_scan_roots();
         let mut stack = roots;
         let mut visited = 0usize;
+        let mut in_scope_links = HashMap::<FileIdentity, u64>::new();
+        let mut observed_links = HashMap::<FileIdentity, u64>::new();
+        let mut seen_entries = std::collections::HashSet::<PathBuf>::new();
         while let Some(directory) = stack.pop() {
             let entries = match std::fs::read_dir(&directory) {
                 Ok(entries) => entries,
@@ -281,22 +316,147 @@ impl MacResourceIndex {
                     stack.push(path);
                     continue;
                 }
+                if !seen_entries.insert(path.clone()) {
+                    continue;
+                }
                 let Some(resource) = self.classify_path(&path) else {
                     continue;
                 };
                 let metadata = entry.metadata()?;
-                if !self.observe_alias(
-                    FileIdentity {
-                        dev: metadata.dev(),
-                        ino: metadata.ino(),
-                    },
-                    resource,
-                ) {
+                let identity = FileIdentity {
+                    dev: metadata.dev(),
+                    ino: metadata.ino(),
+                };
+                *in_scope_links.entry(identity).or_default() += 1;
+                observed_links.entry(identity).or_insert(metadata.nlink());
+                if !self.observe_alias(identity, resource) {
                     return Ok(());
                 }
             }
         }
+        self.unresolved_external_hardlinks = observed_links
+            .into_iter()
+            .filter(|(identity, links)| {
+                self.concrete(*identity).is_some()
+                    && in_scope_links.get(identity).copied().unwrap_or(0) < *links
+            })
+            .count();
         Ok(())
+    }
+
+    /// Build the smallest native selection set from the same policy model used
+    /// for Rust classification.  Safari's conceptual enrollment root is
+    /// `~/Library`; selecting that prefix would route unrelated Library opens
+    /// through the authorization client, so only Safari's actual namespaces
+    /// and the exact ancestors needed for rename protection are included.
+    pub fn target_selection_plan(&self) -> TargetSelectionPlan {
+        let mut rules = Vec::new();
+        for resource in self.files.values() {
+            rules.push(TargetPathRule {
+                path: resource.path.clone(),
+                prefix: false,
+            });
+        }
+        for path in self.ssh_paths.keys() {
+            rules.push(TargetPathRule {
+                path: path.clone(),
+                prefix: false,
+            });
+            if let Some(parent) = path.parent() {
+                // A literal parent selects `RENAME`/`LINK` operations that
+                // move the key's immediate namespace without subscribing to
+                // every descendant of the user's home directory.
+                rules.push(TargetPathRule {
+                    path: parent.to_path_buf(),
+                    prefix: false,
+                });
+            }
+        }
+        for tree in self.tree_roots.values() {
+            rules.push(TargetPathRule {
+                path: tree.dir.clone(),
+                prefix: true,
+            });
+        }
+        for profile in &self.profiles {
+            match profile.family {
+                BrowserFamily::Safari => {
+                    let safari = profile.root.join("Safari");
+                    let container = profile.root.join("Containers/com.apple.Safari");
+                    let library = container.join("Data/Library");
+                    rules.extend([
+                        TargetPathRule {
+                            path: safari,
+                            prefix: true,
+                        },
+                        TargetPathRule {
+                            path: container,
+                            prefix: false,
+                        },
+                        TargetPathRule {
+                            path: library,
+                            prefix: true,
+                        },
+                        // These literals select namespace moves without making
+                        // every descendant of ~/Library observable.
+                        TargetPathRule {
+                            path: profile.root.join("Containers"),
+                            prefix: false,
+                        },
+                        TargetPathRule {
+                            path: profile.root.clone(),
+                            prefix: false,
+                        },
+                    ]);
+                }
+                BrowserFamily::Chromium | BrowserFamily::Firefox | BrowserFamily::Zen => {
+                    rules.push(TargetPathRule {
+                        path: profile.root.clone(),
+                        prefix: true,
+                    });
+                    rules.push(TargetPathRule {
+                        path: profile.root.clone(),
+                        prefix: false,
+                    });
+                }
+            }
+        }
+        TargetSelectionPlan::from_rules(rules)
+    }
+
+    pub fn unresolved_external_hardlink_count(&self) -> usize {
+        self.unresolved_external_hardlinks
+    }
+
+    fn namespace_scan_roots(&self) -> Vec<PathBuf> {
+        let mut roots = BTreeSet::new();
+        for profile in &self.profiles {
+            match profile.family {
+                BrowserFamily::Safari => {
+                    roots.insert(profile.root.join("Safari"));
+                    roots.insert(
+                        profile
+                            .root
+                            .join("Containers/com.apple.Safari/Data/Library"),
+                    );
+                }
+                BrowserFamily::Chromium | BrowserFamily::Firefox | BrowserFamily::Zen => {
+                    roots.insert(profile.root.clone());
+                }
+            }
+        }
+        roots.extend(
+            self.files
+                .values()
+                .filter_map(|resource| resource.path.parent().map(PathBuf::from)),
+        );
+        roots.extend(
+            self.ssh_paths
+                .keys()
+                .filter_map(|path| path.parent().map(PathBuf::from)),
+        );
+        roots.extend(self.tree_roots.values().map(|tree| tree.dir.clone()));
+        roots.into_iter().collect()
     }
 
     pub fn resources(&self) -> impl Iterator<Item = &ProtectedResource> {
@@ -817,6 +977,15 @@ mod tests {
         let key = std::fs::canonicalize(key).unwrap();
         let index = MacResourceIndex::from_enrollments(&[], std::slice::from_ref(&key)).unwrap();
         assert_eq!(index.ssh_key_count(), 1);
+        let plan = index.target_selection_plan();
+        assert!(plan
+            .rules()
+            .iter()
+            .any(|rule| rule.path == key && !rule.prefix));
+        assert!(plan
+            .rules()
+            .iter()
+            .any(|rule| { rule.path == key.parent().unwrap() && !rule.prefix }));
 
         let alias = temp.path().join("alias");
         std::fs::hard_link(&key, &alias).unwrap();
@@ -850,5 +1019,52 @@ mod tests {
             ProtectedResourceKind::SshPrivateKey
         );
         assert!(index.is_configured_ssh_resource(&replacement_resource));
+    }
+
+    #[test]
+    fn selection_plan_keeps_safari_library_narrow() {
+        let temp = tempfile::tempdir().unwrap();
+        let library = temp.path().join("Library");
+        std::fs::create_dir_all(library.join("Safari")).unwrap();
+        let index = MacResourceIndex::from_browser_enrollments(&[MacBrowserEnrollment {
+            browser_id: BrowserId("safari".into()),
+            family: BrowserFamily::Safari,
+            profile_root: library.clone(),
+            owner_uid: 501,
+            app_bundle: None,
+            executables: vec![],
+        }])
+        .unwrap();
+        let plan = index.target_selection_plan();
+        assert!(plan
+            .rules()
+            .iter()
+            .any(|rule| rule.path == library.join("Safari") && rule.prefix));
+        assert!(!plan
+            .rules()
+            .iter()
+            .any(|rule| rule.path == library && rule.prefix));
+    }
+
+    #[test]
+    fn unresolved_external_hardlink_is_reported_before_enforcement() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("Chrome");
+        let cookies = root.join("Default/Network/Cookies");
+        std::fs::create_dir_all(cookies.parent().unwrap()).unwrap();
+        std::fs::write(&cookies, b"synthetic cookie db").unwrap();
+        std::fs::write(root.join("Default/Preferences"), b"synthetic").unwrap();
+        std::fs::hard_link(&cookies, temp.path().join("outside-alias")).unwrap();
+        let index = MacResourceIndex::from_browser_enrollments(&[MacBrowserEnrollment {
+            browser_id: BrowserId("chrome".into()),
+            family: BrowserFamily::Chromium,
+            profile_root: root,
+            owner_uid: 501,
+            app_bundle: None,
+            executables: vec![],
+        }])
+        .unwrap();
+        assert!(index.concrete_count() > 0);
+        assert!(index.unresolved_external_hardlink_count() > 0);
     }
 }

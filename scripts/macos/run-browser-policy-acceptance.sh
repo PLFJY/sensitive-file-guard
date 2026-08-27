@@ -2,7 +2,13 @@
 set -eu
 
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
-app=${GUARD_APP:-$repo_dir/build/macos/Guard.app}
+if [ -n "${GUARD_APP:-}" ]; then
+    app=$GUARD_APP
+elif [ -x '/Applications/Sensitive File Guard.app/Contents/MacOS/guardctl' ]; then
+    app='/Applications/Sensitive File Guard.app'
+else
+    app="$repo_dir/build/macos/Sensitive File Guard.app"
+fi
 guardctl="$app/Contents/MacOS/guardctl"
 chrome='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
 firefox='/Applications/Firefox.app/Contents/MacOS/firefox'
@@ -14,7 +20,7 @@ for required in "$guardctl" "$chrome" "$firefox"; do
     fi
 done
 
-status=$($guardctl --json status 2>&1) || {
+status=$("$guardctl" --json status 2>&1) || {
     echo "BLOCKED: signed guardctl cannot reach the activated extension" >&2
     printf '%s\n' "$status" >&2
     exit 77
@@ -76,7 +82,7 @@ INSTRUCTIONS
 printf 'Press Return after the disposable policy is active: '
 read -r _answer
 
-status=$($guardctl --json status)
+status=$("$guardctl" --json status)
 printf '%s\n' "$status" | grep -Eq \
     '"enforcement_active"[[:space:]]*:[[:space:]]*true'
 printf '%s\n' "$status" | grep -Eq \
@@ -110,7 +116,7 @@ HOME="$test_home" "$firefox" --no-remote --offline --profile "$firefox_profile" 
 printf 'Press Return after the Allow result and import completion are visible: '
 read -r _answer
 
-events=$($guardctl --json events --limit 500)
+events=$("$guardctl" --json events --limit 500)
 printf '%s\n' "$events" | grep -q 'browser_migration_confirmation_required'
 printf '%s\n' "$events" | grep -q 'browser_migration_blocked'
 printf '%s\n' "$events" | grep -q 'browser_migration_allowed'

@@ -9,7 +9,7 @@ fi
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH= cd -- "$script_dir/../.." && pwd)
 build_root=${MACOS_RELEASE_ROOT:-"$repo_dir/build/macos-release"}
-app="$build_root/Guard.app"
+app="$build_root/Sensitive File Guard.app"
 version=${GUARD_VERSION:-0.1.0}
 architecture=$(uname -m)
 local_only=${LOCAL_SIGNING_ONLY:-0}
@@ -22,19 +22,23 @@ if [ "$local_only" = 1 ] && [ "$self_use" = 1 ]; then
     exit 2
 fi
 if [ "$self_use" = 1 ]; then
-    identity=${SELF_USE_SIGNING_IDENTITY:?SELF_USE_SIGNING_IDENTITY is required for SELF_USE_SIP_OFF=1}
-    signing_keychain=${SELF_USE_SIGNING_KEYCHAIN:-}
-    if [ -n "$signing_keychain" ]; then
-        keychain_password=$(security find-generic-password -a "$signing_keychain" \
-            -s top.plfjy.SensitiveFileGuard.self-use-keychain -w 2>/dev/null || \
-            security find-generic-password -a "$USER" \
-                -s top.plfjy.SensitiveFileGuard.self-use-keychain -w 2>/dev/null) || {
-            echo "cannot unlock SELF_USE_SIGNING_KEYCHAIN: local keychain password is unavailable" >&2
-            exit 2
-        }
-        security unlock-keychain -p "$keychain_password" "$signing_keychain"
-        unset keychain_password
+    identity=${SFG_SELF_USE_SIGNING_IDENTITY:-'Sensitive File Guard Local Development'}
+    signing_keychain=${SFG_SELF_USE_SIGNING_KEYCHAIN:-"$HOME/Library/Keychains/SensitiveFileGuardSelfUse.keychain-db"}
+    if ! "$script_dir/resolve-self-use-signing-identity.sh" \
+        "$identity" "$signing_keychain" >/dev/null 2>&1; then
+        SFG_SELF_USE_SIGNING_IDENTITY="$identity" \
+        SFG_SELF_USE_SIGNING_KEYCHAIN="$signing_keychain" \
+            "$script_dir/create-self-use-signing-identity.sh"
     fi
+    keychain_password=$(security find-generic-password -a "$signing_keychain" \
+        -s top.plfjy.SensitiveFileGuard.self-use-keychain -w 2>/dev/null || \
+        security find-generic-password -a "$USER" \
+            -s top.plfjy.SensitiveFileGuard.self-use-keychain -w 2>/dev/null) || {
+        echo "cannot unlock self-use signing keychain: $signing_keychain" >&2
+        exit 2
+    }
+    security unlock-keychain -p "$keychain_password" "$signing_keychain"
+    unset keychain_password
     identity=$("$script_dir/resolve-self-use-signing-identity.sh" \
         "$identity" "$signing_keychain")
     signing_mode=self-use
@@ -76,7 +80,7 @@ SELF_USE_SIP_OFF=0 MACOS_BUILD_ROOT="$build_root" BUILD_PROFILE=release SKIP_SIG
 "$script_dir/bundle-gtk-runtime.sh" "$app"
 "$script_dir/build-app-icon.sh" \
     "$repo_dir/data/io.github.plfjy.SensitiveFileGuard.svg" \
-    "$app/Contents/Resources/Guard.icns"
+    "$app/Contents/Resources/SensitiveFileGuard.icns"
 
 if [ "$signing_mode" = self-use ]; then
     printf '%s\n%s\n' \
@@ -147,7 +151,7 @@ if [ "$signing_mode" = release ]; then
     }
 fi
 
-archive="$build_root/Guard-$version-$architecture.zip"
+archive="$build_root/Sensitive-File-Guard-$version-$architecture.zip"
 rm -f -- "$archive"
 ditto -c -k --keepParent "$app" "$archive"
 echo "release bundle: $app"

@@ -8,6 +8,11 @@
 typedef struct guard_es_client guard_es_client_t;
 
 typedef struct {
+    const char *path;
+    bool prefix;
+} guard_es_target_path_t;
+
+typedef struct {
     int32_t pid;
     uint32_t uid;
     uint32_t gid;
@@ -105,7 +110,18 @@ int guard_es_client_create(
     guard_es_namespace_callback_t namespace_callback,
     guard_es_sequence_callback_t sequence_callback,
     void *context);
-int guard_es_client_subscribe_required(guard_es_client_t *client);
+int guard_es_client_subscribe_authorization(guard_es_client_t *client);
+int guard_es_client_subscribe_process_graph(guard_es_client_t *client);
+int guard_es_client_configure_target_paths(
+    guard_es_client_t *client,
+    const guard_es_target_path_t *paths,
+    size_t path_count);
+int guard_es_client_update_target_paths(
+    guard_es_client_t *client,
+    const guard_es_target_path_t *paths,
+    size_t path_count,
+    bool mute);
+bool guard_es_client_target_path_inversion_active(const guard_es_client_t *client);
 int guard_es_client_delete(guard_es_client_t *client);
 
 void guard_es_message_retain(const void *message);

@@ -151,8 +151,9 @@ fn bundled_endpoint_security_entitlement_present() -> anyhow::Result<bool> {
     static RESULT: std::sync::OnceLock<Result<bool, String>> = std::sync::OnceLock::new();
     RESULT
         .get_or_init(|| {
-            let app = current_app_bundle()
-                .ok_or_else(|| String::from("Unable to locate the current Guard.app bundle"))?;
+            let app = current_app_bundle().ok_or_else(|| {
+                String::from("Unable to locate the current Sensitive File Guard.app bundle")
+            })?;
             platform_macos::system_extension::bundled_endpoint_security_entitlement_present(
                 &app,
                 platform_macos::DEFAULT_EXTENSION_BUNDLE_ID,
@@ -278,13 +279,13 @@ pub fn mac_setup_readiness() -> MacSetupReadiness {
     if self_use && !sip_is_disabled().unwrap_or(false) {
         return MacSetupReadiness {
             can_request_extension_install: false,
-            explanation: "This is a SIP-off self-use build, but SIP is still enabled. Run csrutil disable manually from macOS Recovery, restart, and return to install the extension; Guard will not and cannot modify SIP for you.".into(),
+            explanation: "This is a SIP-off self-use build, but SIP is still enabled. Run csrutil disable manually from macOS Recovery, restart, and return to install the extension; Sensitive File Guard will not and cannot modify SIP for you.".into(),
         };
     }
     if self_use && !self_use_app_is_in_applications() {
         return MacSetupReadiness {
             can_request_extension_install: false,
-            explanation: "SIP-off self-use builds must be launched from /Applications for macOS to accept protection extension installation. Copy Guard.app to /Applications and reopen it; do not install from the build/ directory.".into(),
+            explanation: "SIP-off self-use builds must be launched from /Applications for macOS to accept protection extension installation. Copy Sensitive File Guard.app to /Applications and reopen it; do not install from the build/ directory.".into(),
         };
     }
     let host_entitlement = host_install_entitlement_present();
@@ -300,7 +301,7 @@ pub fn mac_setup_readiness() -> MacSetupReadiness {
         },
         (Ok(false), _) => MacSetupReadiness {
             can_request_extension_install: false,
-            explanation: "The final signed Guard host is missing com.apple.developer.system-extension.install; installation is disabled. Rebuild the package in the correct signing mode and do not try to activate it.".into(),
+            explanation: "The final signed Sensitive File Guard host is missing com.apple.developer.system-extension.install; installation is disabled. Rebuild the package in the correct signing mode and do not try to activate it.".into(),
         },
         (_, Ok(false)) => MacSetupReadiness {
             can_request_extension_install: false,
@@ -308,11 +309,11 @@ pub fn mac_setup_readiness() -> MacSetupReadiness {
         },
         (Err(error), _) => MacSetupReadiness {
             can_request_extension_install: false,
-            explanation: format!("Guard could not inspect the host installation entitlement: {error}"),
+            explanation: format!("Sensitive File Guard could not inspect the host installation entitlement: {error}"),
         },
         (_, Err(error)) => MacSetupReadiness {
             can_request_extension_install: false,
-            explanation: format!("Guard could not inspect the bundled Endpoint Security entitlement: {error}"),
+            explanation: format!("Sensitive File Guard could not inspect the bundled Endpoint Security entitlement: {error}"),
         },
     }
 }
@@ -338,14 +339,14 @@ pub fn request_system_extension_install() -> anyhow::Result<String> {
                 .into(),
         ),
         LifecycleState::UserApprovalRequired => Ok(
-            "macOS received the protection extension install/update request and is waiting for user approval. Allow Guard in the Endpoint Security Extensions pane in System Settings, then return here and refresh the status."
+            "macOS received the protection extension install/update request and is waiting for user approval. Allow Sensitive File Guard in the Endpoint Security Extensions pane in System Settings, then return here and refresh the status."
                 .into(),
         ),
         LifecycleState::RestartRequired => Ok(
             "macOS accepted the protection extension update, but a restart is required. The new version will not be reported as active before restarting.".into(),
         ),
         LifecycleState::Deactivated => anyhow::bail!(
-            "macOS reported that the extension is not active: {}. Confirm that the Guard extension has not been disabled in System Settings.",
+            "macOS reported that the extension is not active: {}. Confirm that the Sensitive File Guard extension has not been disabled in System Settings.",
             status.diagnostic
         ),
         LifecycleState::Failed | LifecycleState::Unknown | LifecycleState::Submitted => {
@@ -527,11 +528,14 @@ fn mac_extension_state(xpc_reachable: bool) -> String {
     if controller.refresh().is_err() {
         return "Error".into();
     }
-    for _ in 0..10 {
+    // OSSystemExtension properties are delivered asynchronously. A 250 ms
+    // sample routinely races the reply and makes an active extension look
+    // uninstalled while the control-plane XPC service is starting.
+    for _ in 0..30 {
         let state = controller.status().map(|status| status.state);
         match state {
             Ok(LifecycleState::Submitted) => {
-                std::thread::sleep(std::time::Duration::from_millis(25));
+                std::thread::sleep(std::time::Duration::from_millis(100));
             }
             Ok(LifecycleState::UserApprovalRequired) => return "Pending approval".into(),
             Ok(LifecycleState::Active) => return "Active".into(),

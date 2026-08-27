@@ -7,7 +7,7 @@
 | 平台 | 交付方式 | 状态 |
 | --- | --- | --- |
 | Linux | root `guardd` + fanotify + systemd | 仅保护已配置的浏览器文件、目录树和 SSH 私钥读取 |
-| macOS | `Guard.app` + Endpoint Security system extension | 自用实验路径；需要 SIP 关闭、开发模式、本地签名和用户授权 |
+| macOS | `Sensitive File Guard.app` + Endpoint Security system extension | 自用实验路径；需要 SIP 关闭、开发模式、本地签名和用户授权 |
 
 macOS 自用路径是当前首选开发路径，故意不等待 Apple provisioning、Developer ID 或公证。它不是 SIP 开启的消费者分发包。Guard 不会自动关闭 SIP、修改 TCC 数据库或自动授予完全磁盘访问权限。
 
@@ -41,7 +41,7 @@ macOS 自用包（必须先在 Recovery 手动关闭 SIP；脚本不会自动激
 scripts/macos/build-deploy-self-use.sh
 ```
 
-脚本会把旧的 `/Applications/Guard.app` 移入 `~/.Trash` 作为可恢复备份，不会删除旧包。
+脚本会把已安装的 `/Applications/Sensitive File Guard.app` 和遗留的 `/Applications/Guard.app` 移入 `~/.Trash` 作为可恢复备份，不会删除旧包。
 
 ## 安全测试规则
 

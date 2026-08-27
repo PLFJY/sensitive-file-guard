@@ -115,6 +115,11 @@ pub struct BackendHealth {
     pub namespace_alias_capacity: usize,
     pub namespace_index_saturated: bool,
     pub process_graph_degraded: bool,
+    pub authorization_events_delivered: u64,
+    pub protected_authorization_events: u64,
+    pub unresolved_external_hardlinks: usize,
+    pub target_path_inversion_active: bool,
+    pub process_lifecycle_events: u64,
 }
 
 /// Portable artifact attribution input.  Quarantine mechanics remain an

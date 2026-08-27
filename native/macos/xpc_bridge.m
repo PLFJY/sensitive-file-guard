@@ -175,8 +175,10 @@ guard_xpc_server_t *guard_xpc_server_create(
         return NULL;
     }
     atomic_init(&server->active_requests, 0);
-    server->listener =
-        [[NSXPCListener alloc] initWithMachServiceName:service];
+    // NSEndpointSecurityMachServiceName is a named system-extension Mach
+    // service. Foundation binds this listener to that declared service; it is
+    // not an embedded XPC-service bundle and must not use serviceListener.
+    server->listener = [[NSXPCListener alloc] initWithMachServiceName:service];
     server->delegate = [GuardXPCListenerDelegate new];
     server->delegate.clientRequirement = requirement;
     server->delegate.maximumRequestBytes = maximum_request_bytes;

@@ -8,7 +8,7 @@ fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH= cd -- "$script_dir/../.." && pwd)
-app=${1:-"$repo_dir/build/macos-release/Guard.app"}
+app=${1:-"$repo_dir/build/macos-release/Sensitive File Guard.app"}
 expected_arch=${EXPECTED_ARCH:-$(uname -m)}
 signing_mode=${VERIFY_SIGNING_MODE:-release}
 
@@ -18,12 +18,12 @@ case "$signing_mode" in
 esac
 
 for required in \
-    "$app/Contents/MacOS/Guard" \
+    "$app/Contents/MacOS/SensitiveFileGuard" \
     "$app/Contents/MacOS/guardctl" \
     "$app/Contents/MacOS/guard-notify" \
     "$app/Contents/Frameworks" \
     "$app/Contents/Resources/guard-release-runtime" \
-    "$app/Contents/Resources/Guard.icns" \
+    "$app/Contents/Resources/SensitiveFileGuard.icns" \
     "$app/Contents/Resources/gdk-pixbuf/loaders.cache.in" \
     "$app/Contents/Resources/share/glib-2.0/schemas/gschemas.compiled" \
     "$app/Contents/Resources/THIRD_PARTY_NOTICES.md"; do
@@ -38,8 +38,8 @@ agent=$(find "$app/Contents/Library/LaunchAgents" -maxdepth 1 -type f \
 test -n "$agent" || { echo "embedded LaunchAgent is missing" >&2; exit 2; }
 
 plutil -lint "$app/Contents/Info.plist" "$extension/Contents/Info.plist" "$agent" >/dev/null
-test "$(plutil -extract CFBundleIconFile raw "$app/Contents/Info.plist")" = Guard.icns
-file "$app/Contents/Resources/Guard.icns" | grep -q 'Mac OS X icon'
+test "$(plutil -extract CFBundleIconFile raw "$app/Contents/Info.plist")" = SensitiveFileGuard.icns
+file "$app/Contents/Resources/SensitiveFileGuard.icns" | grep -q 'Mac OS X icon'
 codesign --verify --strict --verbose=2 "$extension"
 codesign --verify --strict --verbose=2 "$app/Contents/MacOS/guardctl"
 codesign --verify --strict --verbose=2 "$app/Contents/MacOS/guard-notify"
@@ -48,9 +48,9 @@ codesign --verify --deep --strict --verbose=2 "$app"
 # Notifications must originate in the signed Guard process. A stale helper
 # that still embeds the historical osascript/Script Editor bridge is not a
 # valid release artifact, even if the rest of its code signature is valid.
-if strings "$app/Contents/MacOS/Guard" "$app/Contents/MacOS/guard-notify" \
+if strings "$app/Contents/MacOS/SensitiveFileGuard" "$app/Contents/MacOS/guard-notify" \
     | grep -Eiq '/usr/bin/osascript|display notification|Script Editor'; then
-    echo "legacy Script Editor notification path remains in Guard.app" >&2
+    echo "legacy Script Editor notification path remains in Sensitive File Guard.app" >&2
     exit 2
 fi
 
@@ -108,7 +108,7 @@ find "$app/Contents/Frameworks" "$app/Contents/Resources/gdk-pixbuf/loaders" \
     fi
 done
 
-for executable in "$app/Contents/MacOS/Guard" "$app/Contents/MacOS/guardctl" \
+for executable in "$app/Contents/MacOS/SensitiveFileGuard" "$app/Contents/MacOS/guardctl" \
     "$app/Contents/MacOS/guard-notify" "$extension/Contents/MacOS/guard-es"; do
     lipo -archs "$executable" | tr ' ' '\n' | grep -qx "$expected_arch" || {
         echo "required architecture $expected_arch missing from $executable" >&2
@@ -128,4 +128,4 @@ grep -q '@GUARD_APP@/Contents/Resources/gdk-pixbuf/loaders' \
 if [ "${VERIFY_GATEKEEPER:-0}" = 1 ]; then
     spctl --assess --type execute --verbose=4 "$app"
 fi
-echo "PASS: self-contained $signing_mode-signed Guard.app verified for $expected_arch"
+echo "PASS: self-contained $signing_mode-signed Sensitive File Guard.app verified for $expected_arch"

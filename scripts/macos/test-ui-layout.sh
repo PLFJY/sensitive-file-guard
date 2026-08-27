@@ -8,8 +8,8 @@ fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH= cd -- "$script_dir/../.." && pwd)
-app=${1:-"$repo_dir/build/macos-release/Guard.app"}
-guard="$app/Contents/MacOS/Guard"
+app=${1:-"$repo_dir/build/macos-release/Sensitive File Guard.app"}
+guard="$app/Contents/MacOS/SensitiveFileGuard"
 test -x "$guard" || {
     echo "Guard executable is missing: $guard" >&2
     exit 2

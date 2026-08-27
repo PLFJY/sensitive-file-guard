@@ -20,7 +20,7 @@ use crate::pending::{
 pub use crate::pending::{
     MacPendingPermission, ReadOnlyMacPendingPermission, ES_FFLAG_READ, ES_FFLAG_WRITE,
 };
-use crate::resource_index::FileIdentity;
+use crate::resource_index::{FileIdentity, TargetPathRule, TargetSelectionPlan};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthOpenFacts {
@@ -110,6 +110,13 @@ impl MacProtectedResources {
             .ssh_key_count()
     }
 
+    pub fn target_selection_plan(&self) -> crate::resource_index::TargetSelectionPlan {
+        self.index
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .target_selection_plan()
+    }
+
     fn has_protected_scope(&self) -> bool {
         self.enabled()
             && !self
@@ -170,6 +177,13 @@ impl MacProtectedResources {
             index.alias_capacity(),
             index.alias_saturated(),
         )
+    }
+
+    pub fn unresolved_external_hardlink_count(&self) -> usize {
+        self.index
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unresolved_external_hardlink_count()
     }
 
     fn namespace_view(
@@ -265,6 +279,18 @@ impl EndpointSecurityConfig {
         match &self.scope {
             ProtectionScope::Synthetic(paths) => !paths.is_empty(),
             ProtectionScope::Browser { resources, .. } => resources.has_protected_scope(),
+        }
+    }
+
+    pub fn target_selection_plan(&self) -> TargetSelectionPlan {
+        match &self.scope {
+            ProtectionScope::Synthetic(paths) => {
+                TargetSelectionPlan::from_rules(paths.iter().cloned().map(|path| TargetPathRule {
+                    path,
+                    prefix: false,
+                }))
+            }
+            ProtectionScope::Browser { resources, .. } => resources.target_selection_plan(),
         }
     }
 
@@ -458,8 +484,11 @@ pub struct EndpointSecurityBackend {
     // The scheduler is shut down while the ES client is still live so every
     // retained message receives a terminal deny before client deletion.
     scheduler: DeadlineScheduler,
-    client: Option<NativeClient>,
-    context: Box<CallbackContext>,
+    authorization_client: Option<NativeClient>,
+    process_client: Option<NativeClient>,
+    authorization_context: Box<CallbackContext>,
+    // Owns the process-client callback context for exactly the client lifetime.
+    _process_context: Box<CallbackContext>,
     receiver: mpsc::Receiver<MacAuthorizationEvent>,
 }
 
@@ -479,29 +508,53 @@ impl EndpointSecurityBackend {
         let (sender, receiver) = mpsc::sync_channel(MAX_PENDING_AUTHORIZATIONS);
         let registry = Arc::new(Mutex::new(Vec::new()));
         let process_graph = Arc::new(Mutex::new(MacProcessGraph::default()));
-        let mut context = Box::new(CallbackContext {
-            config,
+        let mut authorization_context = Box::new(CallbackContext {
+            config: config.clone(),
             sender,
             scheduler: scheduler_handle,
             registry,
             process_graph,
             health,
             sequences: Mutex::new(SequenceTracker::default()),
+            sequence_domain: SequenceDomain::Authorization,
         });
-        let client = NativeClient::create(context.as_mut() as *mut CallbackContext)?;
-        if client.subscribe_required().is_err() {
-            context
+        let mut process_context = Box::new(CallbackContext {
+            config,
+            sender: authorization_context.sender.clone(),
+            scheduler: authorization_context.scheduler.clone(),
+            registry: Arc::clone(&authorization_context.registry),
+            process_graph: Arc::clone(&authorization_context.process_graph),
+            health: Arc::clone(&authorization_context.health),
+            sequences: Mutex::new(SequenceTracker::default()),
+            sequence_domain: SequenceDomain::ProcessGraph,
+        });
+        let authorization_client = NativeClient::create_authorization(
+            authorization_context.as_mut() as *mut CallbackContext,
+        )?;
+        let plan = authorization_context.config.target_selection_plan();
+        if authorization_client.configure_target_paths(&plan).is_err() {
+            authorization_context
                 .health
-                .degrade("Endpoint Security required subscription failed");
+                .degrade("Endpoint Security target-path selection setup failed");
             return Err(ClientCreateError::Internal);
         }
-        context
+        let process_client =
+            NativeClient::create_process(process_context.as_mut() as *mut CallbackContext)?;
+        if process_client.subscribe_process_graph().is_err() {
+            authorization_context
+                .health
+                .degrade("Endpoint Security process lifecycle subscription failed");
+            return Err(ClientCreateError::Internal);
+        }
+        authorization_context
             .health
-            .note("Endpoint Security AUTH_OPEN/AUTH_LINK/AUTH_RENAME and bounded process graph subscriptions are active");
+            .note("Endpoint Security authorization target selection and separate global process lifecycle subscriptions are active");
         Ok(Self {
             scheduler,
-            client: Some(client),
-            context,
+            authorization_client: Some(authorization_client),
+            process_client: Some(process_client),
+            authorization_context,
+            _process_context: process_context,
             receiver,
         })
     }
@@ -514,13 +567,22 @@ impl EndpointSecurityBackend {
     }
 
     pub fn health(&self) -> BackendHealth {
-        let snapshot = self.context.health.snapshot();
-        let (alias_entries, alias_capacity, index_saturated) = match &self.context.config.scope {
-            ProtectionScope::Browser { resources, .. } => resources.namespace_health(),
-            ProtectionScope::Synthetic(_) => (0, 0, false),
-        };
+        let snapshot = self.authorization_context.health.snapshot();
+        let target_path_inversion_active = self
+            .authorization_client
+            .as_ref()
+            .is_some_and(NativeClient::target_path_inversion_active);
+        let (alias_entries, alias_capacity, index_saturated, unresolved_hardlinks) =
+            match &self.authorization_context.config.scope {
+                ProtectionScope::Browser { resources, .. } => {
+                    let (entries, capacity, saturated) = resources.namespace_health();
+                    let unresolved = resources.unresolved_external_hardlink_count();
+                    (entries, capacity, saturated, unresolved)
+                }
+                ProtectionScope::Synthetic(_) => (0, 0, false, 0),
+            };
         let process_graph_degraded = self
-            .context
+            .authorization_context
             .process_graph
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -529,14 +591,23 @@ impl EndpointSecurityBackend {
             backend: "endpoint-security".to_owned(),
             state: if !snapshot.active {
                 "NOT_ENFORCING"
-            } else if snapshot.degraded || index_saturated || process_graph_degraded {
+            } else if snapshot.degraded
+                || index_saturated
+                || unresolved_hardlinks > 0
+                || !target_path_inversion_active
+                || process_graph_degraded
+            {
                 "DEGRADED"
             } else {
                 "ACTIVE"
             }
             .to_owned(),
             active: snapshot.active,
-            degraded: snapshot.degraded || index_saturated || process_graph_degraded,
+            degraded: snapshot.degraded
+                || index_saturated
+                || unresolved_hardlinks > 0
+                || !target_path_inversion_active
+                || process_graph_degraded,
             diagnostic: snapshot.diagnostic,
             sequence_gaps: snapshot.sequence_gaps,
             global_sequence_gaps: snapshot.global_sequence_gaps,
@@ -552,18 +623,40 @@ impl EndpointSecurityBackend {
             namespace_alias_capacity: alias_capacity,
             namespace_index_saturated: index_saturated,
             process_graph_degraded,
+            authorization_events_delivered: snapshot.authorization_events_delivered,
+            protected_authorization_events: snapshot.protected_authorization_events,
+            unresolved_external_hardlinks: unresolved_hardlinks,
+            target_path_inversion_active,
+            process_lifecycle_events: snapshot.process_lifecycle_events,
         }
     }
 
     pub fn process_graph(&self) -> Arc<Mutex<MacProcessGraph>> {
-        Arc::clone(&self.context.process_graph)
+        Arc::clone(&self.authorization_context.process_graph)
     }
 
     pub fn repair_if_needed(&self) -> anyhow::Result<bool> {
-        match &self.context.config.scope {
+        match &self.authorization_context.config.scope {
             ProtectionScope::Browser { resources, .. } => resources.repair_if_needed(),
             ProtectionScope::Synthetic(_) => Ok(false),
         }
+    }
+
+    /// Called on the backend owner thread. Additions are installed before
+    /// removals without dropping AUTH subscriptions; the control plane stages
+    /// policy publication between those two operations.
+    pub fn update_target_selection(&self, plan: &TargetSelectionPlan) -> anyhow::Result<()> {
+        let client = self
+            .authorization_client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("authorization client is stopped"))?;
+        if let Err(error) = client.update_target_paths(plan) {
+            self.authorization_context.health.degrade(format!(
+                "Endpoint Security target selection update failed; effective selection is not provable: {error}"
+            ));
+            return Err(error);
+        }
+        Ok(())
     }
 }
 
@@ -571,11 +664,14 @@ impl EndpointSecurityBackend {
 impl Drop for EndpointSecurityBackend {
     fn drop(&mut self) {
         self.scheduler.shutdown();
-        deny_registered(&self.context.registry);
-        if let Some(client) = self.client.take() {
+        deny_registered(&self.authorization_context.registry);
+        if let Some(client) = self.authorization_client.take() {
             drop(client);
         }
-        self.context
+        if let Some(client) = self.process_client.take() {
+            drop(client);
+        }
+        self.authorization_context
             .health
             .stop("Endpoint Security client is stopped");
     }
@@ -585,9 +681,9 @@ impl Drop for EndpointSecurityBackend {
 pub fn diagnose_client_creation() -> Result<(), ClientCreateError> {
     let mut marker = ();
     let client = NativeClient::create_with_callback(
-        diagnostic_callback,
-        diagnostic_process_callback,
-        diagnostic_namespace_callback,
+        Some(diagnostic_callback),
+        Some(diagnostic_process_callback),
+        Some(diagnostic_namespace_callback),
         diagnostic_sequence_callback,
         (&mut marker as *mut ()).cast(),
     )?;
@@ -609,6 +705,14 @@ struct CallbackContext {
     process_graph: Arc<Mutex<MacProcessGraph>>,
     health: Arc<HealthTracker>,
     sequences: Mutex<SequenceTracker>,
+    sequence_domain: SequenceDomain,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SequenceDomain {
+    Authorization,
+    ProcessGraph,
 }
 
 #[cfg(target_os = "macos")]
@@ -718,6 +822,7 @@ impl CallbackContext {
         message: *const std::ffi::c_void,
         raw: &RawAuthOpenEvent,
     ) {
+        self.health.authorization_event(false);
         let (target, resource) = match scope_open(&self.config, raw) {
             Ok(ScopedOpen::Unprotected { requested_fflags }) => {
                 self.respond_immediate(client, message, requested_fflags);
@@ -732,6 +837,7 @@ impl CallbackContext {
                 return;
             }
         };
+        self.health.protected_authorization_event();
         let process = match raw.process.to_facts() {
             Ok(process) => process,
             Err(error) => {
@@ -915,13 +1021,17 @@ impl CallbackContext {
         self.health.degrade(format!(
             "Endpoint Security sequence gap detected (event_kind={event_kind}, per_type={per_kind_gap}, global={global_gap})"
         ));
-        if global_gap > 0 || matches!(event_kind, 2..=4) {
+        if self.sequence_domain == SequenceDomain::ProcessGraph
+            && (global_gap > 0 || matches!(event_kind, 2..=4))
+        {
             self.process_graph
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .mark_degraded();
         }
-        if global_gap > 0 || matches!(event_kind, 1 | 5 | 6) {
+        if self.sequence_domain == SequenceDomain::Authorization
+            && (global_gap > 0 || matches!(event_kind, 1 | 5 | 6))
+        {
             if let ProtectionScope::Browser { resources, .. } = &self.config.scope {
                 resources.request_refresh();
             }
@@ -934,6 +1044,7 @@ impl CallbackContext {
         process: &RawProcessFacts,
         related: Option<&RawProcessFacts>,
     ) {
+        self.health.process_lifecycle_event();
         let process = match process.to_facts() {
             Ok(process) => process,
             Err(error) => {
@@ -1064,26 +1175,37 @@ impl ResponseCode {
 #[cfg(target_os = "macos")]
 struct NativeClient {
     raw: *mut std::ffi::c_void,
+    active_target_selection: Mutex<TargetSelectionPlan>,
     // es_delete_client must run on the thread that called es_new_client.
     _not_send: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
 #[cfg(target_os = "macos")]
 impl NativeClient {
-    fn create(context: *mut CallbackContext) -> Result<Self, ClientCreateError> {
+    fn create_authorization(context: *mut CallbackContext) -> Result<Self, ClientCreateError> {
         Self::create_with_callback(
-            auth_open_callback,
-            process_callback,
-            namespace_callback,
+            Some(auth_open_callback),
+            None,
+            Some(namespace_callback),
+            sequence_callback,
+            context.cast(),
+        )
+    }
+
+    fn create_process(context: *mut CallbackContext) -> Result<Self, ClientCreateError> {
+        Self::create_with_callback(
+            None,
+            Some(process_callback),
+            None,
             sequence_callback,
             context.cast(),
         )
     }
 
     fn create_with_callback(
-        callback: RawCallback,
-        process_callback: RawProcessCallback,
-        namespace_callback: RawNamespaceCallback,
+        callback: Option<RawCallback>,
+        process_callback: Option<RawProcessCallback>,
+        namespace_callback: Option<RawNamespaceCallback>,
         sequence_callback: RawSequenceCallback,
         context: *mut std::ffi::c_void,
     ) -> Result<Self, ClientCreateError> {
@@ -1103,6 +1225,7 @@ impl NativeClient {
         match result {
             0 => Ok(Self {
                 raw,
+                active_target_selection: Mutex::new(TargetSelectionPlan::default()),
                 _not_send: std::marker::PhantomData,
             }),
             1 => Err(ClientCreateError::InvalidArgument),
@@ -1115,14 +1238,102 @@ impl NativeClient {
         }
     }
 
-    fn subscribe_required(&self) -> anyhow::Result<()> {
+    fn subscribe_process_graph(&self) -> anyhow::Result<()> {
         // SAFETY: raw is a live guard_es_client_t owned by self.
         anyhow::ensure!(
-            unsafe { guard_es_client_subscribe_required(self.raw) } == 0,
-            "es_subscribe(AUTH_OPEN/FORK/EXEC/EXIT) failed"
+            unsafe { guard_es_client_subscribe_process_graph(self.raw) } == 0,
+            "es_subscribe(NOTIFY_FORK/NOTIFY_EXEC/NOTIFY_EXIT) failed"
         );
         Ok(())
     }
+
+    fn configure_target_paths(&self, plan: &TargetSelectionPlan) -> anyhow::Result<()> {
+        let (_paths, native) = native_target_paths(plan.rules())?;
+        // SAFETY: CString storage remains live for the complete synchronous C
+        // call; the bridge copies each rule into Endpoint Security.
+        anyhow::ensure!(
+            unsafe {
+                guard_es_client_configure_target_paths(self.raw, native.as_ptr(), native.len())
+            } == 0,
+            "Endpoint Security target-path inversion setup failed"
+        );
+        *self
+            .active_target_selection
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = plan.clone();
+        Ok(())
+    }
+
+    fn update_target_paths(&self, plan: &TargetSelectionPlan) -> anyhow::Result<()> {
+        let mut active = self
+            .active_target_selection
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Endpoint Security target selection lock is poisoned"))?;
+        let additions = plan
+            .rules()
+            .iter()
+            .filter(|rule| !active.rules().contains(rule))
+            .cloned()
+            .collect::<Vec<_>>();
+        let removals = active
+            .rules()
+            .iter()
+            .filter(|rule| !plan.rules().contains(rule))
+            .cloned()
+            .collect::<Vec<_>>();
+        update_native_target_paths(self.raw, &additions, true)?;
+        update_native_target_paths(self.raw, &removals, false)?;
+        *active = plan.clone();
+        Ok(())
+    }
+
+    fn target_path_inversion_active(&self) -> bool {
+        // SAFETY: `raw` is owned by this live client and the SDK query does
+        // not retain pointers or mutate the client.
+        unsafe { guard_es_client_target_path_inversion_active(self.raw) }
+    }
+}
+
+#[cfg(target_os = "macos")]
+type NativeTargetPathStorage = Vec<(std::ffi::CString, bool)>;
+
+#[cfg(target_os = "macos")]
+fn native_target_paths(
+    rules: &[TargetPathRule],
+) -> anyhow::Result<(NativeTargetPathStorage, Vec<RawTargetPathRule>)> {
+    let paths = rules
+        .iter()
+        .map(|rule| {
+            Ok((
+                std::ffi::CString::new(rule.path.as_os_str().as_encoded_bytes())?,
+                rule.prefix,
+            ))
+        })
+        .collect::<Result<Vec<_>, std::ffi::NulError>>()?;
+    let native = paths
+        .iter()
+        .map(|(path, prefix)| RawTargetPathRule {
+            path: path.as_ptr(),
+            prefix: *prefix,
+        })
+        .collect();
+    Ok((paths, native))
+}
+
+#[cfg(target_os = "macos")]
+fn update_native_target_paths(
+    client: *mut std::ffi::c_void,
+    rules: &[TargetPathRule],
+    mute: bool,
+) -> anyhow::Result<()> {
+    let (_paths, native) = native_target_paths(rules)?;
+    // SAFETY: CString storage remains live through this synchronous call.
+    anyhow::ensure!(
+        unsafe { guard_es_client_update_target_paths(client, native.as_ptr(), native.len(), mute) }
+            == 0,
+        "Endpoint Security target-path rule update failed"
+    );
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -1480,6 +1691,13 @@ type RawNamespaceCallback = unsafe extern "C" fn(
 type RawSequenceCallback = unsafe extern "C" fn(*mut std::ffi::c_void, u32, bool, u64, bool, u64);
 
 #[cfg(target_os = "macos")]
+#[repr(C)]
+struct RawTargetPathRule {
+    path: *const std::ffi::c_char,
+    prefix: bool,
+}
+
+#[cfg(target_os = "macos")]
 unsafe extern "C" fn auth_open_callback(
     context: *mut std::ffi::c_void,
     client: *const std::ffi::c_void,
@@ -1641,13 +1859,25 @@ unsafe extern "C" fn diagnostic_sequence_callback(
 extern "C" {
     fn guard_es_client_create(
         client: *mut *mut std::ffi::c_void,
-        callback: RawCallback,
-        process_callback: RawProcessCallback,
-        namespace_callback: RawNamespaceCallback,
+        callback: Option<RawCallback>,
+        process_callback: Option<RawProcessCallback>,
+        namespace_callback: Option<RawNamespaceCallback>,
         sequence_callback: RawSequenceCallback,
         context: *mut std::ffi::c_void,
     ) -> i32;
-    fn guard_es_client_subscribe_required(client: *mut std::ffi::c_void) -> i32;
+    fn guard_es_client_subscribe_process_graph(client: *mut std::ffi::c_void) -> i32;
+    fn guard_es_client_configure_target_paths(
+        client: *mut std::ffi::c_void,
+        paths: *const RawTargetPathRule,
+        path_count: usize,
+    ) -> i32;
+    fn guard_es_client_update_target_paths(
+        client: *mut std::ffi::c_void,
+        paths: *const RawTargetPathRule,
+        path_count: usize,
+        mute: bool,
+    ) -> i32;
+    fn guard_es_client_target_path_inversion_active(client: *mut std::ffi::c_void) -> bool;
     fn guard_es_client_delete(client: *mut std::ffi::c_void) -> i32;
     fn guard_es_message_retain(message: *const std::ffi::c_void);
     fn guard_es_message_release(message: *const std::ffi::c_void);

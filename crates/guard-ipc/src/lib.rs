@@ -129,6 +129,11 @@ pub enum RequestOp {
         /// identity before creating the lease.
         ssh_add_pid: u32,
     },
+    /// In-memory acceptance override. Zero restores normal post-Block prompt
+    /// suppression; a non-zero duration is bounded by the platform service.
+    AcceptanceSetBlockSuppression {
+        disable_for_secs: u64,
+    },
 }
 
 /// Transport-level authorization class. This is shared by Unix and XPC
@@ -161,6 +166,7 @@ impl RequestOp {
             | Self::SshPendingList
             | Self::SshPendingGet { .. } => RequestAuthorization::Metadata,
             Self::LeasesRevoke { .. }
+            | Self::AcceptanceSetBlockSuppression { .. }
             | Self::MigrationResolve {
                 action: MigrationResolutionAction::Block,
                 ..
@@ -253,6 +259,9 @@ pub enum ResponseBody {
     SshProtected(SshProtectedInfo),
     /// Result of `SshLoadAuthorize`: the one-shot lease id and its expiry.
     SshLoadAuthorized(SshLoadAuthorizedInfo),
+    AcceptanceBlockSuppression {
+        disabled_until: Option<u64>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -421,22 +430,20 @@ pub struct StatusInfo {
     #[cfg(target_os = "macos")]
     #[serde(default)]
     pub filesystem_marks_healthy: Option<bool>,
-    #[cfg(target_os = "macos")]
-    #[serde(default)]
-    pub strict_events_total: Option<u64>,
-    #[cfg(target_os = "macos")]
-    #[serde(default)]
-    pub strict_fast_allowed: Option<u64>,
-    #[cfg(target_os = "macos")]
-    #[serde(default)]
-    pub strict_alias_scans: Option<u64>,
-    #[cfg(target_os = "macos")]
-    #[serde(default)]
-    pub strict_alias_matches: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MacHealthInfo {
+    #[serde(default)]
+    pub authorization_events_delivered: u64,
+    #[serde(default)]
+    pub protected_authorization_events: u64,
+    #[serde(default)]
+    pub unresolved_external_hardlinks: usize,
+    #[serde(default)]
+    pub target_path_inversion_active: bool,
+    #[serde(default)]
+    pub process_lifecycle_events: u64,
     pub es_sequence_gaps: u64,
     pub es_global_sequence_gaps: u64,
     pub pending_created: u64,
@@ -861,6 +868,14 @@ mod tests {
             enforcement_active: true,
             read_only_guaranteed: None,
             status: "ACTIVE".into(),
+            #[cfg(target_os = "macos")]
+            mode: None,
+            #[cfg(target_os = "macos")]
+            marked_filesystems: None,
+            #[cfg(target_os = "macos")]
+            required_filesystems: None,
+            #[cfg(target_os = "macos")]
+            filesystem_marks_healthy: None,
             #[cfg(target_os = "linux")]
             permission_events_total: Some(10),
             protected_events: 2,

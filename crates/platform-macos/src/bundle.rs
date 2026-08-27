@@ -29,7 +29,7 @@ impl DevelopmentBundleLayout {
         self.root.join("Contents")
     }
     pub fn app_executable(&self) -> PathBuf {
-        self.app_contents().join("MacOS/Guard")
+        self.app_contents().join("MacOS/SensitiveFileGuard")
     }
     pub fn app_info_plist(&self) -> PathBuf {
         self.app_contents().join("Info.plist")
@@ -64,15 +64,17 @@ mod tests {
 
     #[test]
     fn constructs_required_nested_bundle_paths() {
-        let layout =
-            DevelopmentBundleLayout::new("/tmp/Guard.app", "top.plfjy.SensitiveFileGuard.guard-es")
-                .unwrap();
+        let layout = DevelopmentBundleLayout::new(
+            "/tmp/Sensitive File Guard.app",
+            "top.plfjy.SensitiveFileGuard.guard-es",
+        )
+        .unwrap();
         assert_eq!(
             layout.app_executable(),
-            PathBuf::from("/tmp/Guard.app/Contents/MacOS/Guard")
+            PathBuf::from("/tmp/Sensitive File Guard.app/Contents/MacOS/SensitiveFileGuard")
         );
-        assert_eq!(layout.extension_executable(), PathBuf::from("/tmp/Guard.app/Contents/Library/SystemExtensions/top.plfjy.SensitiveFileGuard.guard-es.systemextension/Contents/MacOS/guard-es"));
-        assert_eq!(layout.extension_info_plist(), PathBuf::from("/tmp/Guard.app/Contents/Library/SystemExtensions/top.plfjy.SensitiveFileGuard.guard-es.systemextension/Contents/Info.plist"));
+        assert_eq!(layout.extension_executable(), PathBuf::from("/tmp/Sensitive File Guard.app/Contents/Library/SystemExtensions/top.plfjy.SensitiveFileGuard.guard-es.systemextension/Contents/MacOS/guard-es"));
+        assert_eq!(layout.extension_info_plist(), PathBuf::from("/tmp/Sensitive File Guard.app/Contents/Library/SystemExtensions/top.plfjy.SensitiveFileGuard.guard-es.systemextension/Contents/Info.plist"));
     }
 
     #[test]

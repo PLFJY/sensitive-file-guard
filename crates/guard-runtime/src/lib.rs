@@ -274,10 +274,18 @@ pub struct PendingMigrationStore {
     next_id: u64,
     requests: HashMap<u64, PendingMigrationRequest>,
     blocked: HashMap<MigrationPendingKey, u64>,
+    block_suppression_disabled: bool,
     recent_approvals: HashMap<RecentApprovalKey, u64>,
 }
 
 impl PendingMigrationStore {
+    pub fn set_block_suppression_disabled(&mut self, disabled: bool) {
+        self.block_suppression_disabled = disabled;
+        if disabled {
+            self.blocked.clear();
+        }
+    }
+
     pub fn enqueue(
         &mut self,
         details: MigrationPendingDetails,
@@ -299,7 +307,7 @@ impl PendingMigrationStore {
     ) -> MigrationEnqueueResult {
         self.cleanup(now);
         let key = MigrationPendingKey::from_details(&details);
-        if self.blocked.contains_key(&key) {
+        if !self.block_suppression_disabled && self.blocked.contains_key(&key) {
             return MigrationEnqueueResult::DenySuppressed;
         }
         if let Some(request) = self
@@ -394,7 +402,7 @@ impl PendingMigrationStore {
             .requests
             .remove(&id)
             .expect("pending request existed above");
-        if block {
+        if block && !self.block_suppression_disabled {
             self.blocked
                 .insert(key, now.saturating_add(BLOCK_SUPPRESSION_SECS));
         }
@@ -561,9 +569,17 @@ pub struct PendingSshReadStore {
     next_id: u64,
     requests: HashMap<u64, PendingSshReadRequest>,
     blocked: HashMap<SshPendingKey, u64>,
+    block_suppression_disabled: bool,
 }
 
 impl PendingSshReadStore {
+    pub fn set_block_suppression_disabled(&mut self, disabled: bool) {
+        self.block_suppression_disabled = disabled;
+        if disabled {
+            self.blocked.clear();
+        }
+    }
+
     pub fn enqueue(
         &mut self,
         details: SshPendingDetails,
@@ -584,7 +600,7 @@ impl PendingSshReadStore {
     ) -> SshEnqueueResult {
         self.blocked.retain(|_, until| now < *until);
         let key = SshPendingKey::from_details(&details);
-        if self.blocked.contains_key(&key) {
+        if !self.block_suppression_disabled && self.blocked.contains_key(&key) {
             return SshEnqueueResult::DenySuppressed;
         }
         if let Some(request) = self
@@ -673,7 +689,7 @@ impl PendingSshReadStore {
             .requests
             .remove(&id)
             .expect("pending request existed above");
-        if block {
+        if block && !self.block_suppression_disabled {
             self.blocked
                 .insert(key, now.saturating_add(BLOCK_SUPPRESSION_SECS));
         }
@@ -864,6 +880,17 @@ mod tests {
             .unwrap()
             .resolve(false);
         assert_eq!(*blocked.lock().unwrap(), Terminal::Denied);
+        let (permission, _) = fake_permission();
+        assert!(matches!(
+            store.enqueue(details.clone(), permission, 12),
+            MigrationEnqueueResult::DenySuppressed
+        ));
+        store.set_block_suppression_disabled(true);
+        let (permission, _) = fake_permission();
+        assert!(matches!(
+            store.enqueue(details.clone(), permission, 12),
+            MigrationEnqueueResult::Created(_)
+        ));
 
         let (permission, timed_out) = fake_permission();
         let mut store = PendingMigrationStore::default();
@@ -948,6 +975,17 @@ mod tests {
             .unwrap()
             .resolve(false);
         assert_eq!(*blocked.lock().unwrap(), Terminal::Denied);
+        let (permission, _) = fake_permission();
+        assert!(matches!(
+            blocked_store.enqueue(ssh_details(), permission, 27),
+            SshEnqueueResult::DenySuppressed
+        ));
+        blocked_store.set_block_suppression_disabled(true);
+        let (permission, _) = fake_permission();
+        assert!(matches!(
+            blocked_store.enqueue(ssh_details(), permission, 27),
+            SshEnqueueResult::Created(_)
+        ));
 
         let (permission, timed_out) = fake_permission();
         let mut store = PendingSshReadStore::default();

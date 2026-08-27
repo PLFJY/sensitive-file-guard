@@ -8,7 +8,7 @@ fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH= cd -- "$script_dir/../.." && pwd)
-app=${1:-"$repo_dir/build/macos-release/Guard.app"}
+app=${1:-"$repo_dir/build/macos-release/Sensitive File Guard.app"}
 
 VERIFY_SIGNING_MODE=self-use "$script_dir/verify-bundle.sh" "$app"
 

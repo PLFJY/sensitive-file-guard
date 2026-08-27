@@ -35,7 +35,7 @@ struct Cli {
     /// Fetch once and exit. Intended for diagnostics/tests.
     #[arg(long)]
     once: bool,
-    /// macOS only: ask the Guard.app process to send a harmless synthetic notification.
+    /// macOS only: ask the Sensitive File Guard.app process to send a harmless synthetic notification.
     #[arg(long)]
     test_notification: bool,
 }
@@ -131,7 +131,9 @@ fn run_macos(cli: &Cli) -> ExitCode {
     if cli.test_notification {
         return match activate_guard_ui_macos_with_args(&["--test-notification"]) {
             Ok(()) => {
-                eprintln!("guard-notify: delegated macOS test notification to Guard.app");
+                eprintln!(
+                    "guard-notify: delegated macOS test notification to Sensitive File Guard.app"
+                );
                 ExitCode::SUCCESS
             }
             Err(error) => {
@@ -155,7 +157,7 @@ fn run_macos(cli: &Cli) -> ExitCode {
         let events_ok = match client.events_cursor(Some(100), None, events.last_seen()) {
             Ok(snapshot) => {
                 for event in events.observe(snapshot) {
-                    // Guard.app owns macOS event notifications. This helper
+                    // Sensitive File Guard.app owns macOS event notifications. This helper
                     // remains responsible for surfacing pending confirmations
                     // and must not duplicate the event notification stream.
                     let _ = event;
@@ -275,7 +277,7 @@ impl PendingObserver {
 #[cfg(target_os = "macos")]
 fn activate_guard_ui_macos() {
     if let Err(error) = activate_guard_ui_macos_with_args(&[]) {
-        eprintln!("guard-notify: could not activate Guard.app: {error}");
+        eprintln!("guard-notify: could not activate Sensitive File Guard.app: {error}");
     }
 }
 
@@ -337,24 +339,24 @@ fn guard_ui_executable(helper: &Path) -> anyhow::Result<PathBuf> {
         macos_dir.file_name().is_some_and(|name| name == "MacOS"),
         "pending helper is not inside an app Contents/MacOS directory"
     );
-    Ok(macos_dir.join("Guard"))
+    Ok(macos_dir.join("SensitiveFileGuard"))
 }
 
 #[cfg(target_os = "macos")]
 fn guard_ui_bundle(guard: &Path) -> anyhow::Result<PathBuf> {
-    let macos_dir = guard
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("Guard executable has no parent directory"))?;
-    let contents = macos_dir
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("Guard executable is not inside Contents/MacOS"))?;
+    let macos_dir = guard.parent().ok_or_else(|| {
+        anyhow::anyhow!("Sensitive File Guard executable has no parent directory")
+    })?;
+    let contents = macos_dir.parent().ok_or_else(|| {
+        anyhow::anyhow!("Sensitive File Guard executable is not inside Contents/MacOS")
+    })?;
     anyhow::ensure!(
         contents.file_name().is_some_and(|name| name == "Contents"),
-        "Guard executable is not inside an app bundle"
+        "Sensitive File Guard executable is not inside an app bundle"
     );
     Ok(contents
         .parent()
-        .ok_or_else(|| anyhow::anyhow!("Guard bundle has no parent directory"))?
+        .ok_or_else(|| anyhow::anyhow!("Sensitive File Guard bundle has no parent directory"))?
         .to_path_buf())
 }
 
@@ -709,14 +711,17 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn pending_helper_launches_only_the_sibling_guard_pending_client() {
-        let helper = Path::new("/Applications/Guard.app/Contents/MacOS/guard-notify");
+        let helper =
+            Path::new("/Applications/Sensitive File Guard.app/Contents/MacOS/guard-notify");
         assert_eq!(
             guard_ui_executable(helper).unwrap(),
-            PathBuf::from("/Applications/Guard.app/Contents/MacOS/Guard")
+            PathBuf::from(
+                "/Applications/Sensitive File Guard.app/Contents/MacOS/SensitiveFileGuard"
+            )
         );
         assert_eq!(
             guard_ui_bundle(&guard_ui_executable(helper).unwrap()).unwrap(),
-            PathBuf::from("/Applications/Guard.app")
+            PathBuf::from("/Applications/Sensitive File Guard.app")
         );
         let spaced = Path::new("/Applications/Guard Test.app/Contents/MacOS/guard-notify");
         assert_eq!(

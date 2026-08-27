@@ -13,6 +13,8 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+#[cfg(target_os = "macos")]
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 use guard_client::transport::IpcClient;
 use guard_ipc::{
@@ -121,6 +123,12 @@ enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Run fixture-only macOS acceptance checks through authenticated XPC.
+    #[command(name = "acceptance")]
+    Acceptance {
+        #[command(subcommand)]
+        action: AcceptanceAction,
+    },
     /// Fixed root-only operations used by guard-ui through pkexec.
     #[command(name = "privileged", hide = true)]
     Privileged {
@@ -183,6 +191,32 @@ enum LeasesAction {
 enum ConfigAction {
     /// Check configuration validity.
     Check,
+}
+
+#[derive(Subcommand, Debug)]
+enum AcceptanceAction {
+    /// Temporarily add one synthetic Chromium profile, verify Endpoint
+    /// Security target selection, then restore the previous policy.
+    #[command(name = "target-selection")]
+    TargetSelection {
+        /// Disposable Chromium user-data root created by the acceptance script.
+        #[arg(long, value_name = "PATH")]
+        profile_root: PathBuf,
+        /// Real Chrome executable used only to establish a signed browser identity.
+        #[arg(long, value_name = "PATH")]
+        browser_executable: PathBuf,
+        /// Locally built synthetic probe. It receives only the fixture path.
+        #[arg(long, value_name = "PATH")]
+        probe: PathBuf,
+    },
+    /// Internal fixture-only prompt test aid. The service keeps this state in
+    /// memory and forcibly restores normal behavior when the duration expires.
+    #[command(name = "block-suppression", hide = true)]
+    BlockSuppression {
+        /// Disable post-Block prompt suppression for this many seconds; zero restores it.
+        #[arg(long, default_value_t = 0)]
+        disable_for_secs: u64,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -285,6 +319,17 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
     if let Command::Setup { home, config, yes } = &cli.command {
         return run_setup(home.as_deref(), config, *yes);
     }
+    if let Command::Acceptance {
+        action:
+            AcceptanceAction::TargetSelection {
+                profile_root,
+                browser_executable,
+                probe,
+            },
+    } = &cli.command
+    {
+        return run_target_selection_acceptance(profile_root, browser_executable, probe);
+    }
     // `ssh load` runs a multi-step brokered flow (authorize -> continue child
     // -> revoke) that does not fit the single-request dispatch below.
     if let Command::Ssh {
@@ -350,6 +395,14 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
         Command::Config {
             action: ConfigAction::Check,
         } => RequestOp::ConfigCheck,
+        Command::Acceptance {
+            action: AcceptanceAction::BlockSuppression { disable_for_secs },
+        } => RequestOp::AcceptanceSetBlockSuppression {
+            disable_for_secs: *disable_for_secs,
+        },
+        Command::Acceptance {
+            action: AcceptanceAction::TargetSelection { .. },
+        } => unreachable!("target-selection acceptance handled above"),
         Command::Privileged { .. } => unreachable!("privileged helper handled before IPC dispatch"),
         Command::ServiceStatus | Command::NotificationService { .. } => {
             unreachable!("service commands handled before IPC dispatch")
@@ -398,6 +451,371 @@ fn ipc_connection_context(socket: &std::path::Path) -> String {
     {
         format!("connecting to guardd IPC socket {}", socket.display())
     }
+}
+
+#[cfg(target_os = "macos")]
+fn run_target_selection_acceptance(
+    profile_root: &Path,
+    browser_executable: &Path,
+    probe: &Path,
+) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+
+    let fixture = canonical_fixture(profile_root)?;
+    let executable = std::fs::canonicalize(browser_executable)
+        .context("fixture browser executable must resolve to a real file")?;
+    let probe = std::fs::canonicalize(probe)
+        .context("fixture probe must resolve to a locally built executable")?;
+    let metadata = std::fs::metadata(&probe)?;
+    anyhow::ensure!(
+        metadata.is_file() && metadata.permissions().mode() & 0o111 != 0,
+        "fixture probe must be an executable regular file"
+    );
+
+    let client = guard_client::macos::MacGuardClient::for_current_process()?;
+    let original = mac_config_from_metadata(client.configuration()?)?;
+    let fixture_config = mac_config_with_fixture(&original, &fixture, &executable)?;
+    let mut fixture_applied = false;
+
+    let test_result = (|| -> anyhow::Result<()> {
+        println!("Authenticate to stage the disposable fixture policy.");
+        client.apply_configuration(&fixture_config, Instant::now() + Duration::from_secs(60))?;
+        fixture_applied = true;
+
+        let initial = client.status()?;
+        anyhow::ensure!(
+            initial.enforcement_active,
+            "fixture policy is not enforcing after authenticated apply"
+        );
+        let health = initial
+            .mac_health
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("active backend does not expose macOS health"))?;
+        anyhow::ensure!(
+            health.target_path_inversion_active,
+            "authorization client is not reporting target-path inversion"
+        );
+        let authorization_before = health.authorization_events_delivered;
+        let process_before = health.process_lifecycle_events;
+
+        let unrelated = fixture
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("fixture root has no parent"))?
+            .join("unrelated-open");
+        std::fs::write(&unrelated, b"synthetic unrelated file")?;
+        let after_open = client.status()?;
+        anyhow::ensure!(
+            after_open
+                .mac_health
+                .as_ref()
+                .map(|value| value.authorization_events_delivered)
+                == Some(authorization_before),
+            "unrelated open reached the authorization client"
+        );
+
+        let true_status = std::process::Command::new("/usr/bin/true").status()?;
+        anyhow::ensure!(true_status.success(), "/usr/bin/true failed");
+        let after_exec = client.status()?;
+        anyhow::ensure!(
+            after_exec
+                .mac_health
+                .as_ref()
+                .map(|value| value.authorization_events_delivered)
+                == Some(authorization_before),
+            "unrelated executable launch reached the authorization client"
+        );
+        let mut lifecycle_advanced = false;
+        for _ in 0..20 {
+            let status = client.status()?;
+            if status
+                .mac_health
+                .as_ref()
+                .is_some_and(|value| value.process_lifecycle_events > process_before)
+            {
+                lifecycle_advanced = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        anyhow::ensure!(
+            lifecycle_advanced,
+            "unrelated executable launch did not reach the global process lifecycle client within 2 seconds"
+        );
+
+        let cookies = fixture.join("Default/Network/Cookies");
+        let probe_status = std::process::Command::new(&probe)
+            .args(["read", cookies.to_string_lossy().as_ref()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()?;
+        anyhow::ensure!(
+            !probe_status.success(),
+            "unknown probe opened protected synthetic browser data"
+        );
+
+        let symlink = fixture
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("fixture root has no parent"))?
+            .join("outside-symlink");
+        std::os::unix::fs::symlink(&cookies, &symlink)?;
+        let symlink_status = std::process::Command::new(&probe)
+            .args(["read", symlink.to_string_lossy().as_ref()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()?;
+        anyhow::ensure!(
+            !symlink_status.success(),
+            "outside-namespace symlink opened protected synthetic browser data"
+        );
+
+        println!("PASS: target selection, deny, and symlink checks succeeded.");
+        Ok(())
+    })();
+
+    let restore_result = if fixture_applied {
+        println!("Authenticate to restore the policy that was active before this fixture test.");
+        client
+            .apply_configuration(&original, Instant::now() + Duration::from_secs(60))
+            .map(|_| ())
+            .context("fixture test could not restore the original policy")
+    } else {
+        Ok(())
+    };
+    match (test_result, restore_result) {
+        (Ok(()), Ok(())) => {
+            // An active fixture policy correctly rejects LINK before an alias
+            // can exist. Create the synthetic alias only after restoration,
+            // then prove that attempting to reapply the fixture fails closed.
+            let cookies = fixture.join("Default/Network/Cookies");
+            let alias = fixture
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("fixture root has no parent"))?
+                .join("preexisting-hardlink");
+            std::fs::hard_link(&cookies, alias)?;
+            println!("Authenticate to verify hardlink configuration rejection.");
+            let hardlink_result = client
+                .apply_configuration(&fixture_config, Instant::now() + Duration::from_secs(60));
+            anyhow::ensure!(
+                hardlink_result.err().is_some_and(|error| error
+                    .to_string()
+                    .contains("configuration_unsafe_external_hardlink")),
+                "preexisting external hardlink was not rejected as configuration_unsafe_external_hardlink"
+            );
+            println!(
+                "PASS: original policy restored and hardlink configuration rejection verified."
+            );
+            Ok(())
+        }
+        (Err(test), Ok(())) => Err(test.context("fixture policy was restored")),
+        (Ok(()), Err(restore)) => Err(restore),
+        (Err(test), Err(restore)) => Err(test.context(format!(
+            "fixture test failed and original-policy restoration also failed: {restore}"
+        ))),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn canonical_fixture(profile_root: &Path) -> anyhow::Result<PathBuf> {
+    let root = std::fs::canonicalize(profile_root)?;
+    let temporary_root = std::fs::canonicalize(std::env::temp_dir())?;
+    anyhow::ensure!(
+        root.starts_with(&temporary_root),
+        "fixture profile must be below the current system temporary directory"
+    );
+    let cookies = root.join("Default/Network/Cookies");
+    let marker = std::fs::read(&cookies)?;
+    anyhow::ensure!(
+        marker == b"synthetic fixture only; not a browser secret\n",
+        "fixture Cookies file is missing the required synthetic marker"
+    );
+    Ok(root)
+}
+
+#[cfg(target_os = "macos")]
+fn mac_config_with_fixture(
+    original: &platform_macos::config::MacBackendConfig,
+    profile_root: &Path,
+    executable: &Path,
+) -> anyhow::Result<platform_macos::config::MacBackendConfig> {
+    use guard_core::resource::{BrowserFamily, BrowserId};
+    use std::sync::Arc;
+
+    let peer_uid = unsafe { libc::geteuid() };
+    let discovery = platform_macos::discovery::MacBrowserDiscovery::system(Arc::new(
+        platform_macos::code_signature::NativeCodeSignatureInspector,
+    ));
+    let browser_id = BrowserId(format!(
+        "sfg-target-selection-fixture-{}",
+        std::process::id()
+    ));
+    let enrollment = discovery.enroll_custom(
+        browser_id.clone(),
+        BrowserFamily::Chromium,
+        profile_root,
+        executable,
+        peer_uid,
+    )?;
+    let mut config = original.clone();
+    config.policy_enabled = true;
+    config
+        .common_policy
+        .browsers
+        .push(guard_platform::config::BrowserEnrollmentConfig {
+            id: browser_id.0,
+            family: BrowserFamily::Chromium,
+            profile_root: profile_root.to_path_buf(),
+            owner_uid: Some(peer_uid),
+            exe_paths: enrollment
+                .executables
+                .iter()
+                .map(|candidate| candidate.path().to_path_buf())
+                .collect(),
+        });
+    config.browser_trust.push(enrollment);
+    config.validate_for_peer(peer_uid)?;
+    Ok(config)
+}
+
+#[cfg(target_os = "macos")]
+fn mac_config_from_metadata(
+    info: guard_ipc::ConfigurationInfo,
+) -> anyhow::Result<platform_macos::config::MacBackendConfig> {
+    use guard_core::resource::{BrowserFamily, BrowserId, ProtectedResourceKind};
+    use std::sync::Arc;
+
+    let peer_uid = unsafe { libc::geteuid() };
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("HOME is unset; cannot reconstruct fixture policy"))?;
+    let discovery = platform_macos::discovery::MacBrowserDiscovery::system(Arc::new(
+        platform_macos::code_signature::NativeCodeSignatureInspector,
+    ));
+    let verified = discovery.discover_verified(&home).enrollments;
+    let mut common_browsers = Vec::with_capacity(info.browsers.len());
+    let mut browser_trust = Vec::with_capacity(info.browsers.len());
+    for browser in info.browsers {
+        let family = match browser.family.as_str() {
+            "Chromium" | "chromium" => BrowserFamily::Chromium,
+            "Firefox" | "firefox" => BrowserFamily::Firefox,
+            "Zen" | "zen" => BrowserFamily::Zen,
+            "Safari" | "safari" => BrowserFamily::Safari,
+            _ => anyhow::bail!("unknown configured browser family"),
+        };
+        anyhow::ensure!(
+            browser.owner_uid.is_none() || browser.owner_uid == Some(peer_uid),
+            "configured browser belongs to another user"
+        );
+        let root = PathBuf::from(&browser.profile_root);
+        let executable_paths = browser
+            .exe_paths
+            .iter()
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
+        let enrollment = verified
+            .iter()
+            .find(|candidate| {
+                candidate.browser_id.0 == browser.id
+                    && candidate.profile_root == root
+                    && candidate
+                        .executables
+                        .iter()
+                        .map(|executable| executable.path())
+                        .eq(executable_paths.iter().map(PathBuf::as_path))
+            })
+            .cloned()
+            .map(Ok)
+            .unwrap_or_else(|| {
+                anyhow::ensure!(
+                    executable_paths.len() == 1,
+                    "custom browser enrollment requires exactly one executable"
+                );
+                discovery.enroll_custom(
+                    BrowserId(browser.id.clone()),
+                    family,
+                    &root,
+                    &executable_paths[0],
+                    peer_uid,
+                )
+            })?;
+        common_browsers.push(guard_platform::config::BrowserEnrollmentConfig {
+            id: browser.id,
+            family,
+            profile_root: root,
+            owner_uid: Some(peer_uid),
+            exe_paths: enrollment
+                .executables
+                .iter()
+                .map(|executable| executable.path().to_path_buf())
+                .collect(),
+        });
+        browser_trust.push(enrollment);
+    }
+    let system_processes = info
+        .mac_system_processes
+        .into_iter()
+        .map(|rule| {
+            Ok(platform_macos::config::MacSystemProcessRule {
+                path: rule.path.into(),
+                team_id: None,
+                signing_id: rule.signing_id,
+                platform_binary: true,
+                owner_uid: 0,
+                allow_kinds: rule
+                    .allow_kinds
+                    .into_iter()
+                    .map(|kind| match kind.as_str() {
+                        "browser_cookie_store" => Ok(ProtectedResourceKind::CookieStore),
+                        "browser_session_store" => Ok(ProtectedResourceKind::SessionStore),
+                        "browser_key_material" => Ok(ProtectedResourceKind::BrowserKeyMaterial),
+                        "browser_web_storage" => Ok(ProtectedResourceKind::WebStorage),
+                        "browser_saved_credentials" => Ok(ProtectedResourceKind::SavedCredentials),
+                        "browser_history" => Ok(ProtectedResourceKind::History),
+                        "ssh_private_key" => Ok(ProtectedResourceKind::SshPrivateKey),
+                        _ => Err(anyhow::anyhow!("unknown system allowlist resource kind")),
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?,
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let trusted_tools = info
+        .mac_trusted_tools
+        .into_iter()
+        .map(|rule| platform_macos::config::MacTrustedToolRule {
+            path: rule.path.into(),
+            dev: rule.dev,
+            ino: rule.ino,
+            team_id: rule.team_id,
+            signing_id: rule.signing_id,
+            owner_uid: peer_uid,
+        })
+        .collect();
+    let config = platform_macos::config::MacBackendConfig {
+        version: platform_macos::config::MAC_CONFIG_VERSION,
+        policy_enabled: info.policy_enabled.unwrap_or(false),
+        common_policy: guard_platform::config::PolicyConfig {
+            browsers: common_browsers,
+            enrolled_exes: info.enrolled_exes.into_iter().map(PathBuf::from).collect(),
+            ssh_keys: info.ssh_keys.into_iter().map(PathBuf::from).collect(),
+        },
+        browser_trust,
+        mac_allowlist: platform_macos::config::MacAllowlistConfig {
+            system_processes,
+            trusted_tools,
+        },
+    }
+    .with_builtin_mac_allowlist();
+    config.validate_for_peer(peer_uid)?;
+    Ok(config)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn run_target_selection_acceptance(
+    _profile_root: &Path,
+    _browser_executable: &Path,
+    _probe: &Path,
+) -> anyhow::Result<()> {
+    anyhow::bail!("fixture Endpoint Security acceptance is available only on macOS")
 }
 
 #[cfg(target_os = "linux")]
@@ -1098,6 +1516,13 @@ fn print_human(resp: &Response) {
         Some(ResponseBody::SshReadResolved(result)) => println!("SSH read resolution: {result:?}"),
         Some(ResponseBody::SshProtected(s)) => print_ssh_protected(s),
         Some(ResponseBody::SshLoadAuthorized(s)) => print_ssh_load_authorized(s),
+        Some(ResponseBody::AcceptanceBlockSuppression { disabled_until }) => {
+            if let Some(until) = disabled_until {
+                println!("Fixture prompt suppression disabled until {until} (epoch seconds).");
+            } else {
+                println!("Normal post-Block prompt suppression restored.");
+            }
+        }
         None => println!("(no response body)"),
     }
 }
@@ -1123,6 +1548,7 @@ fn print_status(s: &StatusInfo) {
     println!("  allowed         : {}", s.allowed);
     println!("  denied          : {}", s.denied);
     println!("  unclassified    : {}", s.unclassified);
+    #[cfg(target_os = "linux")]
     if let Some(value) = s.permission_events_total {
         println!("  permission_events: {value}");
     }

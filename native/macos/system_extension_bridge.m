@@ -110,22 +110,39 @@ static NSString *GuardIdentifier(const char *identifier, char *error, size_t err
 - (void)request:(OSSystemExtensionRequest *)request
     foundProperties:(NSArray<OSSystemExtensionProperties *> *)properties API_AVAILABLE(macos(12.0)) {
     (void)request;
-    OSSystemExtensionProperties *property = properties.firstObject;
-    if (property == nil) {
+    if (properties.count == 0) {
         GuardSetState(self.identifier, GuardLifecycleUnknown,
                       @"system extension is not installed");
-    } else if (property.isUninstalling) {
-        GuardSetState(self.identifier, GuardLifecycleDeactivated,
-                      @"system extension is uninstalling");
-    } else if (property.isAwaitingUserApproval) {
+    } else {
+        BOOL hasAwaitingApproval = NO;
+        BOOL hasInstalledDisabled = NO;
+        BOOL hasUninstalling = NO;
+        for (OSSystemExtensionProperties *property in properties) {
+            // An update can briefly return both a retiring instance and the
+            // replacement. Prefer the enabled replacement over stale teardown
+            // state so diagnostics describe the effective protection state.
+            if (property.isEnabled) {
+                GuardSetState(self.identifier, GuardLifecycleActive,
+                              @"system extension is enabled");
+                @synchronized(GuardDelegates) {
+                    [GuardDelegates removeObjectForKey:self.identifier];
+                }
+                return;
+            }
+            hasAwaitingApproval = hasAwaitingApproval || property.isAwaitingUserApproval;
+            hasInstalledDisabled = hasInstalledDisabled || !property.isUninstalling;
+            hasUninstalling = hasUninstalling || property.isUninstalling;
+        }
+        if (hasAwaitingApproval) {
         GuardSetState(self.identifier, GuardLifecycleUserApprovalRequired,
                       @"system extension is awaiting user approval");
-    } else if (property.isEnabled) {
-        GuardSetState(self.identifier, GuardLifecycleActive,
-                      @"system extension is enabled");
-    } else {
-        GuardSetState(self.identifier, GuardLifecycleDeactivated,
-                      @"system extension is installed but disabled");
+        } else if (hasInstalledDisabled) {
+            GuardSetState(self.identifier, GuardLifecycleDeactivated,
+                          @"system extension is installed but disabled");
+        } else if (hasUninstalling) {
+            GuardSetState(self.identifier, GuardLifecycleDeactivated,
+                          @"system extension is uninstalling");
+        }
     }
     @synchronized(GuardDelegates) {
         [GuardDelegates removeObjectForKey:self.identifier];

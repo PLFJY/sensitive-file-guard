@@ -8,6 +8,8 @@ fi
 
 self_use=${SELF_USE_SIP_OFF:-0}
 build_only=${ES_POC_BUILD_ONLY:-0}
+self_use_identity=${SFG_SELF_USE_SIGNING_IDENTITY:-'Sensitive File Guard Local Development'}
+self_use_keychain=${SFG_SELF_USE_SIGNING_KEYCHAIN:-"$HOME/Library/Keychains/SensitiveFileGuardSelfUse.keychain-db"}
 cat_probe=${CAT_PROBE:-/bin/cat}
 test -x "$cat_probe" || {
     echo "required deny probe executable is missing or not executable: $cat_probe" >&2
@@ -16,7 +18,6 @@ test -x "$cat_probe" || {
 case "$self_use" in 0|1) ;; *) echo "SELF_USE_SIP_OFF must be 0 or 1" >&2; exit 2 ;; esac
 case "$build_only" in 0|1) ;; *) echo "ES_POC_BUILD_ONLY must be 0 or 1" >&2; exit 2 ;; esac
 if [ "$self_use" = 1 ]; then
-    : "${SELF_USE_SIGNING_IDENTITY:?SELF_USE_SIGNING_IDENTITY is required for SELF_USE_SIP_OFF=1}"
     if [ "$build_only" = 0 ] && [ "${LIVE_ES_ACCEPTANCE:-}" != I_ACCEPT_SYSTEM_EXTENSION_RISK ]; then
         echo "refusing live Endpoint Security activation without LIVE_ES_ACCEPTANCE=I_ACCEPT_SYSTEM_EXTENSION_RISK" >&2
         exit 2
@@ -51,7 +52,7 @@ activated=0
 watchdog_pid=
 installed_by_script=0
 app_root=${MACOS_ES_POC_ROOT:-"$repo_dir/build/macos-es-poc"}
-app="$app_root/Guard.app"
+app="$app_root/Sensitive File Guard.app"
 installed_app=${MACOS_ES_POC_INSTALLED_APP:-"/Applications/Guard ES PoC.app"}
 poc_app_bundle_id=${APP_BUNDLE_ID:-top.plfjy.SensitiveFileGuard.poc}
 extension_bundle_id=${SYSTEM_EXTENSION_BUNDLE_ID:-"$poc_app_bundle_id.guard-es"}
@@ -84,7 +85,7 @@ cleanup() {
     fi
     if [ "$activated" -eq 1 ]; then
         echo "PoC cleanup: watchdog did not prove deactivation; requesting explicit fallback deactivation" >&2
-        "$app/Contents/MacOS/Guard" \
+        "$app/Contents/MacOS/SensitiveFileGuard" \
             --deactivate-system-extension || true
         attempt=0
         while extension_is_active && [ "$attempt" -lt 300 ]; do
@@ -97,7 +98,7 @@ cleanup() {
     fi
     if [ "$activated" -eq 1 ]; then
         echo "RECOVERY REQUIRED: retaining $installed_app and diagnostics at $fixture_dir" >&2
-        echo "Run: '$app/Contents/MacOS/Guard' --deactivate-system-extension" >&2
+        echo "Run: '$app/Contents/MacOS/SensitiveFileGuard' --deactivate-system-extension" >&2
         return
     fi
     if [ -n "$watchdog_pid" ]; then
@@ -119,8 +120,8 @@ probe=$(cd target/debug && pwd)/guard-test-probe
 
 if [ "$self_use" = 1 ]; then
     GUARD_ES_POC=1 GUARD_ES_POC_FILE="$fixture" GUARD_ES_POC_ALLOW_EXE="$probe" \
-        SELF_USE_SIP_OFF=1 SELF_USE_SIGNING_IDENTITY="$SELF_USE_SIGNING_IDENTITY" \
-        SELF_USE_SIGNING_KEYCHAIN="${SELF_USE_SIGNING_KEYCHAIN:-}" \
+        SELF_USE_SIP_OFF=1 SFG_SELF_USE_SIGNING_IDENTITY="$self_use_identity" \
+        SFG_SELF_USE_SIGNING_KEYCHAIN="$self_use_keychain" \
         APP_BUNDLE_ID="$poc_app_bundle_id" \
         SYSTEM_EXTENSION_BUNDLE_ID="$extension_bundle_id" \
         MACOS_BUILD_ROOT="$app_root" BUILD_PROFILE=release GUARD_BUILD_NUMBER=2 \
@@ -142,7 +143,7 @@ else
 GUARD_ES_POC_FILE="$fixture" \
 GUARD_ES_POC_ALLOW_EXE="$probe" \
 scripts/macos/build-dev-app.sh
-    app="$repo_dir/build/macos/Guard.app"
+    app="$repo_dir/build/macos/Sensitive File Guard.app"
     scripts/macos/inspect-signing.sh "$app"
     if [ "$build_only" = 1 ]; then
         echo "PASS: Endpoint Security PoC bundle built and inspected without activation"
@@ -150,7 +151,7 @@ scripts/macos/build-dev-app.sh
     fi
 fi
 
-host="$app/Contents/MacOS/Guard"
+host="$app/Contents/MacOS/SensitiveFileGuard"
 GUARD_EXTENSION_WATCHDOG_SECONDS=90 \
 GUARD_EXTENSION_WATCHDOG_STOP_FILE="$watchdog_stop" \
     "$host" --activate-system-extension-watchdog >"$watchdog_log" 2>&1 &

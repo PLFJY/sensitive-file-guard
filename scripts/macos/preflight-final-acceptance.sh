@@ -8,9 +8,9 @@ fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH= cd -- "$script_dir/../.." && pwd)
-app=${1:-"$repo_dir/build/macos-release/Guard.app"}
+app=${1:-"$repo_dir/build/macos-release/Sensitive File Guard.app"}
 signing_mode=${VERIFY_SIGNING_MODE:-release}
-guard="$app/Contents/MacOS/Guard"
+guard="$app/Contents/MacOS/SensitiveFileGuard"
 
 acceptance_root=$(mktemp -d "${TMPDIR:-/tmp}/guard-final-acceptance.XXXXXX")
 cleanup() { rm -rf -- "$acceptance_root"; }
@@ -53,14 +53,14 @@ fi
 
 HOME="$acceptance_root/home" "$guard" --packaging-smoke
 
-lifecycle=$($guard --system-extension-status 2>&1) || true
+lifecycle=$("$guard" --system-extension-status 2>&1) || true
 printf '%s\n' "$lifecycle"
 if ! printf '%s\n' "$lifecycle" | grep -q 'state=Active'; then
     echo "BLOCKED: the selected system extension is not active" >&2
     blocked=1
 fi
 
-health=$($guard --xpc-status 2>&1) || true
+health=$("$guard" --xpc-status 2>&1) || true
 printf '%s\n' "$health"
 if ! printf '%s\n' "$health" | grep -Eq \
     '"backend_state"[[:space:]]*:[[:space:]]*"(ACTIVE|DEGRADED)"'; then
@@ -77,7 +77,7 @@ if printf '%s\n' "$health" | grep -q 'REQUIRES_FULL_DISK_ACCESS'; then
     blocked=1
 fi
 
-helper=$($guard --pending-helper-status 2>&1) || true
+helper=$("$guard" --pending-helper-status 2>&1) || true
 printf '%s\n' "pending_helper=$helper"
 if [ "$helper" != Enabled ]; then
     echo "INFO: pending helper is optional; keep Guard open for interactive confirmations" >&2
@@ -90,8 +90,11 @@ fi
 
 cat <<EOF
 FINAL_SECURITY_ACCEPTANCE_PREFLIGHT=PASS
-Run the interactive fixture-only gates next:
-  GUARD_APP='$app' $script_dir/run-browser-policy-acceptance.sh
+Run the fixture-only gates next:
+  $script_dir/run-target-selection-acceptance.sh
   $script_dir/run-ssh-policy-acceptance.sh '$app'
-  GUARD_APP='$app' $script_dir/run-namespace-health-acceptance.sh
+
+The older browser-policy and namespace-health scripts require manual policy
+replacement and are not final acceptance gates. The target-selection command
+stages and restores an isolated policy automatically.
 EOF

@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::ExitCode;
-use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant};
+use std::sync::{mpsc, Arc, Mutex, RwLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use guard_ipc::{
     MigrationResolutionAction, Request, RequestOp, Response, ResponseBody, SshReadResolutionAction,
@@ -16,6 +16,7 @@ use platform_macos::endpoint_security::{
     EndpointSecurityBackend, EndpointSecurityConfig, MacProtectedResources,
 };
 use platform_macos::identity::MacProcessGraph;
+use platform_macos::resource_index::{MacResourceIndex, TargetSelectionPlan};
 use platform_macos::xpc::{
     AuthenticatedPeer, MacXpcServer, SigningRequirements, XpcRequestHandler,
 };
@@ -29,6 +30,12 @@ struct ControlHandler {
     policy: Arc<MacPolicy>,
     backend_health: Arc<RwLock<BackendHealth>>,
     helper_heartbeats: Mutex<HashMap<u32, Instant>>,
+    selection_updates: Option<mpsc::SyncSender<SelectionUpdate>>,
+}
+
+struct SelectionUpdate {
+    plan: TargetSelectionPlan,
+    reply: mpsc::SyncSender<anyhow::Result<()>>,
 }
 
 impl XpcRequestHandler for ControlHandler {
@@ -140,6 +147,21 @@ impl XpcRequestHandler for ControlHandler {
                 }
             }
             RequestOp::SshProtect { path } => self.protect_ssh_key(peer.euid, &path),
+            RequestOp::AcceptanceSetBlockSuppression { disable_for_secs } => {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                match self
+                    .policy
+                    .set_test_block_suppression_disabled(disable_for_secs, now)
+                {
+                    Ok(disabled_until) => {
+                        Response::ok(ResponseBody::AcceptanceBlockSuppression { disabled_until })
+                    }
+                    Err(error) => Response::err(error.to_string()),
+                }
+            }
             RequestOp::SshLoadAuthorize { .. } => Response::err(
                 "ssh_load_not_supported_on_macos: use ordinary ssh-add and approve its protected-key read",
             ),
@@ -157,18 +179,77 @@ impl ControlHandler {
         if let Err(error) = config.validate_for_peer(peer_uid) {
             return Response::err(format!("configuration_scope_denied: {error}"));
         }
-        if let Err(error) = prepare_config(Some(&config)) {
-            return Response::err(format!("configuration_prepare_failed: {error}"));
+        let (candidate_index, _, _) = match prepare_config(Some(&config)) {
+            Ok(prepared) => prepared,
+            Err(error) => return Response::err(format!("configuration_prepare_failed: {error}")),
+        };
+        if candidate_index.unresolved_external_hardlink_count() > 0 {
+            return Response::err(format!(
+                "configuration_unsafe_external_hardlink: {} protected inode(s) have aliases outside selected namespaces",
+                candidate_index.unresolved_external_hardlink_count()
+            ));
         }
-        if let Err(error) = config.write_authoritative() {
+        if let Err(error) = self.transactional_apply(config.clone()) {
             return Response::err(format!("configuration_apply_failed: {error}"));
-        }
-        if let Err(error) = self.policy.apply_config(config.clone()) {
-            return Response::err(format!("configuration_reload_failed: {error}"));
         }
         Response::ok(ResponseBody::ConfigurationApplied {
             version: config.version,
         })
+    }
+
+    fn apply_target_selection(&self, plan: TargetSelectionPlan) -> anyhow::Result<()> {
+        let sender = self.selection_updates.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+            "Endpoint Security is unavailable; refusing to persist policy that cannot be selected"
+        )
+        })?;
+        let (reply, receiver) = mpsc::sync_channel(1);
+        sender
+            .send(SelectionUpdate { plan, reply })
+            .map_err(|_| anyhow::anyhow!("Endpoint Security selection worker is unavailable"))?;
+        receiver
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|_| anyhow::anyhow!("Endpoint Security selection update timed out"))?
+    }
+
+    fn transactional_apply(&self, config: MacBackendConfig) -> anyhow::Result<()> {
+        let old_config = self.policy.config_optional()?;
+        let old_plan = self.policy.target_selection_plan();
+        let new_index = MacResourceIndex::from_enrollments(
+            &config.browser_trust,
+            &config.common_policy.ssh_keys,
+        )?;
+        let new_plan = new_index.target_selection_plan();
+        let union_plan = TargetSelectionPlan::from_rules(
+            old_plan.rules().iter().chain(new_plan.rules()).cloned(),
+        );
+
+        // Expansion happens first. During the short staging period extra
+        // paths can be observed, but no new resource is active in policy.
+        self.apply_target_selection(union_plan.clone())?;
+        if let Err(error) = self.policy.apply_config(config.clone()) {
+            return Err(error.context("policy publish failed after selection expansion"));
+        }
+        // Only after policy no longer relies on removed paths may selection
+        // shrink. If this fails, restore the previous policy and retain the
+        // conservative union rather than leaving disk ahead of enforcement.
+        if let Err(error) = self.apply_target_selection(new_plan) {
+            if let Some(old) = old_config {
+                let _ = self.policy.apply_config(old);
+            }
+            return Err(error.context("selection shrink failed; previous policy restored"));
+        }
+        if let Err(error) = config.write_authoritative() {
+            let _ = self.apply_target_selection(union_plan);
+            if let Some(old) = old_config {
+                let _ = self.policy.apply_config(old.clone());
+                let _ = self.apply_target_selection(old_plan);
+            }
+            return Err(
+                error.context("authoritative config write failed; runtime rollback attempted")
+            );
+        }
+        Ok(())
     }
 
     fn protect_ssh_key(&self, peer_uid: u32, path: &str) -> Response {
@@ -184,14 +265,8 @@ impl ControlHandler {
             Ok(update) => update,
             Err(error) => return Response::err(format!("ssh_enrollment_denied: {error}")),
         };
-        if let Err(error) = prepare_config(Some(&config)) {
-            return Response::err(format!("configuration_prepare_failed: {error}"));
-        }
-        if let Err(error) = config.write_authoritative() {
-            return Response::err(format!("configuration_apply_failed: {error}"));
-        }
-        if let Err(error) = self.policy.apply_config(config) {
-            return Response::err(format!("configuration_reload_failed: {error}"));
+        if let Err(error) = self.transactional_apply(config) {
+            return Response::err(format!("ssh_enrollment_apply_failed: {error}"));
         }
         Response::ok(ResponseBody::SshProtected(guard_ipc::SshProtectedInfo {
             path: resource.path.to_string_lossy().into_owned(),
@@ -257,15 +332,16 @@ impl ControlHandler {
             marked_filesystems: None,
             required_filesystems: None,
             filesystem_marks_healthy: None,
-            strict_events_total: None,
-            strict_fast_allowed: None,
             protected_events: stats.protected_events,
             fanotify_overflows: None,
             classifier_failures: Some(stats.classifier_failures),
-            strict_alias_scans: None,
-            strict_alias_matches: None,
             topology_degraded: None,
             mac_health: Some(Box::new(guard_ipc::MacHealthInfo {
+                authorization_events_delivered: health.authorization_events_delivered,
+                protected_authorization_events: health.protected_authorization_events,
+                unresolved_external_hardlinks: health.unresolved_external_hardlinks,
+                target_path_inversion_active: health.target_path_inversion_active,
+                process_lifecycle_events: health.process_lifecycle_events,
                 es_sequence_gaps: health.sequence_gaps,
                 es_global_sequence_gaps: health.global_sequence_gaps,
                 pending_created: health.pending_created,
@@ -417,11 +493,17 @@ pub fn run() -> ExitCode {
                 namespace_alias_capacity: 0,
                 namespace_index_saturated: false,
                 process_graph_degraded: false,
+                authorization_events_delivered: 0,
+                protected_authorization_events: 0,
+                unresolved_external_hardlinks: 0,
+                target_path_inversion_active: false,
+                process_lifecycle_events: 0,
             }
         },
         EndpointSecurityBackend::health,
     );
     let backend_health = Arc::new(RwLock::new(initial_health));
+    let (selection_updates, selection_receiver) = mpsc::sync_channel(16);
     let server = match MacXpcServer::new(
         &requirements,
         [console_uid],
@@ -429,6 +511,7 @@ pub fn run() -> ExitCode {
             policy: Arc::clone(&policy),
             backend_health: Arc::clone(&backend_health),
             helper_heartbeats: Mutex::new(HashMap::new()),
+            selection_updates: backend.as_ref().map(|_| selection_updates.clone()),
         },
     ) {
         Ok(server) => server,
@@ -437,7 +520,6 @@ pub fn run() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-
     if backend.is_none() {
         eprintln!(
             "guard-es: authenticated XPC active for uid={console_uid}; Endpoint Security is not active"
@@ -452,6 +534,10 @@ pub fn run() -> ExitCode {
     );
     let backend = backend.take().expect("checked above");
     loop {
+        while let Ok(update) = selection_receiver.try_recv() {
+            let result = backend.update_target_selection(&update.plan);
+            let _ = update.reply.send(result);
+        }
         match backend.recv_timeout(Duration::from_millis(250)) {
             Ok(event) => policy.handle(event),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}

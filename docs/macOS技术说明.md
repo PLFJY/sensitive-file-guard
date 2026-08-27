@@ -4,7 +4,11 @@
 
 ## 运行链路
 
-`Guard.app` 负责 GUI、配置、用户确认和 macOS 系统通知；嵌套的 `guard-es.systemextension` 创建 Endpoint Security client；`guardctl` 和 `guard-notify` 通过经过签名身份验证的 XPC 与控制面通信。`guard-notify` 在 macOS 上只负责发现 pending 请求并唤起 Guard，不发送拒绝通知，避免通知代理和 GUI 重复发送。策略、资源索引、进程身份、审计和 deadline 逻辑只有一份，不在 GUI 中复制。
+`Sensitive File Guard.app` 负责 GUI、配置、用户确认和 macOS 系统通知；嵌套的 `guard-es.systemextension` 创建两个 Endpoint Security client：授权 client 只订阅 `AUTH_OPEN`、`AUTH_LINK`、`AUTH_RENAME`，并在订阅前以 Ventura 的 target-path mute inversion 选择受保护路径；进程图 client 全局订阅 `NOTIFY_FORK`、`NOTIFY_EXEC`、`NOTIFY_EXIT`。因此普通文件打开不会进入同步授权回调，而进程身份跟踪不会被路径选择意外过滤。`guardctl` 和 `guard-notify` 通过经过签名身份验证的 XPC 与控制面通信。`guard-notify` 在 macOS 上只负责发现 pending 请求并唤起 Sensitive File Guard，不发送拒绝通知，避免通知代理和 GUI 重复发送。策略、资源索引、进程身份、审计和 deadline 逻辑只有一份，不在 GUI 中复制。
+
+资源索引同时生成原生选择计划：Chromium/Firefox/Zen 使用各自 profile root，SSH 使用精确路径；Safari 只选择 `Safari` 和 `Containers/com.apple.Safari/Data/Library` 的相关命名空间，绝不选择整个 `~/Library`。SDK 对硬链接和符号链接没有额外保证，因此启动和配置时会在已批准命名空间内比较受保护 inode 的已见目录项数与 `st_nlink`；存在无法在选择范围内观察的外部硬链接时，配置被拒绝，运行状态不会虚报 `ACTIVE`。真实符号链接行为通过 `scripts/macos/run-target-selection-acceptance.sh` 的合成 fixture 测量。
+
+实时配置采用保守顺序：先扩大 ES 选择集，再发布新策略，最后缩小选择集并写入 authoritative config；任一步失败都会保留或恢复已知安全状态，磁盘配置不会先于有效选择状态提交。状态接口还公开 `target_path_inversion_active`、`authorization_events_delivered`、`protected_authorization_events` 和 `process_lifecycle_events`，分别用于验证内核选择已启用、授权回调负载和全局生命周期跟踪。
 
 ## 审计日志保留
 

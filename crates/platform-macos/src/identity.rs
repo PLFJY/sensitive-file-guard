@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use guard_core::identity::{AncestorSummary, ProcessStableId};
@@ -79,7 +79,20 @@ impl MacProcessFacts {
 }
 
 fn normalize_executable_path(path: &std::path::Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    // Endpoint Security can report the Darwin data-volume aliases with either
+    // spelling. The executable may already have exited by the time a later
+    // lifecycle message arrives, so canonicalize alone is insufficient: it
+    // then falls back to two different raw spellings for the same inode.
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return canonical;
+    }
+    if let Ok(suffix) = path.strip_prefix("/var") {
+        return Path::new("/private/var").join(suffix);
+    }
+    if let Ok(suffix) = path.strip_prefix("/tmp") {
+        return Path::new("/private/tmp").join(suffix);
+    }
+    path.to_path_buf()
 }
 
 #[derive(Debug, Clone)]
@@ -391,6 +404,22 @@ mod tests {
         first.executable.ino = 22;
         let mut second = first.clone();
         second.executable.path = alias;
+
+        let mut graph = MacProcessGraph::default();
+        graph.observe(first, now).unwrap();
+        graph.observe(second, now).unwrap();
+        assert!(!graph.is_degraded());
+    }
+
+    #[test]
+    fn darwin_var_aliases_remain_stable_after_the_executable_is_gone() {
+        let now = Instant::now();
+        let mut first = facts(42, 7, 100, None);
+        first.executable.path = PathBuf::from("/var/folders/synthetic/guard-test-probe");
+        first.executable.dev = 11;
+        first.executable.ino = 22;
+        let mut second = first.clone();
+        second.executable.path = PathBuf::from("/private/var/folders/synthetic/guard-test-probe");
 
         let mut graph = MacProcessGraph::default();
         graph.observe(first, now).unwrap();

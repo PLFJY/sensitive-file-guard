@@ -6,8 +6,8 @@ if [ "$(uname -s)" != "Darwin" ]; then
     exit 2
 fi
 
-identity=${SELF_USE_SIGNING_IDENTITY:-Guard Local Development Certificate}
-keychain=${SELF_USE_SIGNING_KEYCHAIN:-"$HOME/Library/Keychains/GuardSelfUse.keychain-db"}
+identity=${SFG_SELF_USE_SIGNING_IDENTITY:-'Sensitive File Guard Local Development'}
+keychain=${SFG_SELF_USE_SIGNING_KEYCHAIN:-"$HOME/Library/Keychains/SensitiveFileGuardSelfUse.keychain-db"}
 password_service=top.plfjy.SensitiveFileGuard.self-use-keychain
 password_account=$keychain
 # Read-only compatibility for a keychain created before the product identifier

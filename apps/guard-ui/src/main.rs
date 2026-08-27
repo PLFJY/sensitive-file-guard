@@ -57,7 +57,6 @@ struct BrowserSource {
 #[derive(Clone)]
 struct SshSource {
     path: PathBuf,
-    origin: SourceOrigin,
 }
 
 fn health_from_evidence(
@@ -143,20 +142,20 @@ fn main() {
     if std::env::args().any(|arg| arg == "--test-notification") {
         match platform_macos::notifications::send(
             "Sensitive File Guard test notification",
-            "The Guard.app notification channel is working; this is a synthetic test message.",
+            "The Sensitive File Guard.app notification channel is working; this is a synthetic test message.",
         ) {
             Ok(()) => {
-                eprintln!("Guard: delivered synthetic macOS test notification");
+                eprintln!("Sensitive File Guard: delivered synthetic macOS test notification");
                 return;
             }
             Err(error) => {
-                eprintln!("Guard: macOS test notification failed: {error}");
+                eprintln!("Sensitive File Guard: macOS test notification failed: {error}");
                 std::process::exit(1);
             }
         }
     }
     if let Err(error) = platform_service::configure_bundled_runtime() {
-        eprintln!("Guard bundled GTK runtime is invalid: {error}");
+        eprintln!("Sensitive File Guard bundled GTK runtime is invalid: {error}");
         std::process::exit(78);
     }
     let pending_only = std::env::args().any(|arg| arg == PENDING_ONLY_ARG);
@@ -172,7 +171,7 @@ fn main() {
     };
     adw::init().expect("libadwaita initialization");
     if packaging_smoke {
-        println!("Guard bundled GTK runtime initialized");
+        println!("Sensitive File Guard bundled GTK runtime initialized");
         return;
     }
     // Let libadwaita own the color preference instead of inheriting the
@@ -543,10 +542,11 @@ fn protection_page(state: &UiState) -> gtk::Box {
         );
 
         let helper_group = adw::PreferencesGroup::new();
-        helper_group.set_title("Optional: open Guard automatically for confirmations");
+        helper_group
+            .set_title("Optional: open Sensitive File Guard automatically for confirmations");
         let helper = adw::SwitchRow::new();
         helper.set_subtitle_lines(STATUS_SUBTITLE_LINES);
-        helper.set_title("Open Guard automatically when confirmation is required");
+        helper.set_title("Open Sensitive File Guard automatically when confirmation is required");
         helper.set_subtitle("Runs only while protection is enabled to show browser migration or SSH key confirmations; it does not install extensions or grant permissions.");
         helper.set_active(false);
         helper.set_sensitive(false);
@@ -568,32 +568,6 @@ fn protection_page(state: &UiState) -> gtk::Box {
         *state.helper.borrow_mut() = Some(helper.clone());
         helper_group.add(&helper);
         page.append(&helper_group);
-
-        let allowlist_heading = gtk::Label::new(Some("macOS trusted tools"));
-        allowlist_heading.set_xalign(0.0);
-        allowlist_heading.add_css_class("title-2");
-        page.append(&allowlist_heading);
-        let allowlist_info = gtk::Label::new(Some(
-            "Spotlight uses exact Apple-signature exceptions only for history metadata; third-party tools are not automatically allowed based on their name or install location. Cookies, passwords, session data, and SSH private keys still require confirmation.",
-        ));
-        allowlist_info.set_xalign(0.0);
-        allowlist_info.set_wrap(true);
-        allowlist_info.set_wrap_mode(gtk::pango::WrapMode::WordChar);
-        allowlist_info.set_max_width_chars(SUMMARY_WIDTH_CHARS);
-        page.append(&allowlist_info);
-        let add_tool = gtk::Button::with_label("Add trusted tool…");
-        add_tool.set_halign(gtk::Align::Start);
-        let tool_state = state.clone();
-        let trusted_tools = gtk::ListBox::new();
-        trusted_tools.set_selection_mode(gtk::SelectionMode::None);
-        trusted_tools.add_css_class("boxed-list");
-        let trusted_tools_for_dialog = trusted_tools.clone();
-        add_tool.connect_clicked(move |_| {
-            show_add_trusted_tool_dialog(&tool_state, &trusted_tools_for_dialog)
-        });
-        page.append(&add_tool);
-        page.append(&trusted_tools);
-        render_trusted_tools(state, &trusted_tools);
     }
     let browsers_heading = gtk::Label::new(Some("Protected browsers"));
     browsers_heading.set_xalign(0.0);
@@ -925,10 +899,7 @@ fn refresh_ssh_sources(state: &UiState) {
     let suggestions = guard_ssh::suggest_keys(&home.join(".ssh"))
         .unwrap_or_default()
         .into_iter()
-        .map(|path| SshSource {
-            path,
-            origin: SourceOrigin::NativeDetected,
-        })
+        .map(|path| SshSource { path })
         .collect::<Vec<_>>();
     let removed_missing = if let Some(cfg) = state.candidate.borrow_mut().as_mut() {
         let before = cfg.ssh_keys.len();
@@ -953,18 +924,12 @@ fn refresh_ssh_sources(state: &UiState) {
     let mut sources = suggestions;
     for key in configured {
         if !sources.iter().any(|source| source.path == key) {
-            sources.push(SshSource {
-                path: key,
-                origin: SourceOrigin::Custom,
-            });
+            sources.push(SshSource { path: key });
         }
     }
     for key in active_ssh_keys {
         if !sources.iter().any(|source| source.path == key) {
-            sources.push(SshSource {
-                path: key,
-                origin: SourceOrigin::Custom,
-            });
+            sources.push(SshSource { path: key });
         }
     }
     sources.sort_by(|left, right| left.path.cmp(&right.path));
@@ -1102,10 +1067,7 @@ fn render_objects(state: &UiState, cfg: &platform_service::EditableConfiguration
     let mut ssh_sources = state.ssh_sources.borrow().clone();
     for key in &cfg.ssh_keys {
         if !ssh_sources.iter().any(|source| source.path == *key) {
-            ssh_sources.push(SshSource {
-                path: key.clone(),
-                origin: SourceOrigin::Custom,
-            });
+            ssh_sources.push(SshSource { path: key.clone() });
         }
     }
     ssh_sources.sort_by(|left, right| left.path.cmp(&right.path));
@@ -1140,7 +1102,7 @@ fn render_objects(state: &UiState, cfg: &platform_service::EditableConfiguration
                 apply.set_sensitive(true);
             }
         });
-        if configured && source.origin == SourceOrigin::Custom {
+        if configured || active {
             let remove = remove_button("Remove SSH key protection");
             let candidate = state.candidate.clone();
             let apply = state.apply.clone();
@@ -1221,114 +1183,6 @@ fn show_add_key_dialog(state: &UiState) {
     });
     dialog.show();
 }
-
-#[cfg(target_os = "macos")]
-fn show_add_trusted_tool_dialog(state: &UiState, list: &gtk::ListBox) {
-    let dialog = gtk::FileChooserNative::new(
-        Some("Select an executable inside the trusted tool App"),
-        None::<&gtk::Window>,
-        gtk::FileChooserAction::Open,
-        Some("Verify and add"),
-        Some("Cancel"),
-    );
-    let list = list.clone();
-    let candidate = state.candidate.clone();
-    let apply = state.apply.clone();
-    let dialog_state = state.clone();
-    dialog.connect_response(move |dialog, response| {
-        if response == gtk::ResponseType::Accept {
-            if let Some(path) = dialog.file().and_then(|file| file.path()) {
-                let candidate = candidate.clone();
-                let apply = apply.clone();
-                let dialog_state = dialog_state.clone();
-                let list = list.clone();
-                glib::MainContext::default().spawn_local(async move {
-                    let result = gio::spawn_blocking(move || {
-                        // SAFETY: geteuid has no pointer arguments and reads
-                        // only the current authenticated desktop UID.
-                        let uid = unsafe { libc::geteuid() };
-                        platform_macos::config::enroll_trusted_tool(&path, uid)
-                    })
-                    .await;
-                    match result {
-                        Ok(Ok(rule)) => {
-                            if let Some(config) = candidate.borrow_mut().as_mut() {
-                                if !config
-                                    .mac_allowlist
-                                    .trusted_tools
-                                    .iter()
-                                    .any(|existing| existing.path == rule.path)
-                                {
-                                    config.mac_allowlist.trusted_tools.push(rule);
-                                    apply.set_sensitive(true);
-                                    dialog_state.mac_setup_message.set_text(
-                                        "The trusted tool was added to the pending configuration; sensitive browser data and SSH private keys still require confirmation.",
-                                    );
-                                    render_trusted_tools(&dialog_state, &list);
-                                }
-                            }
-                        }
-                        Ok(Err(error)) => dialog_state
-                            .mac_setup_message
-                            .set_text(&format!("Tool was not added: {error}")),
-                        Err(error) => dialog_state
-                            .mac_setup_message
-                            .set_text(&format!("Verification task failed: {error:?}")),
-                    }
-                });
-            }
-        }
-        dialog.destroy();
-    });
-    dialog.show();
-}
-
-#[cfg(target_os = "macos")]
-fn render_trusted_tools(state: &UiState, list: &gtk::ListBox) {
-    while let Some(child) = list.first_child() {
-        list.remove(&child);
-    }
-    let candidate = state.candidate.borrow();
-    let Some(config) = candidate.as_ref() else {
-        return;
-    };
-    for tool in &config.mac_allowlist.trusted_tools {
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        row.set_margin_top(8);
-        row.set_margin_bottom(8);
-        row.set_margin_start(10);
-        row.set_margin_end(10);
-        let label = gtk::Label::new(Some(&format!(
-            "{} · Enrolled (low-sensitivity metadata only)",
-            tool.path.display()
-        )));
-        label.set_xalign(0.0);
-        label.set_hexpand(true);
-        label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
-        let remove = gtk::Button::with_label("Revoke");
-        let candidate = state.candidate.clone();
-        let apply = state.apply.clone();
-        let path = tool.path.clone();
-        remove.connect_clicked(move |_| {
-            if let Some(config) = candidate.borrow_mut().as_mut() {
-                config
-                    .mac_allowlist
-                    .trusted_tools
-                    .retain(|item| item.path != path);
-                apply.set_sensitive(true);
-            }
-        });
-        row.append(&label);
-        row.append(&remove);
-        list.append(&row);
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn show_add_trusted_tool_dialog(_state: &UiState, _list: &gtk::ListBox) {}
-
-#[cfg(not(target_os = "macos"))]
-fn render_trusted_tools(_state: &UiState, _list: &gtk::ListBox) {}
 
 fn show_add_browser_dialog(state: &UiState) {
     let dialog = gtk::Dialog::with_buttons(
@@ -1641,7 +1495,7 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
                 {
                     let (title, body) = mac_notification_text(&event);
                     if let Err(error) = platform_macos::notifications::send(&title, &body) {
-                        eprintln!("Guard: macOS system notification failed: {error:#}");
+                        eprintln!("Sensitive File Guard: macOS system notification failed: {error:#}");
                     }
                 }
                 let decision = match event.event_code.as_str() {
@@ -1698,9 +1552,9 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
                 #[cfg(target_os = "macos")]
                 if let Err(error) = platform_macos::notifications::send(
                     "Sensitive File Guard confirmation required",
-                    "Guard is waiting for your decision about protected browser data or an SSH private key.",
+                    "Sensitive File Guard is waiting for your decision about protected browser data or an SSH private key.",
                 ) {
-                    eprintln!("Guard: macOS confirmation notification failed: {error:#}");
+                    eprintln!("Sensitive File Guard: macOS confirmation notification failed: {error:#}");
                 }
                 present_pending_dialog(&window, pending_dialogs.clone(), prompt, pending_only);
             } else if complete_pending_snapshot
@@ -2513,6 +2367,7 @@ mod tests {
     #[test]
     fn mac_configuration_has_policy_state_and_no_linux_mode() {
         let config = configuration_from_daemon(guard_ipc::ConfigurationInfo {
+            enforcement_mode: None,
             policy_enabled: Some(true),
             browsers: vec![guard_ipc::ConfiguredBrowserInfo {
                 id: "firefox".into(),
@@ -2649,6 +2504,14 @@ mod tests {
             enforcement_active: true,
             read_only_guaranteed: None,
             status: "ACTIVE".into(),
+            #[cfg(target_os = "macos")]
+            mode: None,
+            #[cfg(target_os = "macos")]
+            marked_filesystems: None,
+            #[cfg(target_os = "macos")]
+            required_filesystems: None,
+            #[cfg(target_os = "macos")]
+            filesystem_marks_healthy: None,
             #[cfg(target_os = "linux")]
             permission_events_total: Some(0),
             protected_events: 0,

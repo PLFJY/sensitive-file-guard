@@ -540,24 +540,6 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                                 }
                                 fd_transferred = true;
                             }
-                            pending::EnqueueResult::DenySuppressed => {
-                                // `PendingPermission` was dropped in enqueue
-                                // and therefore denied + closed exactly once.
-                                audit_record = Some(
-                                    engine
-                                        .lock()
-                                        .expect("engine mutex poisoned")
-                                        .migration_audit_record(
-                                            &audit_details,
-                                            "browser_migration_blocked",
-                                            guard_core::Decision::Deny(
-                                                guard_core::DenyReason::CrossBrowserWithoutLease,
-                                            ),
-                                            "browser_migration_blocked;resolution=retry_suppressed",
-                                        ),
-                                );
-                                fd_transferred = true;
-                            }
                             pending::EnqueueResult::DenyLimit => {
                                 audit_record = Some(
                                     engine
@@ -570,6 +552,22 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                                                 guard_core::DenyReason::CrossBrowserWithoutLease,
                                             ),
                                             "browser_migration_blocked;resolution=pending_limit",
+                                        ),
+                                );
+                                fd_transferred = true;
+                            }
+                            pending::EnqueueResult::DenySuppressed => {
+                                audit_record = Some(
+                                    engine
+                                        .lock()
+                                        .expect("engine mutex poisoned")
+                                        .migration_audit_record(
+                                            &audit_details,
+                                            "browser_migration_blocked",
+                                            guard_core::Decision::Deny(
+                                                guard_core::DenyReason::CrossBrowserWithoutLease,
+                                            ),
+                                            "browser_migration_blocked;resolution=retry_suppressed",
                                         ),
                                 );
                                 fd_transferred = true;
@@ -610,21 +608,6 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                             ));
                         }
                         pending::SshEnqueueResult::Joined => {}
-                        pending::SshEnqueueResult::DenySuppressed => {
-                            audit_record = Some(
-                                engine
-                                    .lock()
-                                    .expect("engine mutex poisoned")
-                                    .ssh_read_audit_record(
-                                        &audit_details,
-                                        "ssh_key_access_blocked",
-                                        guard_core::Decision::Deny(
-                                            guard_core::DenyReason::IdentityMismatch,
-                                        ),
-                                        "ssh_key_access_blocked;resolution=retry_suppressed",
-                                    ),
-                            );
-                        }
                         pending::SshEnqueueResult::DenyLimit => {
                             audit_record = Some(
                                 engine
@@ -637,6 +620,21 @@ fn run_browser_enforcement(cfg_path: &std::path::Path, cli: &Cli) -> anyhow::Res
                                             guard_core::DenyReason::IdentityMismatch,
                                         ),
                                         "ssh_key_access_blocked;resolution=pending_limit",
+                                    ),
+                            );
+                        }
+                        pending::SshEnqueueResult::DenySuppressed => {
+                            audit_record = Some(
+                                engine
+                                    .lock()
+                                    .expect("engine mutex poisoned")
+                                    .ssh_read_audit_record(
+                                        &audit_details,
+                                        "ssh_key_access_blocked",
+                                        guard_core::Decision::Deny(
+                                            guard_core::DenyReason::IdentityMismatch,
+                                        ),
+                                        "ssh_key_access_blocked;resolution=retry_suppressed",
                                     ),
                             );
                         }

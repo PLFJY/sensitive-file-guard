@@ -46,6 +46,9 @@ pub(crate) struct HealthTracker {
     late_responses: AtomicU64,
     namespace_allowed: AtomicU64,
     namespace_denied: AtomicU64,
+    authorization_events_delivered: AtomicU64,
+    protected_authorization_events: AtomicU64,
+    process_lifecycle_events: AtomicU64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -63,6 +66,9 @@ pub(crate) struct HealthSnapshot {
     pub late_responses: u64,
     pub namespace_allowed: u64,
     pub namespace_denied: u64,
+    pub authorization_events_delivered: u64,
+    pub protected_authorization_events: u64,
+    pub process_lifecycle_events: u64,
 }
 
 impl HealthTracker {
@@ -81,6 +87,9 @@ impl HealthTracker {
             late_responses: AtomicU64::new(0),
             namespace_allowed: AtomicU64::new(0),
             namespace_denied: AtomicU64::new(0),
+            authorization_events_delivered: AtomicU64::new(0),
+            protected_authorization_events: AtomicU64::new(0),
+            process_lifecycle_events: AtomicU64::new(0),
         }
     }
 
@@ -117,6 +126,13 @@ impl HealthTracker {
             late_responses: self.late_responses.load(Ordering::Acquire),
             namespace_allowed: self.namespace_allowed.load(Ordering::Acquire),
             namespace_denied: self.namespace_denied.load(Ordering::Acquire),
+            authorization_events_delivered: self
+                .authorization_events_delivered
+                .load(Ordering::Acquire),
+            protected_authorization_events: self
+                .protected_authorization_events
+                .load(Ordering::Acquire),
+            process_lifecycle_events: self.process_lifecycle_events.load(Ordering::Acquire),
         }
     }
 
@@ -137,6 +153,24 @@ impl HealthTracker {
         } else {
             self.namespace_denied.fetch_add(1, Ordering::AcqRel);
         }
+    }
+
+    pub(crate) fn authorization_event(&self, protected: bool) {
+        self.authorization_events_delivered
+            .fetch_add(1, Ordering::AcqRel);
+        if protected {
+            self.protected_authorization_events
+                .fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    pub(crate) fn protected_authorization_event(&self) {
+        self.protected_authorization_events
+            .fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub(crate) fn process_lifecycle_event(&self) {
+        self.process_lifecycle_events.fetch_add(1, Ordering::AcqRel);
     }
 }
 

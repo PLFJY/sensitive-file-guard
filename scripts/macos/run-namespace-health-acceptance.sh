@@ -2,7 +2,13 @@
 set -eu
 
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
-app=${GUARD_APP:-$repo_dir/build/macos/Guard.app}
+if [ -n "${GUARD_APP:-}" ]; then
+    app=$GUARD_APP
+elif [ -x '/Applications/Sensitive File Guard.app/Contents/MacOS/guardctl' ]; then
+    app='/Applications/Sensitive File Guard.app'
+else
+    app="$repo_dir/build/macos/Sensitive File Guard.app"
+fi
 guardctl="$app/Contents/MacOS/guardctl"
 chrome='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
 
@@ -13,7 +19,7 @@ for required in "$guardctl" "$chrome"; do
     fi
 done
 
-status=$($guardctl --json status 2>&1) || {
+status=$("$guardctl" --json status 2>&1) || {
     echo "BLOCKED: signed guardctl cannot reach the activated extension" >&2
     printf '%s\n' "$status" >&2
     exit 77
@@ -58,9 +64,6 @@ if [ ! -f "$cookies" ]; then
     echo "BLOCKED: disposable Chrome did not create its synthetic Cookies database" >&2
     exit 77
 fi
-preexisting_alias="$test_root/preexisting-cookie-alias"
-ln "$cookies" "$preexisting_alias"
-
 cat <<INSTRUCTIONS
 Enroll exactly this disposable Chrome profile in Guard and enable Protection:
 
@@ -71,7 +74,7 @@ Do not select a normal user profile. Press Return after status is ACTIVE.
 INSTRUCTIONS
 read -r _answer
 
-status=$($guardctl --json status)
+status=$("$guardctl" --json status)
 printf '%s\n' "$status" | grep -Eq \
     '"enforcement_active"[[:space:]]*:[[:space:]]*true'
 printf '%s\n' "$status" | grep -q '"mac_health"'
@@ -80,10 +83,10 @@ MACOSX_DEPLOYMENT_TARGET=13.0 cargo build --manifest-path "$repo_dir/Cargo.toml"
     -p guard-test-probe >/dev/null
 probe="$repo_dir/target/debug/guard-test-probe"
 
-if "$probe" read "$preexisting_alias" >/dev/null 2>"$test_root/hardlink.err"; then
-    echo "FAIL: pre-existing hardlink alias bypassed protection" >&2
-    exit 1
-fi
+# Pre-existing aliases are tested before activation by
+# run-target-selection-acceptance.sh: the staged policy must be rejected
+# rather than falsely reporting ACTIVE. Here, after activation, LINK itself
+# proves that a new outside alias cannot be created.
 
 symlink_alias="$test_root/symlink-cookie-alias"
 ln -s "$cookies" "$symlink_alias"
@@ -107,7 +110,7 @@ fi
 
 # A real enrolled browser must retain normal atomic profile-update behavior.
 run_chrome
-status=$($guardctl --json status)
+status=$("$guardctl" --json status)
 printf '%s\n' "$status" | grep -q '"namespace_denied"'
 echo "PASS: hardlink, rename-out, parent rename, symlink, and browser regression checks completed"
 

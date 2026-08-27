@@ -8,12 +8,12 @@ fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH= cd -- "$script_dir/../.." && pwd)
-app=${1:-"$repo_dir/build/macos-release/Guard.app"}
+app=${1:-"$repo_dir/build/macos-release/Sensitive File Guard.app"}
 case "$app" in
     *'|'*|*'
 '*) echo "unsupported app path: $app" >&2; exit 2 ;;
 esac
-test -x "$app/Contents/MacOS/Guard" || {
+test -x "$app/Contents/MacOS/SensitiveFileGuard" || {
     echo "Guard executable is missing from bundle: $app" >&2
     exit 2
 }
@@ -102,7 +102,7 @@ cp "$repo_dir/packaging/macos/THIRD_PARTY_NOTICES.md" \
     "$resources/THIRD_PARTY_NOTICES.md"
 : >"$resources/guard-release-runtime"
 
-enqueue "$app/Contents/MacOS/Guard" "$app/Contents/MacOS/Guard" main
+enqueue "$app/Contents/MacOS/SensitiveFileGuard" "$app/Contents/MacOS/SensitiveFileGuard" main
 line_number=1
 while :; do
     line=$(sed -n "${line_number}p" "$queue")
@@ -178,10 +178,10 @@ while :; do
     fi
 done
 
-if ! otool -l "$app/Contents/MacOS/Guard" | \
+if ! otool -l "$app/Contents/MacOS/SensitiveFileGuard" | \
     awk '/cmd LC_RPATH/{seen=1} seen && /path @executable_path\/\.\.\/Frameworks/{found=1} END{exit !found}'; then
     install_name_tool -add_rpath '@executable_path/../Frameworks' \
-        "$app/Contents/MacOS/Guard"
+        "$app/Contents/MacOS/SensitiveFileGuard"
 fi
 
 count=$(find "$frameworks" -type f | wc -l | tr -d ' ')

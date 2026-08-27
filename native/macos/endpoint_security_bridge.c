@@ -106,8 +106,8 @@ int guard_es_client_create(
     guard_es_namespace_callback_t namespace_callback,
     guard_es_sequence_callback_t sequence_callback,
     void *context) {
-    if (client == NULL || callback == NULL || process_callback == NULL ||
-        namespace_callback == NULL || sequence_callback == NULL) {
+    if (client == NULL || sequence_callback == NULL ||
+        (callback == NULL && process_callback == NULL && namespace_callback == NULL)) {
         return 1;
     }
     *client = NULL;
@@ -127,14 +127,12 @@ int guard_es_client_create(
             case ES_EVENT_TYPE_AUTH_RENAME: stable_event_kind = 6; break;
             default: break;
         }
-        sequence_callback(
-            context,
-            stable_event_kind,
-            message->version >= 2,
-            message->version >= 2 ? message->seq_num : 0,
-            message->version >= 4,
-            message->version >= 4 ? message->global_seq_num : 0);
+        sequence_callback(context, stable_event_kind, message->version >= 2,
+                          message->version >= 2 ? message->seq_num : 0,
+                          message->version >= 4,
+                          message->version >= 4 ? message->global_seq_num : 0);
         if (message->event_type == ES_EVENT_TYPE_NOTIFY_FORK) {
+            if (process_callback == NULL) return;
             guard_es_process_facts_t child;
             guard_es_process_facts_t parent;
             guard_normalize_process(message->version, message->event.fork.child, &child);
@@ -143,12 +141,14 @@ int guard_es_client_create(
             return;
         }
         if (message->event_type == ES_EVENT_TYPE_NOTIFY_EXEC) {
+            if (process_callback == NULL) return;
             guard_es_process_facts_t target;
             guard_normalize_process(message->version, message->event.exec.target, &target);
             process_callback(context, 2, &target, NULL);
             return;
         }
         if (message->event_type == ES_EVENT_TYPE_NOTIFY_EXIT) {
+            if (process_callback == NULL) return;
             guard_es_process_facts_t exiting;
             guard_normalize_process(message->version, message->process, &exiting);
             process_callback(context, 3, &exiting, NULL);
@@ -157,6 +157,7 @@ int guard_es_client_create(
         if (message->action_type == ES_ACTION_TYPE_AUTH &&
             (message->event_type == ES_EVENT_TYPE_AUTH_LINK ||
              message->event_type == ES_EVENT_TYPE_AUTH_RENAME)) {
+            if (namespace_callback == NULL) return;
             guard_es_namespace_event_t normalized;
             memset(&normalized, 0, sizeof(normalized));
             normalized.deadline = message->deadline;
@@ -205,9 +206,10 @@ int guard_es_client_create(
         }
         if (message->action_type != ES_ACTION_TYPE_AUTH ||
             message->event_type != ES_EVENT_TYPE_AUTH_OPEN) {
-            callback(context, es_client, message, NULL);
+            if (callback != NULL) callback(context, es_client, message, NULL);
             return;
         }
+        if (callback == NULL) return;
         const es_event_open_t *open_event = &message->event.open;
         const es_file_t *target = open_event->file;
         guard_es_auth_open_event_t normalized;
@@ -233,19 +235,80 @@ int guard_es_client_create(
     return 0;
 }
 
-int guard_es_client_subscribe_required(guard_es_client_t *client) {
+int guard_es_client_subscribe_authorization(guard_es_client_t *client) {
     if (client == NULL || client->client == NULL) {
         return -1;
     }
     es_event_type_t events[] = {
         ES_EVENT_TYPE_AUTH_OPEN,
-        ES_EVENT_TYPE_NOTIFY_FORK,
-        ES_EVENT_TYPE_NOTIFY_EXEC,
-        ES_EVENT_TYPE_NOTIFY_EXIT,
         ES_EVENT_TYPE_AUTH_LINK,
         ES_EVENT_TYPE_AUTH_RENAME,
     };
-    return es_subscribe(client->client, events, 6) == ES_RETURN_SUCCESS ? 0 : -1;
+    return es_subscribe(client->client, events, 3) == ES_RETURN_SUCCESS ? 0 : -1;
+}
+
+int guard_es_client_subscribe_process_graph(guard_es_client_t *client) {
+    if (client == NULL || client->client == NULL) return -1;
+    es_event_type_t events[] = {
+        ES_EVENT_TYPE_NOTIFY_FORK,
+        ES_EVENT_TYPE_NOTIFY_EXEC,
+        ES_EVENT_TYPE_NOTIFY_EXIT,
+    };
+    return es_subscribe(client->client, events, 3) == ES_RETURN_SUCCESS ? 0 : -1;
+}
+
+int guard_es_client_configure_target_paths(
+    guard_es_client_t *client,
+    const guard_es_target_path_t *paths,
+    size_t path_count) {
+    if (client == NULL || client->client == NULL || (path_count > 0 && paths == NULL)) {
+        return -1;
+    }
+    // Apple requires this setup before AUTH subscriptions: default target
+    // muting must not become the inverted selection set.
+    if (es_unsubscribe_all(client->client) != ES_RETURN_SUCCESS) return -1;
+    if (es_muting_inverted(client->client, ES_MUTE_INVERSION_TYPE_TARGET_PATH) == ES_MUTE_INVERTED &&
+        es_invert_muting(client->client, ES_MUTE_INVERSION_TYPE_TARGET_PATH) != ES_RETURN_SUCCESS) {
+        return -1;
+    }
+    if (es_unmute_all_target_paths(client->client) != ES_RETURN_SUCCESS ||
+        es_invert_muting(client->client, ES_MUTE_INVERSION_TYPE_TARGET_PATH) != ES_RETURN_SUCCESS) {
+        return -1;
+    }
+    for (size_t i = 0; i < path_count; ++i) {
+        if (paths[i].path == NULL || paths[i].path[0] == '\0') return -1;
+        es_mute_path_type_t type = paths[i].prefix
+            ? ES_MUTE_PATH_TYPE_TARGET_PREFIX
+            : ES_MUTE_PATH_TYPE_TARGET_LITERAL;
+        if (es_mute_path(client->client, paths[i].path, type) != ES_RETURN_SUCCESS) return -1;
+    }
+    return guard_es_client_subscribe_authorization(client);
+}
+
+int guard_es_client_update_target_paths(
+    guard_es_client_t *client,
+    const guard_es_target_path_t *paths,
+    size_t path_count,
+    bool mute) {
+    if (client == NULL || client->client == NULL || (path_count > 0 && paths == NULL)) {
+        return -1;
+    }
+    for (size_t i = 0; i < path_count; ++i) {
+        if (paths[i].path == NULL || paths[i].path[0] == '\0') return -1;
+        es_mute_path_type_t type = paths[i].prefix
+            ? ES_MUTE_PATH_TYPE_TARGET_PREFIX
+            : ES_MUTE_PATH_TYPE_TARGET_LITERAL;
+        es_return_t result = mute
+            ? es_mute_path(client->client, paths[i].path, type)
+            : es_unmute_path(client->client, paths[i].path, type);
+        if (result != ES_RETURN_SUCCESS) return -1;
+    }
+    return 0;
+}
+
+bool guard_es_client_target_path_inversion_active(const guard_es_client_t *client) {
+    return client != NULL && client->client != NULL &&
+        es_muting_inverted(client->client, ES_MUTE_INVERSION_TYPE_TARGET_PATH) == ES_MUTE_INVERTED;
 }
 
 int guard_es_client_delete(guard_es_client_t *client) {

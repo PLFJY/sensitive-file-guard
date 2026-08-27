@@ -20,7 +20,7 @@ use platform_macos::endpoint_security::{
     AuthOpenFacts, MacAuthorizationEvent, MacPendingPermission, MacProtectedResources,
     ES_FFLAG_READ, ES_FFLAG_WRITE,
 };
-use platform_macos::resource_index::MacResourceIndex;
+use platform_macos::resource_index::{MacResourceIndex, TargetSelectionPlan};
 
 pub const MIGRATION_LEASE_SECS: u64 = 10 * 60;
 pub const SSH_READ_LEASE_SECS: u64 = 10;
@@ -105,7 +105,21 @@ struct PolicyInner {
     runtime: AuthorizationRuntime,
     pending: PendingMigrationStore,
     ssh_pending: PendingSshReadStore,
+    block_suppression_disabled_until: Option<u64>,
     stats: PolicyStats,
+}
+
+impl PolicyInner {
+    fn refresh_test_block_suppression(&mut self, now: u64) {
+        let disabled = self
+            .block_suppression_disabled_until
+            .is_some_and(|until| now < until);
+        if !disabled {
+            self.block_suppression_disabled_until = None;
+        }
+        self.pending.set_block_suppression_disabled(disabled);
+        self.ssh_pending.set_block_suppression_disabled(disabled);
+    }
 }
 
 pub struct MacPolicy {
@@ -163,6 +177,10 @@ impl MacPolicy {
 
     pub fn enabled(&self) -> bool {
         self.resources.enabled()
+    }
+
+    pub fn target_selection_plan(&self) -> TargetSelectionPlan {
+        self.resources.target_selection_plan()
     }
 
     pub fn resource_counts(&self) -> (usize, usize) {
@@ -260,6 +278,29 @@ impl MacPolicy {
         self.audit.dropped()
     }
 
+    /// Acceptance-only and memory-only. It is deliberately neither persisted
+    /// nor exposed through product configuration; a lost client self-recovers
+    /// when the bounded deadline is reached.
+    pub fn set_test_block_suppression_disabled(
+        &self,
+        disable_for_secs: u64,
+        now: u64,
+    ) -> anyhow::Result<Option<u64>> {
+        const MAX_TEST_DISABLE_SECS: u64 = 180;
+        anyhow::ensure!(
+            disable_for_secs <= MAX_TEST_DISABLE_SECS,
+            "test suppression override is limited to {MAX_TEST_DISABLE_SECS} seconds"
+        );
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        inner.block_suppression_disabled_until =
+            (disable_for_secs > 0).then(|| now.saturating_add(disable_for_secs));
+        inner.refresh_test_block_suppression(now);
+        Ok(inner.block_suppression_disabled_until)
+    }
+
     pub fn handle(&self, event: MacAuthorizationEvent) {
         self.handle_at(event.into(), epoch_seconds());
     }
@@ -269,6 +310,7 @@ impl MacPolicy {
             .inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        inner.refresh_test_block_suppression(now);
         inner.stats.protected_events = inner.stats.protected_events.saturating_add(1);
 
         let process = match self
@@ -623,6 +665,7 @@ impl MacPolicy {
                 .inner
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            inner.refresh_test_block_suppression(now);
             match inner
                 .pending
                 .take_for_resolution_result(id, uid, false, now, !allow)
@@ -751,6 +794,7 @@ impl MacPolicy {
                 .inner
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            inner.refresh_test_block_suppression(now);
             match inner
                 .ssh_pending
                 .take_for_resolution_result(id, uid, false, now, !allow)

@@ -9,7 +9,7 @@ fi
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH= cd -- "$script_dir/../.." && pwd)
 build_root=${MACOS_BUILD_ROOT:-"$repo_dir/build/macos"}
-app_bundle="$build_root/Guard.app"
+app_bundle="$build_root/Sensitive File Guard.app"
 app_bundle_id=${APP_BUNDLE_ID:-top.plfjy.SensitiveFileGuard}
 extension_bundle_id=${SYSTEM_EXTENSION_BUNDLE_ID:-"$app_bundle_id.guard-es"}
 guard_xpc_service_name=${GUARD_XPC_SERVICE_NAME:-"$extension_bundle_id.control"}
@@ -18,9 +18,10 @@ user_agent_plist_name="$notify_label.plist"
 version=${GUARD_VERSION:-0.1.0}
 build_number=${GUARD_BUILD_NUMBER:-1}
 build_profile=${BUILD_PROFILE:-debug}
+self_use_identity=${SFG_SELF_USE_SIGNING_IDENTITY:-'Sensitive File Guard Local Development'}
+self_use_keychain=${SFG_SELF_USE_SIGNING_KEYCHAIN:-"$HOME/Library/Keychains/SensitiveFileGuardSelfUse.keychain-db"}
 signing_identity=${SIGNING_IDENTITY:--}
 self_use=${SELF_USE_SIP_OFF:-0}
-self_use_keychain=${SELF_USE_SIGNING_KEYCHAIN:-}
 
 validate_bundle_id() {
     case "$1" in
@@ -35,7 +36,7 @@ validate_bundle_id "$extension_bundle_id"
 validate_bundle_id "$guard_xpc_service_name"
 case "$self_use" in 0|1) ;; *) echo "SELF_USE_SIP_OFF must be 0 or 1" >&2; exit 2 ;; esac
 if [ "$self_use" = 1 ]; then
-    signing_identity=${SELF_USE_SIGNING_IDENTITY:?SELF_USE_SIGNING_IDENTITY is required for SELF_USE_SIP_OFF=1}
+    signing_identity=$self_use_identity
     test "$signing_identity" != - || {
         echo "SELF_USE_SIP_OFF requires a local certificate; ad-hoc signing is not valid for authenticated XPC" >&2
         exit 2
@@ -44,17 +45,21 @@ if [ "$self_use" = 1 ]; then
         echo "SELF_USE_SIP_OFF cannot be combined with SKIP_SIGNING=1" >&2
         exit 2
     }
-    if [ -n "$self_use_keychain" ]; then
-        keychain_password=$(security find-generic-password -a "$self_use_keychain" \
-            -s top.plfjy.SensitiveFileGuard.self-use-keychain -w 2>/dev/null || \
-            security find-generic-password -a "$USER" \
-                -s top.plfjy.SensitiveFileGuard.self-use-keychain -w 2>/dev/null) || {
-            echo "cannot unlock SELF_USE_SIGNING_KEYCHAIN: local keychain password is unavailable" >&2
-            exit 2
-        }
-        security unlock-keychain -p "$keychain_password" "$self_use_keychain"
-        unset keychain_password
+    if ! "$script_dir/resolve-self-use-signing-identity.sh" \
+        "$signing_identity" "$self_use_keychain" >/dev/null 2>&1; then
+        SFG_SELF_USE_SIGNING_IDENTITY="$signing_identity" \
+        SFG_SELF_USE_SIGNING_KEYCHAIN="$self_use_keychain" \
+            "$script_dir/create-self-use-signing-identity.sh"
     fi
+    keychain_password=$(security find-generic-password -a "$self_use_keychain" \
+        -s top.plfjy.SensitiveFileGuard.self-use-keychain -w 2>/dev/null || \
+        security find-generic-password -a "$USER" \
+            -s top.plfjy.SensitiveFileGuard.self-use-keychain -w 2>/dev/null) || {
+        echo "cannot unlock self-use signing keychain: $self_use_keychain" >&2
+        exit 2
+    }
+    security unlock-keychain -p "$keychain_password" "$self_use_keychain"
+    unset keychain_password
     signing_identity=$("$script_dir/resolve-self-use-signing-identity.sh" \
         "$signing_identity" "$self_use_keychain")
     "$script_dir/self-use-safety-gate.sh"
@@ -108,7 +113,7 @@ fi
 extension_bundle="$app_bundle/Contents/Library/SystemExtensions/$extension_bundle_id.systemextension"
 mkdir -p "$app_bundle/Contents/MacOS" "$extension_bundle/Contents/MacOS"
 mkdir -p "$app_bundle/Contents/Library/LaunchAgents"
-cp "target/$cargo_profile/guard-ui" "$app_bundle/Contents/MacOS/Guard"
+cp "target/$cargo_profile/guard-ui" "$app_bundle/Contents/MacOS/SensitiveFileGuard"
 cp "target/$cargo_profile/guardctl" "$app_bundle/Contents/MacOS/guardctl"
 cp "target/$cargo_profile/guard-notify" "$app_bundle/Contents/MacOS/guard-notify"
 cp "target/$cargo_profile/guard-es" "$extension_bundle/Contents/MacOS/guard-es"
@@ -134,7 +139,7 @@ render_plist packaging/macos/GuardNotify.LaunchAgent.plist.in \
 mkdir -p "$app_bundle/Contents/Resources"
 "$script_dir/build-app-icon.sh" \
     "$repo_dir/data/io.github.plfjy.SensitiveFileGuard.svg" \
-    "$app_bundle/Contents/Resources/Guard.icns"
+    "$app_bundle/Contents/Resources/SensitiveFileGuard.icns"
 
 if [ -n "${HOST_PROVISIONING_PROFILE:-}" ] || [ -n "${EXTENSION_PROVISIONING_PROFILE:-}" ]; then
     : "${HOST_PROVISIONING_PROFILE:?both host and extension provisioning profiles are required}"
