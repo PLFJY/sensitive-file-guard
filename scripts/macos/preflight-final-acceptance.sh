@@ -79,8 +79,13 @@ fi
 
 helper=$("$guard" --pending-helper-status 2>&1) || true
 printf '%s\n' "pending_helper=$helper"
-if [ "$helper" != Enabled ]; then
-    echo "INFO: pending helper is optional; keep Guard open for interactive confirmations" >&2
+helper_dir="$app/Contents/Library/LaunchAgents"
+helper_plist=$(find "$helper_dir" -maxdepth 1 -type f -name '*.plist' -print -quit 2>/dev/null || true)
+helper_label=$(plutil -extract Label raw "$helper_plist" 2>/dev/null || true)
+if [ "$helper" != Enabled ] || [ -z "$helper_label" ] \
+    || ! launchctl print "gui/$(id -u)/$helper_label" >/dev/null 2>&1; then
+    echo "BLOCKED: pending-confirmation helper is not loaded; closed-GUI approvals would time out" >&2
+    blocked=1
 fi
 
 if [ "$blocked" -ne 0 ]; then

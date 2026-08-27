@@ -36,6 +36,23 @@ test -x "$guardctl" || {
     echo "BLOCKED: signed guardctl is unavailable: $guardctl" >&2
     exit 77
 }
+
+# An Enabled SMAppService registration can be stale after the app bundle has
+# been replaced. The fixture needs the actual user-session helper: it is what
+# launches the GUI after Guard itself has quit.
+helper_dir="$app/Contents/Library/LaunchAgents"
+helper_plist=$(find "$helper_dir" -maxdepth 1 -type f -name '*.plist' -print -quit 2>/dev/null || true)
+if [ -z "$helper_plist" ]; then
+    echo "BLOCKED: the installed app does not contain a pending-confirmation LaunchAgent" >&2
+    exit 77
+fi
+helper_label=$(plutil -extract Label raw "$helper_plist" 2>/dev/null || true)
+if [ -z "$helper_label" ] || ! launchctl print "gui/$(id -u)/$helper_label" >/dev/null 2>&1; then
+    echo "BLOCKED: the pending-confirmation helper is not loaded in this login session" >&2
+    echo "Deploy the current app again, then confirm this succeeds:" >&2
+    echo "  launchctl print gui/$(id -u)/${helper_label:-'<helper-label>'}" >&2
+    exit 77
+fi
 command -v ssh-keygen >/dev/null 2>&1 || {
     echo "BLOCKED: ssh-keygen is unavailable" >&2
     exit 77

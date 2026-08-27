@@ -59,9 +59,19 @@ int guard_user_agent_register(const char *plist_name,
     if (service == nil) {
         return -1;
     }
-    if (service.status == SMAppServiceStatusEnabled ||
-        service.status == SMAppServiceStatusRequiresApproval) {
+    if (service.status == SMAppServiceStatusRequiresApproval) {
         return 0;
+    }
+    if (service.status == SMAppServiceStatusEnabled) {
+        // An app replacement can leave SMAppService reporting Enabled for the
+        // old bundle while launchd has no job for the new one. Re-register so
+        // the pending helper always runs from the currently installed app.
+        NSError *unregisterError = nil;
+        if (![service unregisterAndReturnError:&unregisterError]) {
+            GuardCopyAgentError(error_buffer, error_buffer_length,
+                                unregisterError.localizedDescription);
+            return -1;
+        }
     }
     NSError *error = nil;
     if (![service registerAndReturnError:&error]) {
