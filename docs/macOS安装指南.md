@@ -28,9 +28,9 @@ scripts/macos/build-deploy-self-use.sh
 
 ## 确认助手和通知自检
 
-“遇到确认请求时自动打开 Sensitive File Guard”是可选的 LaunchAgent。开启后如果 macOS 要求批准，请到“系统设置 → 通用 → 登录项”批准 Sensitive File Guard；Protection 页面会保留注册失败的具体错误，不会再只把开关无提示地弹回去。macOS 的拒绝和确认通知由 `Sensitive File Guard.app` GUI 进程发送；`guard-notify` 只负责发现 pending 请求并唤起 GUI，不会重复发送通知。
+“遇到确认请求时自动打开 Sensitive File Guard”是可选的 LaunchAgent。开启后如果 macOS 要求批准，请到“系统设置 → 通用 → 登录项”批准 Sensitive File Guard；Protection 页面会保留注册失败的具体错误，不会再只把开关无提示地弹回去。macOS 的拒绝和确认通知由常驻的 `guard-notify` LaunchAgent 发送，因此关闭控制中心窗口后仍能提示；GUI 只显示安全日志和确认界面，不再重复投递。
 
-在当前用户登录会话中测试系统通知（必须使用新包；该入口最终由 Sensitive File Guard.app 发通知）：
+在当前用户登录会话中测试系统通知（必须使用新包；该入口由常驻 `guard-notify` 发送）：
 
 ```sh
 /Applications/Sensitive File Guard.app/Contents/MacOS/guard-notify --test-notification

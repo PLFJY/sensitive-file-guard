@@ -2,8 +2,9 @@
 //!
 //! This process contains no policy engine. On Linux it polls guardd's
 //! credential-filtered IPC event feed and presents denies via notify-send. On
-//! macOS it polls the authenticated system-extension XPC service and opens the
-//! sibling GTK pending-only UI when an interactive decision is waiting.
+//! macOS it polls the authenticated system-extension XPC service, delivers
+//! notifications from the user-session LaunchAgent, and opens the sibling GTK
+//! pending-only UI when an interactive decision is waiting.
 
 #[cfg(target_os = "linux")]
 use std::collections::HashMap;
@@ -35,7 +36,7 @@ struct Cli {
     /// Fetch once and exit. Intended for diagnostics/tests.
     #[arg(long)]
     once: bool,
-    /// macOS only: ask the Sensitive File Guard.app process to send a harmless synthetic notification.
+    /// macOS only: send a harmless synthetic notification and exit.
     #[arg(long)]
     test_notification: bool,
 }
@@ -129,11 +130,12 @@ fn run_linux(cli: &Cli) -> ExitCode {
 #[cfg(target_os = "macos")]
 fn run_macos(cli: &Cli) -> ExitCode {
     if cli.test_notification {
-        return match activate_guard_ui_macos_with_args(&["--test-notification"]) {
+        return match notify_macos(
+            "Sensitive File Guard test notification",
+            "The Sensitive File Guard notification channel is working; this is a synthetic test message.",
+        ) {
             Ok(()) => {
-                eprintln!(
-                    "guard-notify: delegated macOS test notification to Sensitive File Guard.app"
-                );
+                eprintln!("guard-notify: delivered synthetic macOS test notification");
                 ExitCode::SUCCESS
             }
             Err(error) => {
@@ -157,10 +159,14 @@ fn run_macos(cli: &Cli) -> ExitCode {
         let events_ok = match client.events_cursor(Some(100), None, events.last_seen()) {
             Ok(snapshot) => {
                 for event in events.observe(snapshot) {
-                    // Sensitive File Guard.app owns macOS event notifications. This helper
-                    // remains responsible for surfacing pending confirmations
-                    // and must not duplicate the event notification stream.
-                    let _ = event;
+                    let (title, body) = mac_notification_text(&event);
+                    if let Err(error) = notify_macos(&title, &body) {
+                        eprintln!("guard-notify: macOS system notification failed: {error:#}");
+                    } else {
+                        // Audit IDs are metadata and make it possible to
+                        // distinguish a delivery attempt from event polling.
+                        eprintln!("guard-notify: delivered event_id={}", event.id);
+                    }
                 }
                 true
             }
@@ -172,6 +178,12 @@ fn run_macos(cli: &Cli) -> ExitCode {
         let pending_ok = match fetch_macos_pending(&client) {
             Ok(pending) => {
                 if observer.observe(pending) {
+                    if let Err(error) = notify_macos(
+                        "Sensitive File Guard confirmation required",
+                        "Sensitive File Guard is waiting for your decision about protected browser data or an SSH private key.",
+                    ) {
+                        eprintln!("guard-notify: macOS confirmation notification failed: {error:#}");
+                    }
                     activate_guard_ui_macos();
                 }
                 true
@@ -228,6 +240,26 @@ impl MacEventObserver {
             })
             .collect()
     }
+}
+
+#[cfg(target_os = "macos")]
+fn mac_notification_text(event: &EventInfo) -> (String, String) {
+    let executable = Path::new(&event.exe)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "a process".into());
+    (
+        "Sensitive File Guard blocked access".into(),
+        format!(
+            "{executable} attempted to access protected {}.",
+            event.resource_kind_code
+        ),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn notify_macos(title: &str, body: &str) -> anyhow::Result<()> {
+    platform_macos::notifications::send(title, body)
 }
 
 #[cfg(target_os = "macos")]
@@ -675,6 +707,22 @@ mod tests {
         allowed.decision = "Allow".into();
         assert!(observer.observe(vec![allowed]).is_empty());
         assert_eq!(observer.last_seen(), Some(3));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_notification_text_is_metadata_only() {
+        let mut denied = event(10, "/Users/test/secret/Cookies");
+        denied.resource_kind_code = "browser_cookie_store".into();
+        denied.exe = "/Applications/App Cleaner.app/Contents/MacOS/App Cleaner".into();
+
+        let (title, body) = mac_notification_text(&denied);
+
+        assert_eq!(title, "Sensitive File Guard blocked access");
+        assert!(body.contains("App Cleaner"));
+        assert!(body.contains("browser_cookie_store"));
+        assert!(!body.contains("/Users/"));
+        assert!(!body.contains("Cookies"));
     }
 
     #[cfg(target_os = "macos")]

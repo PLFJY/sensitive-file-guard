@@ -110,8 +110,6 @@ struct UiState {
     keys: gtk::ListBox,
     events: gtk::ListBox,
     event_data: Rc<RefCell<Vec<guard_ipc::EventInfo>>>,
-    #[cfg(target_os = "macos")]
-    last_notified_event_id: Rc<Cell<i64>>,
     browser_sources: Rc<RefCell<Vec<BrowserSource>>>,
     unsupported_browsers: Rc<RefCell<Vec<guard_platform::config::UnsupportedSandboxedBrowser>>>,
     ssh_sources: Rc<RefCell<Vec<SshSource>>>,
@@ -267,8 +265,6 @@ fn build_ui(app: &adw::Application, pending_only: bool, layout_smoke_page: Optio
         keys: keys.clone(),
         events: events.clone(),
         event_data: Rc::new(RefCell::new(Vec::new())),
-        #[cfg(target_os = "macos")]
-        last_notified_event_id: Rc::new(Cell::new(0)),
         browser_sources: Rc::new(RefCell::new(Vec::new())),
         unsupported_browsers: Rc::new(RefCell::new(Vec::new())),
         ssh_sources: Rc::new(RefCell::new(Vec::new())),
@@ -703,21 +699,6 @@ fn event_row(event: &guard_ipc::EventInfo) -> gtk::ListBoxRow {
         _ => "ALLOWED",
     };
     event_row_with_decision(event, decision)
-}
-
-#[cfg(target_os = "macos")]
-fn mac_notification_text(event: &guard_ipc::EventInfo) -> (String, String) {
-    let executable = std::path::Path::new(&event.exe)
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "a process".into());
-    (
-        "Sensitive File Guard blocked access".into(),
-        format!(
-            "{executable} attempted to access protected {}.",
-            event.resource_kind_code
-        ),
-    )
 }
 
 fn event_row_with_decision(event: &guard_ipc::EventInfo, decision: &str) -> gtk::ListBoxRow {
@@ -1323,8 +1304,6 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
     let detail = state.detail.clone();
     let events = state.events.clone();
     let event_data = state.event_data.clone();
-    #[cfg(target_os = "macos")]
-    let last_notified_event_id = state.last_notified_event_id.clone();
     let poll_in_flight = state.poll_in_flight.clone();
     let protection = state.protection.clone();
     let protection_syncing = state.protection_syncing.clone();
@@ -1487,17 +1466,6 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
                 }
             }
             for event in recent_events {
-                #[cfg(target_os = "macos")]
-                if after_id.is_some()
-                    && event.id > last_notified_event_id.get()
-                    && event.decision.starts_with("Deny")
-                    && event.event_code != "system_process_access_suppressed"
-                {
-                    let (title, body) = mac_notification_text(&event);
-                    if let Err(error) = platform_macos::notifications::send(&title, &body) {
-                        eprintln!("Sensitive File Guard: macOS system notification failed: {error:#}");
-                    }
-                }
                 let decision = match event.event_code.as_str() {
                     "browser_migration_confirmation_required" => "IMPORT CONFIRMATION REQUIRED",
                     "browser_migration_allowed" => "IMPORT ALLOWED",
@@ -1517,10 +1485,6 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
                 } else {
                     events.append(&row);
                 }
-            }
-            #[cfg(target_os = "macos")]
-            if let Some(latest) = event_data.borrow().first().map(|event| event.id) {
-                last_notified_event_id.set(latest);
             }
             let complete_pending_snapshot =
                 pending_migrations.is_ok() && pending_ssh_reads.is_ok();
@@ -1549,13 +1513,6 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
                 (next, controller.is_empty())
             };
             if let Some(prompt) = next_prompt {
-                #[cfg(target_os = "macos")]
-                if let Err(error) = platform_macos::notifications::send(
-                    "Sensitive File Guard confirmation required",
-                    "Sensitive File Guard is waiting for your decision about protected browser data or an SSH private key.",
-                ) {
-                    eprintln!("Sensitive File Guard: macOS confirmation notification failed: {error:#}");
-                }
                 present_pending_dialog(&window, pending_dialogs.clone(), prompt, pending_only);
             } else if complete_pending_snapshot
                 && should_close_pending_window(pending_only, pending_queue_empty)
@@ -2403,38 +2360,6 @@ mod tests {
             remaining_authorization_text(100, 100),
             "Authorization deadline: expired"
         );
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn mac_guard_notification_is_metadata_only() {
-        let event = guard_ipc::EventInfo {
-            id: 1,
-            event_code: "browser_access_denied".into(),
-            ts_ms: 1,
-            uid: 501,
-            pid: 10,
-            start_time: 1,
-            decision: "Deny(UnknownProcess)".into(),
-            deny_reason: Some("UnknownProcess".into()),
-            reason_code: Some("browser_protected_resource".into()),
-            resource_kind: "CookieStore".into(),
-            resource_kind_code: "browser_cookie_store".into(),
-            resource_browser: Some("edge".into()),
-            resource_profile: Some("Default".into()),
-            path: "/Users/test/secret/Cookies".into(),
-            exe: "/Applications/App Cleaner.app/Contents/MacOS/App Cleaner".into(),
-            exe_owner_uid: 501,
-            trust_tier: "Unknown".into(),
-            process_browser: None,
-            parent_pid: None,
-            parent_exe: None,
-            lease_id: None,
-            backend_diag: "synthetic".into(),
-        };
-        let (_, body) = mac_notification_text(&event);
-        assert!(!body.contains("/Users/"));
-        assert!(body.contains("browser_cookie_store"));
     }
 
     #[test]
