@@ -60,18 +60,17 @@ int guard_user_agent_register(const char *plist_name,
         return -1;
     }
     if (service.status == SMAppServiceStatusRequiresApproval) {
-        return 0;
+        GuardCopyAgentError(error_buffer, error_buffer_length,
+                            @"confirmation helper requires approval in System Settings > General > Login Items");
+        return -1;
     }
     if (service.status == SMAppServiceStatusEnabled) {
-        // An app replacement can leave SMAppService reporting Enabled for the
-        // old bundle while launchd has no job for the new one. Re-register so
-        // the pending helper always runs from the currently installed app.
-        NSError *unregisterError = nil;
-        if (![service unregisterAndReturnError:&unregisterError]) {
-            GuardCopyAgentError(error_buffer, error_buffer_length,
-                                unregisterError.localizedDescription);
-            return -1;
-        }
+        // Normal enable operations must be idempotent. Unregistering a live
+        // helper and immediately registering it again races launchd's
+        // asynchronous bootout and can leave confirmations without a user
+        // session presenter. Bundle replacement explicitly unregisters the old
+        // helper before moving the old app.
+        return 0;
     }
     NSError *error = nil;
     if (![service registerAndReturnError:&error]) {

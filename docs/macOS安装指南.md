@@ -28,7 +28,7 @@ scripts/macos/build-deploy-self-use.sh
 
 ## 确认助手和通知自检
 
-“遇到确认请求时自动打开 Sensitive File Guard”是可选的 LaunchAgent。开启后如果 macOS 要求批准，请到“系统设置 → 通用 → 登录项”批准 Sensitive File Guard；Protection 页面会保留注册失败的具体错误，不会再只把开关无提示地弹回去。macOS 的拒绝和确认通知由常驻的 `guard-notify` LaunchAgent 发送，因此关闭控制中心窗口后仍能提示；GUI 只显示安全日志和确认界面，不再重复投递。
+“遇到确认请求时自动打开 Sensitive File Guard”是可选的 LaunchAgent。开启后如果 macOS 要求批准，请到“系统设置 → 通用 → 登录项”批准 Sensitive File Guard；需要批准不再被当成注册成功，Protection 页面会保留具体错误。macOS 的拒绝和确认通知由常驻的 `guard-notify` LaunchAgent 发送，因此关闭控制中心窗口不会停止 helper；GUI 只显示安全日志和确认界面，不再重复投递。
 
 在当前用户登录会话中测试系统通知（必须使用新包；该入口由常驻 `guard-notify` 发送）：
 
@@ -38,13 +38,14 @@ scripts/macos/build-deploy-self-use.sh
 
 这条命令只发送一条合成通知，不读取受保护文件。若命令失败，查看终端中的原生通知错误；若命令成功但横幅不可见，检查系统设置中的 Guard 通知权限、专注模式和通知中心摘要设置。真实拒绝事件只有在 `guard-notify` 已运行并完成初始事件基线后才会通知新事件。
 
-如果通知来源仍显示为 Script Editor，说明旧版 helper 仍被 launchd 运行，通常是之前移入废纸篓的旧应用。退出 Sensitive File Guard 后重新运行一键部署脚本；脚本会先停止同一 `top.plfjy.*.guard-notify` 登录项，再安装新包。也可以只检查当前状态：
+如果通知来源仍显示为 Script Editor，说明旧版 helper 仍被 launchd 运行，通常是之前移入废纸篓的旧应用。退出 Sensitive File Guard 后重新运行一键部署脚本；脚本会停止旧 helper、安装新包、显式刷新 `SMAppService` 注册，并验证状态为 `Enabled` 且 launchd 已加载任务。需要登录项批准或未能加载时，部署会明确失败，不会留下一个看似成功但无法唤起 GUI 的安装。也可以只检查当前状态：
 
 ```sh
+/Applications/Sensitive\ File\ Guard.app/Contents/MacOS/SensitiveFileGuard --pending-helper-status
 launchctl print "gui/$(id -u)/top.plfjy.SensitiveFileGuard.guard-notify" 2>/dev/null || true
 ```
 
-当前版本中，关闭“防护服务”会同时注销并停止 `guard-notify`；重新打开防护服务后才允许重新注册 helper。helper 不能脱离主服务单独轮询或发通知。检测到新的浏览器迁移或 SSH 确认请求时，helper 通过 macOS LaunchServices 打开/激活当前 `Sensitive File Guard.app`，所以即使你已经关闭 Sensitive File Guard 窗口，也会重新唤起应用；包含空格的安装路径也会安全处理。
+第一条必须输出 `Enabled`，第二条必须能看到正在运行的任务。当前版本中，关闭“防护服务”会同时注销并停止 `guard-notify`；重新打开防护服务后才允许重新注册 helper。helper 不能脱离主服务单独轮询或发通知。检测到新的浏览器迁移或 SSH 确认请求时，helper 通过 macOS LaunchServices 打开/激活当前 `Sensitive File Guard.app`；如果第一次 activation 恰好撞上 GUI 退出，它会在请求仍有效时进行少量有界重试，系统通知仍只发送一次。包含空格的安装路径也会安全处理。
 
 ## 三种构建模式
 

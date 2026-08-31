@@ -13,6 +13,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::Duration;
+#[cfg(target_os = "macos")]
+use std::time::Instant;
 
 use clap::Parser;
 #[cfg(target_os = "linux")]
@@ -177,13 +179,16 @@ fn run_macos(cli: &Cli) -> ExitCode {
         };
         let pending_ok = match fetch_macos_pending(&client) {
             Ok(pending) => {
-                if observer.observe(pending) {
+                let observation = observer.observe(pending, Instant::now());
+                if observation.notify {
                     if let Err(error) = notify_macos(
                         "Sensitive File Guard confirmation required",
                         "Sensitive File Guard is waiting for your decision about protected browser data or an SSH private key.",
                     ) {
                         eprintln!("guard-notify: macOS confirmation notification failed: {error:#}");
                     }
+                }
+                if observation.activate {
                     activate_guard_ui_macos();
                 }
                 true
@@ -288,21 +293,55 @@ enum PendingKey {
 }
 
 #[cfg(target_os = "macos")]
+const PENDING_ACTIVATION_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+#[cfg(target_os = "macos")]
+const PENDING_ACTIVATION_MAX_ATTEMPTS: u8 = 3;
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct PendingObservation {
+    notify: bool,
+    activate: bool,
+}
+
+#[cfg(target_os = "macos")]
 #[derive(Default)]
 struct PendingObserver {
     presented: HashSet<PendingKey>,
+    activation_attempts: u8,
+    next_activation: Option<Instant>,
 }
 
 #[cfg(target_os = "macos")]
 impl PendingObserver {
-    /// Returns true exactly once for each item while it remains in successful
-    /// snapshots. The helper launches the UI but never resolves policy.
-    fn observe(&mut self, current: HashSet<PendingKey>) -> bool {
+    /// Notifications remain deduplicated, while activation is retried a small,
+    /// bounded number of times. LaunchServices can accept an activation for a
+    /// GUI instance that is concurrently exiting after its last window closes;
+    /// a later attempt then starts the pending-only presenter cleanly.
+    fn observe(&mut self, current: HashSet<PendingKey>, now: Instant) -> PendingObservation {
         let has_new = current
             .iter()
             .any(|pending| !self.presented.contains(pending));
+        if current.is_empty() {
+            self.activation_attempts = 0;
+            self.next_activation = None;
+        } else if has_new {
+            self.activation_attempts = 0;
+            self.next_activation = Some(now);
+        }
+
+        let activate = !current.is_empty()
+            && self.activation_attempts < PENDING_ACTIVATION_MAX_ATTEMPTS
+            && self.next_activation.is_some_and(|deadline| now >= deadline);
+        if activate {
+            self.activation_attempts += 1;
+            self.next_activation = Some(now + PENDING_ACTIVATION_RETRY_INTERVAL);
+        }
         self.presented = current;
-        has_new
+        PendingObservation {
+            notify: has_new,
+            activate,
+        }
     }
 }
 
@@ -332,14 +371,21 @@ fn activate_guard_ui_macos_with_args(args: &[&str]) -> anyhow::Result<()> {
         // app so it exits after the queue is empty. LaunchServices still
         // activates an already-running Guard process, where the normal UI
         // polling path owns the existing window.
-        Command::new("/usr/bin/open")
+        let output = Command::new("/usr/bin/open")
             .args(launchservices_pending_args(&bundle))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map(|_| ())
-            .map_err(|error| anyhow::anyhow!("could not open {}: {error}", bundle.display()))
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|error| anyhow::anyhow!("could not open {}: {error}", bundle.display()))?;
+        anyhow::ensure!(
+            output.status.success(),
+            "LaunchServices refused to open {} ({}): {}",
+            bundle.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        Ok(())
     } else {
         Command::new(&guard)
             .args(args)
@@ -654,19 +700,112 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn pending_observer_launches_once_and_deduplicates_snapshots() {
+    fn pending_observer_deduplicates_notifications_and_retries_activation() {
         let mut observer = PendingObserver::default();
+        let now = Instant::now();
         let first = HashSet::from([PendingKey::Migration("m1".into())]);
-        assert!(observer.observe(first.clone()));
-        assert!(!observer.observe(first));
-        assert!(observer.observe(HashSet::from([
-            PendingKey::Migration("m1".into()),
-            PendingKey::SshRead("s1".into()),
-        ])));
-        assert!(!observer.observe(HashSet::from([
-            PendingKey::Migration("m1".into()),
-            PendingKey::SshRead("s1".into()),
-        ])));
+        assert_eq!(
+            observer.observe(first.clone(), now),
+            PendingObservation {
+                notify: true,
+                activate: true
+            }
+        );
+        assert_eq!(
+            observer.observe(first.clone(), now + Duration::from_secs(1)),
+            PendingObservation::default()
+        );
+        assert_eq!(
+            observer.observe(first.clone(), now + Duration::from_secs(2)),
+            PendingObservation {
+                notify: false,
+                activate: true
+            }
+        );
+        assert_eq!(
+            observer.observe(first.clone(), now + Duration::from_secs(4)),
+            PendingObservation {
+                notify: false,
+                activate: true
+            }
+        );
+        assert_eq!(
+            observer.observe(first, now + Duration::from_secs(6)),
+            PendingObservation::default()
+        );
+
+        assert_eq!(
+            observer.observe(
+                HashSet::from([
+                    PendingKey::Migration("m1".into()),
+                    PendingKey::SshRead("s1".into()),
+                ]),
+                now + Duration::from_secs(7)
+            ),
+            PendingObservation {
+                notify: true,
+                activate: true
+            }
+        );
+        assert_eq!(
+            observer.observe(
+                HashSet::from([
+                    PendingKey::Migration("m1".into()),
+                    PendingKey::SshRead("s1".into()),
+                ]),
+                now + Duration::from_secs(8)
+            ),
+            PendingObservation::default()
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pending_observer_rearms_after_the_queue_becomes_empty() {
+        let mut observer = PendingObserver::default();
+        let now = Instant::now();
+        let pending = HashSet::from([PendingKey::SshRead("s1".into())]);
+        assert!(observer.observe(pending.clone(), now).activate);
+        assert_eq!(
+            observer.observe(HashSet::new(), now + Duration::from_secs(1)),
+            PendingObservation::default()
+        );
+        assert_eq!(
+            observer.observe(pending, now + Duration::from_secs(2)),
+            PendingObservation {
+                notify: true,
+                activate: true
+            }
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pending_observer_new_request_rearms_activation_budget() {
+        let mut observer = PendingObserver::default();
+        let now = Instant::now();
+        let first = HashSet::from([PendingKey::Migration("m1".into())]);
+        assert!(observer.observe(first.clone(), now).activate);
+        assert!(
+            observer
+                .observe(first.clone(), now + Duration::from_secs(2))
+                .activate
+        );
+        assert!(
+            observer
+                .observe(first, now + Duration::from_secs(4))
+                .activate
+        );
+
+        let observation = observer.observe(
+            HashSet::from([
+                PendingKey::Migration("m1".into()),
+                PendingKey::SshRead("s1".into()),
+            ]),
+            now + Duration::from_secs(5),
+        );
+        assert!(observation.notify);
+        assert!(observation.activate);
     }
 
     #[test]

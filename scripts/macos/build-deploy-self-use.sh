@@ -148,9 +148,44 @@ echo "==> 安装到 $destination"
 sudo ditto "$app" "$destination"
 sudo chown -R root:wheel "$destination"
 
-echo "==> 注册可选的待处理确认通知 helper（不安装/激活系统扩展）"
-"$destination/Contents/MacOS/SensitiveFileGuard" --register-pending-helper || \
-    echo "提示：helper 注册失败，可稍后在 GUI 中重试。" >&2
+installed_guard="$destination/Contents/MacOS/SensitiveFileGuard"
+echo "==> 刷新并注册待处理确认 helper（不安装/激活系统扩展）"
+# App replacement is the one place where a registered helper must be
+# deliberately refreshed. Normal GUI enable operations are idempotent and do
+# not unregister a healthy helper.
+"$installed_guard" --unregister-pending-helper
+attempt=0
+while [ "$attempt" -lt 50 ]; do
+    helper_status=$("$installed_guard" --pending-helper-status 2>&1 || true)
+    [ "$helper_status" = NotRegistered ] && break
+    attempt=$((attempt + 1))
+    sleep 0.1
+done
+if [ "$helper_status" != NotRegistered ]; then
+    echo "helper 注销未完成，停止部署：$helper_status" >&2
+    exit 1
+fi
+if ! "$installed_guard" --register-pending-helper; then
+    helper_status=$("$installed_guard" --pending-helper-status 2>&1 || true)
+    echo "helper 注册失败：$helper_status" >&2
+    echo "请在系统设置 → 通用 → 登录项中允许 Sensitive File Guard，然后重新运行部署脚本。" >&2
+    exit 1
+fi
+helper_status=$("$installed_guard" --pending-helper-status 2>&1 || true)
+if [ "$helper_status" != Enabled ]; then
+    echo "helper 注册后未进入 Enabled：$helper_status" >&2
+    exit 1
+fi
+attempt=0
+while ! launchctl print "gui/$(id -u)/$notify_label" >/dev/null 2>&1; do
+    attempt=$((attempt + 1))
+    if [ "$attempt" -ge 50 ]; then
+        echo "helper 已注册，但 launchd 未在 5 秒内加载 $notify_label" >&2
+        exit 1
+    fi
+    sleep 0.1
+done
+echo "helper 已注册并由 launchd 加载：$notify_label"
 
 echo
 echo "macOS 自用包已部署：$destination"
