@@ -34,7 +34,7 @@ printf '%s' 'synthetic-ephemeral-key-fixture' > "$SSH_KEY"
 chmod 0600 "$SSH_KEY"
 
 cat > "$WORK/config.json" <<EOF
-{"browsers":[{"id":"chrome","family":"Chromium","profile_root":"$ROOT","owner_uid":0,"exe_paths":[]}],"enrolled_exes":[],"ssh_keys":["$SSH_KEY"]}
+{"browser_protection_level":"strict","browsers":[{"id":"chrome","family":"Chromium","profile_root":"$ROOT","owner_uid":0,"exe_paths":[]}],"enrolled_exes":[],"ssh_keys":["$SSH_KEY"]}
 EOF
 
 "$GUARDD" --enforce-browser-config "$WORK/config.json" \
@@ -80,7 +80,7 @@ expect_denied_eventually "$PROFILE/Network/Cookies"
 
 # Directory created after startup below a protected tree.
 mkdir -p "$PROFILE/Local Storage/new/nested"
-printf '%s' 'synthetic-session' > "$PROFILE/Local Storage/new/nested/item"
+printf '%s' 'synthetic-web-auth-storage' > "$PROFILE/Local Storage/new/nested/item"
 expect_denied_eventually "$PROFILE/Local Storage/new/nested/item"
 
 # Entire profile created after startup.

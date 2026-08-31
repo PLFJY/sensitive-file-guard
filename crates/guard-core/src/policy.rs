@@ -110,7 +110,13 @@ pub struct AccessEvent {
 pub fn evaluate(event: &AccessEvent, leases: &LeaseSet, now: u64) -> Decision {
     match event.resource.kind {
         ProtectedResourceKind::SshPrivateKey => decide_ssh(event, leases, now),
-        _ => decide_browser(event, leases, now),
+        ProtectedResourceKind::CookieStore
+        | ProtectedResourceKind::BrowserKeyMaterial
+        | ProtectedResourceKind::WebStorage
+        | ProtectedResourceKind::SavedCredentials => decide_browser(event, leases, now),
+        // `Other` represents unrecognized persisted audit metadata. It is not
+        // an active protection target and must not enter browser policy.
+        ProtectedResourceKind::Other => Decision::Deny(DenyReason::UnknownProcess),
     }
 }
 
@@ -494,7 +500,7 @@ mod tests {
     #[test]
     fn unknown_process_browser_denied() {
         let res = browser_resource(
-            ProtectedResourceKind::SessionStore,
+            ProtectedResourceKind::SavedCredentials,
             "chrome",
             "Default",
             1000,
@@ -1031,9 +1037,28 @@ mod tests {
     fn kind_classification_helpers() {
         assert!(ProtectedResourceKind::CookieStore.is_browser());
         assert!(ProtectedResourceKind::CookieStore.is_critical_browser());
-        assert!(!ProtectedResourceKind::History.is_critical_browser());
+        assert!(ProtectedResourceKind::SavedCredentials.is_critical_browser());
+        assert!(!ProtectedResourceKind::WebStorage.is_critical_browser());
         assert!(ProtectedResourceKind::SshPrivateKey.is_ssh());
         assert!(!ProtectedResourceKind::SshPrivateKey.is_browser());
+        assert!(!ProtectedResourceKind::Other.is_browser());
+        assert!(!ProtectedResourceKind::Other.is_ssh());
+    }
+
+    #[test]
+    fn inert_other_kind_fails_closed_without_browser_metadata() {
+        let mut resource = ssh_resource(1000);
+        resource.kind = ProtectedResourceKind::Other;
+        let process = browser_proc(
+            None,
+            TrustTier::Unknown,
+            1000,
+            stable(99, 9900, "/usr/bin/tool"),
+        );
+        assert_eq!(
+            evaluate(&event(resource, process), &LeaseSet::default(), NOW),
+            Decision::Deny(DenyReason::UnknownProcess)
+        );
     }
 
     // --- Phase 12: stable reason codes ---
@@ -1106,10 +1131,6 @@ mod tests {
             "browser_cookie_store"
         );
         assert_eq!(
-            ProtectedResourceKind::SessionStore.kind_code(),
-            "browser_session_store"
-        );
-        assert_eq!(
             ProtectedResourceKind::BrowserKeyMaterial.kind_code(),
             "browser_key_material"
         );
@@ -1122,12 +1143,9 @@ mod tests {
             "browser_saved_credentials"
         );
         assert_eq!(
-            ProtectedResourceKind::History.kind_code(),
-            "browser_history"
-        );
-        assert_eq!(
             ProtectedResourceKind::SshPrivateKey.kind_code(),
             "ssh_private_key"
         );
+        assert_eq!(ProtectedResourceKind::Other.kind_code(), "other");
     }
 }

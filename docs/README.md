@@ -14,12 +14,14 @@
 - [macOS Endpoint Security 技术说明](macOS技术说明.md)
 - [SSH 访问模型](SSH访问模型.md)
 
-## 当前验收报告
+## 阶段证据
 
-`reports/mac/` 只保留当前 macOS 版本的中文阶段报告（阶段 34–36）。报告记录测试证据，不是安装教程。
+`reports/mac/` 保存按阶段产生的历史测试证据，不是当前产品范围或安装教程。当前范围以本目录的安全模型和平台技术说明为准。
+
+当前 Credential Scope 实现与质量门记录见 [`reports/credential-scope-refactor-2026-08-31.md`](../reports/credential-scope-refactor-2026-08-31.md)。
 
 ## 文档维护规则
 
 - 新的用户可见流程必须先写入中文主入口，再在平台参考中补充细节。
-- 旧命令不得静默保留；如需兼容，必须同步更新本目录和脚本帮助。
+- 命令兼容边界必须同步记录在本目录和脚本帮助中。
 - 每个 macOS 阶段报告放在 `reports/mac/`，记录命令、通过项和阻塞项。

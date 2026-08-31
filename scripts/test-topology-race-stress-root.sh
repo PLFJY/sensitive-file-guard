@@ -50,6 +50,7 @@ printf '%s' 'SDF_CANARY_TOPOLOGY_INITIAL' > "$COOKIE"
 CONFIG="$WORK/config.json"
 printf '%s\n' \
   '{' \
+  '  "browser_protection_level": "common",' \
   '  "browsers": [' \
   '    {' \
   '      "id": "synthetic-chromium",' \

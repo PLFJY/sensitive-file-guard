@@ -119,6 +119,8 @@ struct UiState {
     poll_in_flight: Rc<Cell<bool>>,
     protection: Rc<RefCell<Option<adw::SwitchRow>>>,
     protection_syncing: Rc<Cell<bool>>,
+    browser_protection_level: adw::ComboRow,
+    browser_protection_level_syncing: Rc<Cell<bool>>,
     helper: Rc<RefCell<Option<adw::SwitchRow>>>,
     helper_syncing: Rc<Cell<bool>>,
     helper_error: Rc<RefCell<Option<String>>>,
@@ -255,6 +257,14 @@ fn build_ui(app: &adw::Application, pending_only: bool, layout_smoke_page: Optio
     mac_setup_message.set_max_width_chars(SUMMARY_WIDTH_CHARS);
     mac_setup_message.set_hexpand(true);
     mac_setup_message.set_xalign(0.0);
+    let browser_protection_level = adw::ComboRow::new();
+    browser_protection_level.set_title("Browser Protection Level");
+    browser_protection_level.set_model(Some(&gtk::StringList::new(&[
+        "Common (Recommended)",
+        "Strict",
+    ])));
+    browser_protection_level.set_selected(0);
+    browser_protection_level.set_subtitle(browser_protection_level_subtitle(0));
 
     let state = UiState {
         candidate: Rc::new(RefCell::new(None)),
@@ -272,6 +282,8 @@ fn build_ui(app: &adw::Application, pending_only: bool, layout_smoke_page: Optio
         poll_in_flight: Rc::new(Cell::new(false)),
         protection: Rc::new(RefCell::new(None)),
         protection_syncing: Rc::new(Cell::new(false)),
+        browser_protection_level,
+        browser_protection_level_syncing: Rc::new(Cell::new(false)),
         helper: Rc::new(RefCell::new(None)),
         helper_syncing: Rc::new(Cell::new(false)),
         helper_error: Rc::new(RefCell::new(None)),
@@ -492,9 +504,7 @@ fn protection_page(state: &UiState) -> gtk::Box {
     page.set_margin_start(20);
     page.set_margin_end(20);
     if platform_service::is_linux_backend() {
-        let heading = gtk::Label::new(Some(
-            "Linux protects configured browser files and trees only.",
-        ));
+        let heading = gtk::Label::new(Some("Linux backend: Scoped resource enforcement."));
         heading.set_xalign(0.0);
         heading.set_wrap(true);
         page.append(&heading);
@@ -565,6 +575,33 @@ fn protection_page(state: &UiState) -> gtk::Box {
         helper_group.add(&helper);
         page.append(&helper_group);
     }
+    let level_group = adw::PreferencesGroup::new();
+    level_group.set_title("Browser Protection Level");
+    level_group.set_description(Some(
+        "Common protects browser cookies, saved login credentials, and required key material. Strict also protects supported website storage that may contain authentication tokens.",
+    ));
+    level_group.add(&state.browser_protection_level);
+    page.append(&level_group);
+    let candidate = state.candidate.clone();
+    let apply = state.apply.clone();
+    let syncing = state.browser_protection_level_syncing.clone();
+    state
+        .browser_protection_level
+        .connect_selected_notify(move |row| {
+            row.set_subtitle(browser_protection_level_subtitle(row.selected()));
+            if syncing.get() {
+                return;
+            }
+            if let Some(config) = candidate.borrow_mut().as_mut() {
+                config.browser_protection_level = if row.selected() == 0 {
+                    guard_platform::config::BrowserProtectionLevel::Common
+                } else {
+                    guard_platform::config::BrowserProtectionLevel::Strict
+                };
+                apply.set_sensitive(true);
+            }
+        });
+
     let browsers_heading = gtk::Label::new(Some("Protected browsers"));
     browsers_heading.set_xalign(0.0);
     browsers_heading.add_css_class("title-2");
@@ -622,6 +659,14 @@ fn protection_page(state: &UiState) -> gtk::Box {
         }
     });
     page
+}
+
+fn browser_protection_level_subtitle(selected: u32) -> &'static str {
+    if selected == 0 {
+        "Protects browser cookies, saved login credentials, and their required key material."
+    } else {
+        "Also protects supported website storage that may contain authentication tokens."
+    }
 }
 
 fn log_page(state: &UiState) -> gtk::Box {
@@ -784,7 +829,7 @@ fn load_configuration(state: &UiState) {
 /// Build the editable UI model from the policy loaded by guardd. The GUI runs
 /// as the desktop user and must not treat an unreadable root-owned config file
 /// as an empty policy. This metadata-only snapshot never includes key bytes or
-/// browser data.
+/// browser credential contents.
 fn configuration_from_daemon(
     info: guard_ipc::ConfigurationInfo,
 ) -> Option<platform_service::EditableConfiguration> {
@@ -970,6 +1015,14 @@ fn same_native_browser(
 }
 
 fn render_objects(state: &UiState, cfg: &platform_service::EditableConfiguration) {
+    state.browser_protection_level_syncing.set(true);
+    state
+        .browser_protection_level
+        .set_selected(match cfg.browser_protection_level {
+            guard_platform::config::BrowserProtectionLevel::Common => 0,
+            guard_platform::config::BrowserProtectionLevel::Strict => 1,
+        });
+    state.browser_protection_level_syncing.set(false);
     while let Some(child) = state.browsers.first_child() {
         state.browsers.remove(&child);
     }
@@ -1561,7 +1614,7 @@ fn present_migration_dialog(
     let source = browser_label(&migration.source_browser);
     let target = browser_label(&migration.target_browser);
     let details = format!(
-        "{target} is trying to access protected {source} data.\n\nAre you importing data from {source} into {target}?\n\nSource browser: {source}\nSource profile: {}\nTarget browser: {target}\nTarget process: {}\nPID: {}\nRequested data: {}",
+        "{target} is trying to access protected {source} credentials or website authentication storage.\n\nAre you importing this authentication data from {source} into {target}?\n\nSource browser: {source}\nSource profile: {}\nTarget browser: {target}\nTarget process: {}\nPID: {}\nRequested credential resource: {}",
         migration.source_profile,
         migration.target_exe,
         migration.target_pid,
@@ -1571,7 +1624,7 @@ fn present_migration_dialog(
         .transient_for(window)
         .modal(true)
         .message_type(gtk::MessageType::Warning)
-        .text("Browser data import detected")
+        .text("Browser authentication-data import detected")
         .secondary_text(&details)
         .build();
     let block = dialog.add_button("No, block", gtk::ResponseType::Reject);
@@ -1808,7 +1861,7 @@ fn migration_prompt(migration: guard_ipc::MigrationPendingInfo) -> PendingPrompt
     let source = browser_label(&migration.source_browser);
     let target = browser_label(&migration.target_browser);
     let details = format!(
-        "{target} is trying to access protected {source} data.\n\nAre you importing data from {source} into {target}?\n\nSource browser: {source}\nSource profile: {}\nTarget browser: {target}\nTarget process: {}\nPID: {}\nRequested data: {}\n{}",
+        "{target} is trying to access protected {source} credentials or website authentication storage.\n\nAre you importing this authentication data from {source} into {target}?\n\nSource browser: {source}\nSource profile: {}\nTarget browser: {target}\nTarget process: {}\nPID: {}\nRequested credential resource: {}\n{}",
         migration.source_profile,
         migration.target_exe,
         migration.target_pid,
@@ -1821,7 +1874,7 @@ fn migration_prompt(migration: guard_ipc::MigrationPendingInfo) -> PendingPrompt
             value: migration_session_key(&migration),
         },
         request_id: migration.id,
-        title: "Browser data import detected".into(),
+        title: "Browser authentication-data import detected".into(),
         details,
         expires_at: migration.expires_at,
         allow_label: "Yes, allow this import".into(),
@@ -2299,6 +2352,7 @@ mod tests {
     #[test]
     fn daemon_configuration_preserves_ssh_enrollment_for_the_ui() {
         let config = configuration_from_daemon(guard_ipc::ConfigurationInfo {
+            browser_protection_level: "common".into(),
             policy_enabled: None,
             browsers: vec![guard_ipc::ConfiguredBrowserInfo {
                 id: "firefox".into(),
@@ -2309,7 +2363,6 @@ mod tests {
             }],
             enrolled_exes: vec!["/usr/bin/known-good-helper".into()],
             ssh_keys: vec!["/home/test/.ssh/id_ed25519".into()],
-            mac_system_processes: Vec::new(),
             mac_trusted_tools: Vec::new(),
         })
         .expect("supported daemon snapshot");
@@ -2322,9 +2375,9 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn mac_configuration_has_policy_state_and_no_linux_mode() {
+    fn mac_configuration_has_policy_state_and_browser_level() {
         let config = configuration_from_daemon(guard_ipc::ConfigurationInfo {
-            enforcement_mode: None,
+            browser_protection_level: "strict".into(),
             policy_enabled: Some(true),
             browsers: vec![guard_ipc::ConfiguredBrowserInfo {
                 id: "firefox".into(),
@@ -2335,11 +2388,14 @@ mod tests {
             }],
             enrolled_exes: Vec::new(),
             ssh_keys: Vec::new(),
-            mac_system_processes: Vec::new(),
             mac_trusted_tools: Vec::new(),
         })
         .unwrap();
         assert!(config.policy_enabled);
+        assert_eq!(
+            config.browser_protection_level,
+            guard_platform::config::BrowserProtectionLevel::Strict
+        );
         assert!(!platform_service::is_linux_backend());
     }
 

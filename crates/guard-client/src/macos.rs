@@ -49,7 +49,7 @@ pub fn request_from_signed_cli(payload: &[u8]) -> anyhow::Result<Vec<u8>> {
 fn sensitive_reason(op: &RequestOp) -> &'static str {
     match op {
         RequestOp::MigrationAuthorize { .. } | RequestOp::MigrationResolve { .. } => {
-            "Authorize temporary access for browser data import"
+            "Authorize temporary access for browser authentication-data import"
         }
         RequestOp::SshProtect { .. } => "Protect this SSH private key with Sensitive File Guard",
         RequestOp::SshLoadAuthorize { .. } => "Authorize this protected SSH key load",
@@ -193,7 +193,7 @@ impl<T: LocalTransport, A: DeviceOwnerAuthenticator> MacGuardClient<T, A> {
                 id: id.into(),
                 action: MigrationResolutionAction::AllowImport,
             },
-            "Allow this browser to import protected browser data",
+            "Allow this browser to import protected credentials and website authentication storage",
             deadline,
             |body| match body {
                 ResponseBody::MigrationResolved(value) => Some(value),
@@ -249,7 +249,7 @@ impl<T: LocalTransport, A: DeviceOwnerAuthenticator> MacGuardClient<T, A> {
                 target_browser: target_browser.into(),
                 duration_secs,
             },
-            "Authorize temporary access for browser data import",
+            "Authorize temporary access for browser authentication-data import",
             deadline,
             |body| match body {
                 ResponseBody::MigrationAuthorized(value) => Some(value),
@@ -573,7 +573,8 @@ mod tests {
         let config = platform_macos::config::MacBackendConfig {
             version: platform_macos::config::MAC_CONFIG_VERSION,
             policy_enabled: true,
-            common_policy: guard_platform::config::PolicyConfig {
+            policy: guard_platform::config::PolicyConfig {
+                browser_protection_level: Default::default(),
                 browsers: Vec::new(),
                 enrolled_exes: Vec::new(),
                 ssh_keys: vec![std::path::PathBuf::from("/synthetic/id_ed25519")],

@@ -183,7 +183,7 @@ fn run_macos(cli: &Cli) -> ExitCode {
                 if observation.notify {
                     if let Err(error) = notify_macos(
                         "Sensitive File Guard confirmation required",
-                        "Sensitive File Guard is waiting for your decision about protected browser data or an SSH private key.",
+                        "Sensitive File Guard is waiting for your decision about protected browser credentials, website authentication storage, or an SSH private key.",
                     ) {
                         eprintln!("guard-notify: macOS confirmation notification failed: {error:#}");
                     }
@@ -517,18 +517,18 @@ fn notification_text(event: &EventInfo) -> (String, String, &'static str) {
             .unwrap_or("another browser");
         let target = event.process_browser.as_deref().unwrap_or(&exe);
         return (
-            "Browser data import confirmation required".into(),
+            "Browser authentication-data import confirmation required".into(),
             format!(
-                "{target} is trying to access protected {source} data. Open Sensitive File Guard to confirm whether you are importing browser data."
+                "{target} is trying to access protected {source} credentials or website authentication storage. Open Sensitive File Guard to confirm the authentication-data import."
             ),
             "normal",
         );
     }
     if event.reason_code.as_deref() == Some("migration_lease_required") {
         return (
-            "Blocked cross-browser data access".into(),
+            "Blocked cross-browser credential access".into(),
             format!(
-                "{exe} attempted to access protected browser data. Authorize a temporary migration access lease if this was intentional."
+                "{exe} attempted to access protected browser credentials or website authentication storage. Authorize a temporary migration access lease if this was intentional."
             ),
             "normal",
         );
@@ -862,37 +862,6 @@ mod tests {
         assert!(body.contains("browser_cookie_store"));
         assert!(!body.contains("/Users/"));
         assert!(!body.contains("Cookies"));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn mac_event_observer_suppresses_system_allowlist_noise() {
-        let mut observer = MacEventObserver::default();
-        let baseline = EventInfo {
-            id: 10,
-            event_code: "system_process_access_suppressed".into(),
-            ts_ms: 1,
-            uid: 501,
-            pid: 42,
-            start_time: 1,
-            decision: "Deny(UnknownProcess)".into(),
-            deny_reason: Some("UnknownProcess".into()),
-            reason_code: Some("browser_protected_resource".into()),
-            resource_kind: "History".into(),
-            resource_kind_code: "browser_history".into(),
-            resource_browser: Some("edge".into()),
-            resource_profile: Some("Default".into()),
-            path: "/synthetic/history".into(),
-            exe: "/System/mdworker_shared".into(),
-            exe_owner_uid: 0,
-            trust_tier: "Unknown".into(),
-            process_browser: None,
-            parent_pid: None,
-            parent_exe: None,
-            lease_id: None,
-            backend_diag: "system process".into(),
-        };
-        assert!(observer.observe(vec![baseline]).is_empty());
     }
 
     #[cfg(target_os = "macos")]

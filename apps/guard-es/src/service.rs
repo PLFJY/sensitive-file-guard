@@ -217,7 +217,8 @@ impl ControlHandler {
         let old_plan = self.policy.target_selection_plan();
         let new_index = MacResourceIndex::from_enrollments(
             &config.browser_trust,
-            &config.common_policy.ssh_keys,
+            &config.policy.ssh_keys,
+            config.policy.browser_protection_level,
         )?;
         let new_plan = new_index.target_selection_plan();
         let union_plan = TargetSelectionPlan::from_rules(
@@ -230,9 +231,9 @@ impl ControlHandler {
         if let Err(error) = self.policy.apply_config(config.clone()) {
             return Err(error.context("policy publish failed after selection expansion"));
         }
-        // Only after policy no longer relies on removed paths may selection
-        // shrink. If this fails, restore the previous policy and retain the
-        // conservative union rather than leaving disk ahead of enforcement.
+        // Publish policy before shrinking the selected path set. If shrinking
+        // fails, restore the previous policy and retain the union so target
+        // selection never falls behind enforcement.
         if let Err(error) = self.apply_target_selection(new_plan) {
             if let Some(old) = old_config {
                 let _ = self.policy.apply_config(old);

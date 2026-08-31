@@ -11,6 +11,20 @@
 
 macOS 自用路径是当前首选开发路径，故意不等待 Apple provisioning、Developer ID 或公证。它不是 SIP 开启的消费者分发包。Guard 不会自动关闭 SIP、修改 TCC 数据库或自动授予完全磁盘访问权限。
 
+## 浏览器保护等级
+
+File Shield 使用跨平台的 `Browser Protection Level`，默认是 `Common`：
+
+| 资源 | Common | Strict |
+| --- | --- | --- |
+| 浏览器 Cookie store 及必要 sidecar | 保护 | 保护 |
+| 保存的登录凭据 | 保护 | 保护 |
+| 解密上述资源所需的浏览器密钥材料 | 保护 | 保护 |
+| 支持的网站 origin storage（可能保存认证 token） | 不保护 | 保护 |
+| 已登记 SSH 私钥 | 独立保护 | 独立保护 |
+
+Open Tabs、Cloud Tabs、Tab Groups、最近关闭标签、会话恢复状态、History、Bookmarks、Reading List、浏览器 UI/导航状态不属于 File Shield 保护范围。Linux 后端始终采用 Scoped resource enforcement；Common/Strict 只决定保护哪些资源，不改变 fanotify 或 macOS Endpoint Security 的执行机制。
+
 ## 快速入口
 
 - [中文文档目录](docs/README.md)
@@ -19,6 +33,7 @@ macOS 自用路径是当前首选开发路径，故意不等待 Apple provisioni
 - [Linux 安装指南](docs/Linux安装指南.md)
 - [Linux 技术说明](docs/Linux技术说明.md)
 - [安全模型](docs/安全模型.md)
+- [Credential Scope 验证报告](reports/credential-scope-refactor-2026-08-31.md)
 - [macOS 阶段报告](reports/mac/)
 
 ## 一键流程
@@ -68,6 +83,7 @@ Linux 与 macOS 平台 crate 在反平台上只编译为空边界，`guardd` 在
 - 同 UID 不等于可信；Guard、`guardctl`、`guard-notify` 和 `guard-es` 都必须满足签名身份与标识符要求。
 - 迁移和 SSH 读取确认受内核 deadline 约束，超时默认拒绝。
 - 浏览器分类以已验证的可执行文件和资源身份为准；macOS Safari 使用独立的窄路径分类，其他浏览器沿用共享主逻辑。
+- `browser_protection_level` 取值为 `common` 或 `strict`；字段缺失时安全迁移为默认 `common`。
 
 ## 许可与贡献
 

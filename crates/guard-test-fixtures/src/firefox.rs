@@ -1,8 +1,9 @@
 //! Synthetic Firefox browser profile generator.
 //!
 //! Builds a minimal Firefox profile tree containing harmless marker bytes in
-//! place of real cookies/logins/key material. Matches the Firefox resource
-//! patterns the Phase 05 registry must classify.
+//! place of real cookies, credentials, key material, Web Storage, and
+//! explicitly unprotected profile state. Classifier tests use the complete
+//! tree to verify both positive and negative scope boundaries.
 
 use std::fs;
 use std::io;

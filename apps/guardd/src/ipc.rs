@@ -279,6 +279,7 @@ fn handle_configuration_get(state: &IpcState, _creds: PeerCreds) -> Response {
     let engine = state.engine.lock().expect("engine mutex poisoned");
     let cfg = engine.configuration();
     Response::ok(ResponseBody::Configuration(ConfigurationInfo {
+        browser_protection_level: cfg.browser_protection_level.as_str().into(),
         policy_enabled: None,
         browsers: cfg
             .browsers
@@ -305,7 +306,6 @@ fn handle_configuration_get(state: &IpcState, _creds: PeerCreds) -> Response {
             .iter()
             .map(|path| path.to_string_lossy().into_owned())
             .collect(),
-        mac_system_processes: Vec::new(),
         mac_trusted_tools: Vec::new(),
     }))
 }
@@ -1530,6 +1530,7 @@ mod tests {
     fn ssh_read_approval_releases_engine_lock_and_keeps_audit_metadata_only() {
         let fixture = guard_test_fixtures::SshFixture::create().expect("SSH fixture");
         let config = EnforcementConfig {
+            browser_protection_level: Default::default(),
             browsers: vec![],
             enrolled_exes: vec![],
             ssh_keys: vec![fixture.private_key.clone()],

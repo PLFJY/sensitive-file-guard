@@ -73,6 +73,7 @@ export SSH_AUTH_SOCK="$AGENT_SOCKET"
 CONFIG="$WORK/config.json"
 printf '%s\n' \
   '{' \
+  '  "browser_protection_level": "common",' \
   '  "browsers": [],' \
   '  "enrolled_exes": [],' \
   "  \"ssh_keys\": [\"$KEY\"]" \

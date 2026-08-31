@@ -85,6 +85,7 @@ chmod 0755 "$CHROME_PROBE" "$FIREFOX_PROBE"
 # EnrolledUserWritable trust; exe_paths maps each probe to a BrowserId.
 cat > "$WORK/config.json" <<EOF
 {
+  "browser_protection_level": "common",
   "browsers": [
     {
       "id": "chrome",
@@ -124,6 +125,9 @@ COOKIES="$CHROME_UDD/Default/Network/Cookies"
 COOKIES_WAL="$CHROME_UDD/Default/Network/Cookies-wal"
 COOKIES_SHM="$CHROME_UDD/Default/Network/Cookies-shm"
 BOOKMARKS="$CHROME_UDD/Default/Bookmarks"
+WEB_DATA="$CHROME_UDD/Default/Web Data"
+LOCAL_STORAGE="$CHROME_UDD/Default/Local Storage/https_example.com_0.localstorage"
+TAB_STATE="$CHROME_UDD/Default/Sessions/Session_Tab_0"
 
 echo "==> Test 1: ordinary process (cat) reads fake Cookie => denied"
 if cat "$COOKIES" > "$WORK/t1.out" 2>/dev/null; then
@@ -224,6 +228,15 @@ if cat "$BOOKMARKS" > "$WORK/t9.out" 2>/dev/null; then
 else
   note_fail "unprotected Bookmarks was blocked (over-blocking)"
 fi
+
+echo "==> Test 9b: Common leaves autofill, website storage, and tab state outside File Shield"
+for path in "$WEB_DATA" "$LOCAL_STORAGE" "$TAB_STATE"; do
+  if cat "$path" > /dev/null 2>&1; then
+    note_pass "Common allowed unprotected $(basename "$path")"
+  else
+    note_fail "Common over-blocked $(basename "$path")"
+  fi
+done
 
 echo "==> Test 10: firefox-probe reading own firefox profile => allowed"
 if "$FIREFOX_PROBE" read "$FF_PROFILE/cookies.sqlite" > "$WORK/t10.out" 2>/dev/null; then

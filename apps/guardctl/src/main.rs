@@ -659,7 +659,7 @@ fn mac_config_with_fixture(
     let mut config = original.clone();
     config.policy_enabled = true;
     config
-        .common_policy
+        .policy
         .browsers
         .push(guard_platform::config::BrowserEnrollmentConfig {
             id: browser_id.0,
@@ -681,7 +681,7 @@ fn mac_config_with_fixture(
 fn mac_config_from_metadata(
     info: guard_ipc::ConfigurationInfo,
 ) -> anyhow::Result<platform_macos::config::MacBackendConfig> {
-    use guard_core::resource::{BrowserFamily, BrowserId, ProtectedResourceKind};
+    use guard_core::resource::{BrowserFamily, BrowserId};
     use std::sync::Arc;
 
     let peer_uid = unsafe { libc::geteuid() };
@@ -692,7 +692,7 @@ fn mac_config_from_metadata(
         platform_macos::code_signature::NativeCodeSignatureInspector,
     ));
     let verified = discovery.discover_verified(&home).enrollments;
-    let mut common_browsers = Vec::with_capacity(info.browsers.len());
+    let mut policy_browsers = Vec::with_capacity(info.browsers.len());
     let mut browser_trust = Vec::with_capacity(info.browsers.len());
     for browser in info.browsers {
         let family = match browser.family.as_str() {
@@ -738,7 +738,7 @@ fn mac_config_from_metadata(
                     peer_uid,
                 )
             })?;
-        common_browsers.push(guard_platform::config::BrowserEnrollmentConfig {
+        policy_browsers.push(guard_platform::config::BrowserEnrollmentConfig {
             id: browser.id,
             family,
             profile_root: root,
@@ -751,33 +751,9 @@ fn mac_config_from_metadata(
         });
         browser_trust.push(enrollment);
     }
-    let system_processes = info
-        .mac_system_processes
-        .into_iter()
-        .map(|rule| {
-            Ok(platform_macos::config::MacSystemProcessRule {
-                path: rule.path.into(),
-                team_id: None,
-                signing_id: rule.signing_id,
-                platform_binary: true,
-                owner_uid: 0,
-                allow_kinds: rule
-                    .allow_kinds
-                    .into_iter()
-                    .map(|kind| match kind.as_str() {
-                        "browser_cookie_store" => Ok(ProtectedResourceKind::CookieStore),
-                        "browser_session_store" => Ok(ProtectedResourceKind::SessionStore),
-                        "browser_key_material" => Ok(ProtectedResourceKind::BrowserKeyMaterial),
-                        "browser_web_storage" => Ok(ProtectedResourceKind::WebStorage),
-                        "browser_saved_credentials" => Ok(ProtectedResourceKind::SavedCredentials),
-                        "browser_history" => Ok(ProtectedResourceKind::History),
-                        "ssh_private_key" => Ok(ProtectedResourceKind::SshPrivateKey),
-                        _ => Err(anyhow::anyhow!("unknown system allowlist resource kind")),
-                    })
-                    .collect::<anyhow::Result<Vec<_>>>()?,
-            })
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
+    let browser_protection_level =
+        guard_platform::config::BrowserProtectionLevel::parse(&info.browser_protection_level)
+            .ok_or_else(|| anyhow::anyhow!("unknown browser protection level"))?;
     let trusted_tools = info
         .mac_trusted_tools
         .into_iter()
@@ -793,18 +769,15 @@ fn mac_config_from_metadata(
     let config = platform_macos::config::MacBackendConfig {
         version: platform_macos::config::MAC_CONFIG_VERSION,
         policy_enabled: info.policy_enabled.unwrap_or(false),
-        common_policy: guard_platform::config::PolicyConfig {
-            browsers: common_browsers,
+        policy: guard_platform::config::PolicyConfig {
+            browser_protection_level,
+            browsers: policy_browsers,
             enrolled_exes: info.enrolled_exes.into_iter().map(PathBuf::from).collect(),
             ssh_keys: info.ssh_keys.into_iter().map(PathBuf::from).collect(),
         },
         browser_trust,
-        mac_allowlist: platform_macos::config::MacAllowlistConfig {
-            system_processes,
-            trusted_tools,
-        },
-    }
-    .with_builtin_mac_allowlist();
+        mac_allowlist: platform_macos::config::MacAllowlistConfig { trusted_tools },
+    };
     config.validate_for_peer(peer_uid)?;
     Ok(config)
 }
@@ -1078,6 +1051,7 @@ struct SetupBrowserConfig {
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[cfg(any(target_os = "linux", test))]
 struct SetupConfig {
+    browser_protection_level: &'static str,
     browsers: Vec<SetupBrowserConfig>,
     enrolled_exes: Vec<String>,
     ssh_keys: Vec<String>,
@@ -1224,6 +1198,7 @@ fn setup_config(discovery: &BrowserDiscovery) -> anyhow::Result<SetupConfig> {
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     Ok(SetupConfig {
+        browser_protection_level: "common",
         browsers,
         enrolled_exes: Vec::new(),
         ssh_keys: Vec::new(),
@@ -1439,6 +1414,10 @@ fn print_human(resp: &Response) {
             println!("Active Linux configuration: scoped resource protection");
             #[cfg(not(target_os = "linux"))]
             println!("Active configuration");
+            println!(
+                "  browser protection level : {}",
+                configuration.browser_protection_level
+            );
             println!("  browsers : {}", configuration.browsers.len());
             println!("  SSH keys : {}", configuration.ssh_keys.len());
         }
@@ -2316,16 +2295,20 @@ mod tests {
         assert!(validate_candidate_bytes(b"not-json").is_err());
         assert!(validate_candidate_bytes(&vec![b'x'; MAX_CONFIG_STDIN + 1]).is_err());
         assert!(validate_candidate_bytes(
-            br#"{"enforcement_mode":"strict-filesystem","browsers":[],"ssh_keys":[]}"#
+            br#"{"unexpected_option":true,"browsers":[],"ssh_keys":[]}"#
         )
         .is_err());
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn privileged_candidate_validation_rejects_obsolete_field_and_relative_path() {
+    fn privileged_candidate_validation_rejects_unknown_field_and_relative_path() {
         assert!(validate_candidate_bytes(
-            br#"{"enforcement_mode":"other","browsers":[],"ssh_keys":["relative-key"]}"#
+            br#"{"unexpected_option":true,"browsers":[],"ssh_keys":[]}"#
+        )
+        .is_err());
+        assert!(validate_candidate_bytes(
+            br#"{"browser_protection_level":"common","browsers":[],"ssh_keys":["relative-key"]}"#
         )
         .is_err());
     }
@@ -2430,7 +2413,7 @@ mod tests {
 
         let config = setup_config(&discovery).unwrap();
         let value = serde_json::to_value(config).unwrap();
-        assert!(value.get("enforcement_mode").is_none());
+        assert_eq!(value["browser_protection_level"], "common");
         assert_eq!(value["browsers"][0]["family"], "firefox");
         assert!(value["browsers"][0].get("owner_uid").is_none());
         assert_eq!(value["ssh_keys"], serde_json::json!([]));

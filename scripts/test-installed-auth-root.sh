@@ -97,6 +97,7 @@ INSTALLED=1
 install -m 0640 /dev/null /etc/guardd/config.json
 printf '%s\n' \
   '{' \
+  '  "browser_protection_level": "common",' \
   '  "browsers": [' \
   '    {' \
   '      "id": "installed-synthetic-chromium",' \

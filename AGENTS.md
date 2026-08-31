@@ -2,8 +2,10 @@
 
 ## Mission
 Prevent unauthorized local processes from reading protected local secrets
-(browser session/auth data + SSH private keys) **before** the protected file is
-successfully opened. This is an access firewall, not an antivirus/EDR/DLP.
+(browser cookies, saved credentials, credential key material, selected website
+authentication storage, and enrolled SSH private keys) **before** the protected
+file is successfully opened. This is an access firewall, not an
+antivirus/EDR/DLP.
 
 ## Engineering style (KISS)
 - No speculative framework architecture. No ManagerFactoryStrategy chains.

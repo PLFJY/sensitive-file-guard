@@ -6,6 +6,7 @@ use guard_core::resource::{
     BrowserFamily, BrowserId, ProfileId, ProtectedResource, ProtectedResourceId,
     ProtectedResourceKind,
 };
+use guard_platform::config::BrowserProtectionLevel;
 
 use crate::browser_trust::MacBrowserEnrollment;
 
@@ -91,6 +92,7 @@ struct MacProfileScope {
     root: std::path::PathBuf,
     owner_uid: u32,
     firefox_single_profile: bool,
+    protection_level: BrowserProtectionLevel,
 }
 
 impl MacResourceIndex {
@@ -129,8 +131,11 @@ impl MacResourceIndex {
         Ok(index)
     }
 
-    pub fn from_browser_enrollments(enrollments: &[MacBrowserEnrollment]) -> anyhow::Result<Self> {
-        let registry = build_browser_registry(enrollments)?;
+    pub fn from_browser_enrollments(
+        enrollments: &[MacBrowserEnrollment],
+        protection_level: BrowserProtectionLevel,
+    ) -> anyhow::Result<Self> {
+        let registry = build_browser_registry(enrollments, protection_level)?;
         let mut index = Self::from_registry(&registry)?;
         index.profiles = enrollments
             .iter()
@@ -140,6 +145,7 @@ impl MacResourceIndex {
                 root: enrollment.profile_root.clone(),
                 owner_uid: enrollment.owner_uid,
                 firefox_single_profile: enrollment.profile_root.join("cookies.sqlite").is_file(),
+                protection_level,
             })
             .collect();
         index.refresh_aliases()?;
@@ -149,10 +155,11 @@ impl MacResourceIndex {
     pub fn from_enrollments(
         browsers: &[MacBrowserEnrollment],
         ssh_keys: &[std::path::PathBuf],
+        protection_level: BrowserProtectionLevel,
     ) -> anyhow::Result<Self> {
         use std::os::unix::fs::MetadataExt;
 
-        let mut index = Self::from_browser_enrollments(browsers)?;
+        let mut index = Self::from_browser_enrollments(browsers, protection_level)?;
         for path in ssh_keys {
             let resource = guard_ssh::enroll_key(path)?;
             let metadata = std::fs::metadata(&resource.path)?;
@@ -381,12 +388,21 @@ impl MacResourceIndex {
         for profile in &self.profiles {
             match profile.family {
                 BrowserFamily::Safari => {
-                    let safari = profile.root.join("Safari");
                     let container = profile.root.join("Containers/com.apple.Safari");
                     let library = container.join("Data/Library");
+                    let cookies = library.join("Cookies");
+                    let website_data = library.join("WebKit/WebsiteData/Default");
+                    let named_stores = library.join("WebKit/WebsiteDataStore");
                     rules.extend([
                         TargetPathRule {
-                            path: safari,
+                            path: cookies,
+                            prefix: true,
+                        },
+                        // Safari profile stores are created dynamically. The
+                        // classifier admits only their cookie file in Common
+                        // and adds their Origins tree in Strict.
+                        TargetPathRule {
+                            path: named_stores.clone(),
                             prefix: true,
                         },
                         TargetPathRule {
@@ -394,20 +410,16 @@ impl MacResourceIndex {
                             prefix: false,
                         },
                         TargetPathRule {
-                            path: library,
-                            prefix: true,
-                        },
-                        // These literals select namespace moves without making
-                        // every descendant of ~/Library observable.
-                        TargetPathRule {
-                            path: profile.root.join("Containers"),
-                            prefix: false,
-                        },
-                        TargetPathRule {
-                            path: profile.root.clone(),
+                            path: profile.root.join("Cookies/Cookies.binarycookies"),
                             prefix: false,
                         },
                     ]);
+                    if profile.protection_level == BrowserProtectionLevel::Strict {
+                        rules.push(TargetPathRule {
+                            path: website_data,
+                            prefix: true,
+                        });
+                    }
                 }
                 BrowserFamily::Chromium | BrowserFamily::Firefox | BrowserFamily::Zen => {
                     rules.push(TargetPathRule {
@@ -433,12 +445,21 @@ impl MacResourceIndex {
         for profile in &self.profiles {
             match profile.family {
                 BrowserFamily::Safari => {
-                    roots.insert(profile.root.join("Safari"));
                     roots.insert(
                         profile
                             .root
-                            .join("Containers/com.apple.Safari/Data/Library"),
+                            .join("Containers/com.apple.Safari/Data/Library/Cookies"),
                     );
+                    roots.insert(
+                        profile.root.join(
+                            "Containers/com.apple.Safari/Data/Library/WebKit/WebsiteDataStore",
+                        ),
+                    );
+                    if profile.protection_level == BrowserProtectionLevel::Strict {
+                        roots.insert(profile.root.join(
+                            "Containers/com.apple.Safari/Data/Library/WebKit/WebsiteData/Default",
+                        ));
+                    }
                 }
                 BrowserFamily::Chromium | BrowserFamily::Firefox | BrowserFamily::Zen => {
                     roots.insert(profile.root.clone());
@@ -578,7 +599,8 @@ impl MacProfileScope {
             return None;
         }
         let profile_relative = components.as_path();
-        classify_chromium_profile_path(profile_relative).map(|kind| (profile, kind))
+        classify_chromium_profile_path(profile_relative, self.protection_level)
+            .map(|kind| (profile, kind))
     }
 
     fn classify_firefox(
@@ -604,26 +626,30 @@ impl MacProfileScope {
                 components.as_path(),
             )
         };
-        classify_firefox_profile_path(profile_relative).map(|kind| (profile, kind))
+        classify_firefox_profile_path(profile_relative, self.protection_level)
+            .map(|kind| (profile, kind))
     }
 
     fn classify_safari(
         &self,
         relative: &std::path::Path,
     ) -> Option<(String, ProtectedResourceKind)> {
-        classify_safari_library_path(relative)
+        classify_safari_library_path(relative, self.protection_level)
             .map(|kind| (guard_browser::safari::PROFILE_ID.into(), kind))
     }
 }
 
-fn classify_chromium_profile_path(path: &std::path::Path) -> Option<ProtectedResourceKind> {
+fn classify_chromium_profile_path(
+    path: &std::path::Path,
+    level: BrowserProtectionLevel,
+) -> Option<ProtectedResourceKind> {
     use guard_browser::chromium::{classify_profile_relative, Classified};
 
-    match classify_profile_relative(path) {
+    match classify_profile_relative(path, level) {
         Classified::File(kind) => Some(kind),
         Classified::Tree(kind) => Some(kind),
         Classified::None => path.ancestors().skip(1).find_map(|ancestor| {
-            if let Classified::Tree(kind) = classify_profile_relative(ancestor) {
+            if let Classified::Tree(kind) = classify_profile_relative(ancestor, level) {
                 Some(kind)
             } else {
                 None
@@ -632,14 +658,17 @@ fn classify_chromium_profile_path(path: &std::path::Path) -> Option<ProtectedRes
     }
 }
 
-fn classify_firefox_profile_path(path: &std::path::Path) -> Option<ProtectedResourceKind> {
+fn classify_firefox_profile_path(
+    path: &std::path::Path,
+    level: BrowserProtectionLevel,
+) -> Option<ProtectedResourceKind> {
     use guard_browser::firefox::{classify_profile_relative, Classified};
 
-    match classify_profile_relative(path) {
+    match classify_profile_relative(path, level) {
         Classified::File(kind) => Some(kind),
         Classified::Tree(kind) => Some(kind),
         Classified::None => path.ancestors().skip(1).find_map(|ancestor| {
-            if let Classified::Tree(kind) = classify_profile_relative(ancestor) {
+            if let Classified::Tree(kind) = classify_profile_relative(ancestor, level) {
                 Some(kind)
             } else {
                 None
@@ -648,13 +677,16 @@ fn classify_firefox_profile_path(path: &std::path::Path) -> Option<ProtectedReso
     }
 }
 
-fn classify_safari_library_path(path: &std::path::Path) -> Option<ProtectedResourceKind> {
+fn classify_safari_library_path(
+    path: &std::path::Path,
+    level: BrowserProtectionLevel,
+) -> Option<ProtectedResourceKind> {
     use guard_browser::safari::{classify_library_relative, Classified};
 
-    match classify_library_relative(path) {
+    match classify_library_relative(path, level) {
         Classified::File(kind) | Classified::Tree(kind) => Some(kind),
         Classified::None => path.ancestors().skip(1).find_map(|ancestor| {
-            if let Classified::Tree(kind) = classify_library_relative(ancestor) {
+            if let Classified::Tree(kind) = classify_library_relative(ancestor, level) {
                 Some(kind)
             } else {
                 None
@@ -665,6 +697,7 @@ fn classify_safari_library_path(path: &std::path::Path) -> Option<ProtectedResou
 
 pub fn build_browser_registry(
     enrollments: &[MacBrowserEnrollment],
+    protection_level: BrowserProtectionLevel,
 ) -> anyhow::Result<ProtectedResourceRegistry> {
     let mut registry = ProtectedResourceRegistry::new();
     for enrollment in enrollments {
@@ -673,6 +706,7 @@ pub fn build_browser_registry(
             family: enrollment.family,
             root: enrollment.profile_root.clone(),
             owner_uid: enrollment.owner_uid,
+            protection_level,
         }
         .enroll_into(&mut registry)?;
     }
@@ -728,7 +762,8 @@ mod tests {
             app_bundle: None,
             executables: vec![],
         };
-        let registry = build_browser_registry(&[enrollment]).unwrap();
+        let registry =
+            build_browser_registry(&[enrollment], BrowserProtectionLevel::Common).unwrap();
         assert_eq!(registry.file_count(), 2);
     }
 
@@ -791,24 +826,27 @@ mod tests {
         std::fs::create_dir_all(chromium_root.join("Default")).unwrap();
         let firefox_root = temp.path().join("firefox-profiles");
         std::fs::create_dir_all(firefox_root.join("alpha.default")).unwrap();
-        let index = MacResourceIndex::from_browser_enrollments(&[
-            MacBrowserEnrollment {
-                browser_id: BrowserId("chrome".into()),
-                family: BrowserFamily::Chromium,
-                profile_root: chromium_root.clone(),
-                owner_uid: 501,
-                app_bundle: None,
-                executables: vec![],
-            },
-            MacBrowserEnrollment {
-                browser_id: BrowserId("firefox".into()),
-                family: BrowserFamily::Firefox,
-                profile_root: firefox_root.clone(),
-                owner_uid: 501,
-                app_bundle: None,
-                executables: vec![],
-            },
-        ])
+        let index = MacResourceIndex::from_browser_enrollments(
+            &[
+                MacBrowserEnrollment {
+                    browser_id: BrowserId("chrome".into()),
+                    family: BrowserFamily::Chromium,
+                    profile_root: chromium_root.clone(),
+                    owner_uid: 501,
+                    app_bundle: None,
+                    executables: vec![],
+                },
+                MacBrowserEnrollment {
+                    browser_id: BrowserId("firefox".into()),
+                    family: BrowserFamily::Firefox,
+                    profile_root: firefox_root.clone(),
+                    owner_uid: 501,
+                    app_bundle: None,
+                    executables: vec![],
+                },
+            ],
+            BrowserProtectionLevel::Strict,
+        )
         .unwrap();
 
         let login_data = chromium_root.join("Default/Login Data");
@@ -845,18 +883,21 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let library = temp.path().join("Library");
         std::fs::create_dir_all(
-            library.join("Containers/com.apple.Safari/Data/Library/HTTPStorages"),
+            library.join("Containers/com.apple.Safari/Data/Library/WebKit/WebsiteData/Default"),
         )
         .unwrap();
         std::fs::create_dir_all(library.join("Application Support/Google/Chrome")).unwrap();
-        let index = MacResourceIndex::from_browser_enrollments(&[MacBrowserEnrollment {
-            browser_id: BrowserId("safari".into()),
-            family: BrowserFamily::Safari,
-            profile_root: library.clone(),
-            owner_uid: 501,
-            app_bundle: None,
-            executables: vec![],
-        }])
+        let index = MacResourceIndex::from_browser_enrollments(
+            &[MacBrowserEnrollment {
+                browser_id: BrowserId("safari".into()),
+                family: BrowserFamily::Safari,
+                profile_root: library.clone(),
+                owner_uid: 501,
+                app_bundle: None,
+                executables: vec![],
+            }],
+            BrowserProtectionLevel::Strict,
+        )
         .unwrap();
 
         let cookie =
@@ -876,6 +917,16 @@ mod tests {
                 FileIdentity { dev: 9, ino: 10 },
             )
             .is_none());
+        let website_data = library.join(
+            "Containers/com.apple.Safari/Data/Library/WebKit/WebsiteData/Default/origin/LocalStorage/localstorage.sqlite3",
+        );
+        assert_eq!(
+            index
+                .classify(&website_data, FileIdentity { dev: 11, ino: 12 })
+                .unwrap()
+                .kind,
+            ProtectedResourceKind::WebStorage
+        );
         assert!(index
             .namespace_scope(&library.join("Application Support/Google/Chrome"))
             .is_none());
@@ -891,14 +942,17 @@ mod tests {
         std::fs::write(root.join("Local State"), b"synthetic state").unwrap();
         let alias = temp.path().join("preexisting-outside-alias");
         std::fs::hard_link(&storage, &alias).unwrap();
-        let index = MacResourceIndex::from_browser_enrollments(&[MacBrowserEnrollment {
-            browser_id: BrowserId("chrome".into()),
-            family: BrowserFamily::Chromium,
-            profile_root: root,
-            owner_uid: 501,
-            app_bundle: None,
-            executables: vec![],
-        }])
+        let index = MacResourceIndex::from_browser_enrollments(
+            &[MacBrowserEnrollment {
+                browser_id: BrowserId("chrome".into()),
+                family: BrowserFamily::Chromium,
+                profile_root: root,
+                owner_uid: 501,
+                app_bundle: None,
+                executables: vec![],
+            }],
+            BrowserProtectionLevel::Strict,
+        )
         .unwrap();
         let metadata = std::fs::metadata(&alias).unwrap();
         assert_eq!(
@@ -975,7 +1029,12 @@ mod tests {
         let key = temp.path().join("id_ed25519");
         std::fs::write(&key, b"synthetic ephemeral key").unwrap();
         let key = std::fs::canonicalize(key).unwrap();
-        let index = MacResourceIndex::from_enrollments(&[], std::slice::from_ref(&key)).unwrap();
+        let index = MacResourceIndex::from_enrollments(
+            &[],
+            std::slice::from_ref(&key),
+            BrowserProtectionLevel::Common,
+        )
+        .unwrap();
         assert_eq!(index.ssh_key_count(), 1);
         let plan = index.target_selection_plan();
         assert!(plan
@@ -1025,21 +1084,54 @@ mod tests {
     fn selection_plan_keeps_safari_library_narrow() {
         let temp = tempfile::tempdir().unwrap();
         let library = temp.path().join("Library");
-        std::fs::create_dir_all(library.join("Safari")).unwrap();
-        let index = MacResourceIndex::from_browser_enrollments(&[MacBrowserEnrollment {
-            browser_id: BrowserId("safari".into()),
-            family: BrowserFamily::Safari,
-            profile_root: library.clone(),
-            owner_uid: 501,
-            app_bundle: None,
-            executables: vec![],
-        }])
+        std::fs::create_dir_all(library.join("Containers/com.apple.Safari/Data/Library/Cookies"))
+            .unwrap();
+        let index = MacResourceIndex::from_browser_enrollments(
+            &[MacBrowserEnrollment {
+                browser_id: BrowserId("safari".into()),
+                family: BrowserFamily::Safari,
+                profile_root: library.clone(),
+                owner_uid: 501,
+                app_bundle: None,
+                executables: vec![],
+            }],
+            BrowserProtectionLevel::Common,
+        )
         .unwrap();
         let plan = index.target_selection_plan();
-        assert!(plan
-            .rules()
-            .iter()
-            .any(|rule| rule.path == library.join("Safari") && rule.prefix));
+        assert!(plan.rules().iter().any(|rule| {
+            rule.path == library.join("Containers/com.apple.Safari/Data/Library/Cookies")
+                && rule.prefix
+        }));
+        assert!(plan.rules().iter().any(|rule| {
+            rule.path
+                == library.join("Containers/com.apple.Safari/Data/Library/WebKit/WebsiteDataStore")
+                && rule.prefix
+        }));
+        assert!(!plan.rules().iter().any(|rule| {
+            rule.path
+                == library
+                    .join("Containers/com.apple.Safari/Data/Library/WebKit/WebsiteData/Default")
+                && rule.prefix
+        }));
+        let named_cookie = library.join(
+            "Containers/com.apple.Safari/Data/Library/WebKit/WebsiteDataStore/profile/Cookies/Cookies.binarycookies",
+        );
+        assert_eq!(
+            index
+                .classify(&named_cookie, FileIdentity { dev: 17, ino: 18 })
+                .unwrap()
+                .kind,
+            ProtectedResourceKind::CookieStore
+        );
+        assert!(index
+            .classify(
+                &library.join(
+                    "Containers/com.apple.Safari/Data/Library/WebKit/WebsiteDataStore/profile/Origins/site/LocalStorage/localstorage.sqlite3",
+                ),
+                FileIdentity { dev: 19, ino: 20 },
+            )
+            .is_none());
         assert!(!plan
             .rules()
             .iter()
@@ -1055,14 +1147,17 @@ mod tests {
         std::fs::write(&cookies, b"synthetic cookie db").unwrap();
         std::fs::write(root.join("Default/Preferences"), b"synthetic").unwrap();
         std::fs::hard_link(&cookies, temp.path().join("outside-alias")).unwrap();
-        let index = MacResourceIndex::from_browser_enrollments(&[MacBrowserEnrollment {
-            browser_id: BrowserId("chrome".into()),
-            family: BrowserFamily::Chromium,
-            profile_root: root,
-            owner_uid: 501,
-            app_bundle: None,
-            executables: vec![],
-        }])
+        let index = MacResourceIndex::from_browser_enrollments(
+            &[MacBrowserEnrollment {
+                browser_id: BrowserId("chrome".into()),
+                family: BrowserFamily::Chromium,
+                profile_root: root,
+                owner_uid: 501,
+                app_bundle: None,
+                executables: vec![],
+            }],
+            BrowserProtectionLevel::Common,
+        )
         .unwrap();
         assert!(index.concrete_count() > 0);
         assert!(index.unresolved_external_hardlink_count() > 0);

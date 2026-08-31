@@ -8,17 +8,22 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ProtectedResourceKind {
     CookieStore,
-    SessionStore,
     BrowserKeyMaterial,
     WebStorage,
     SavedCredentials,
-    History,
     SshPrivateKey,
+    Other,
 }
 
 impl ProtectedResourceKind {
     pub fn is_browser(&self) -> bool {
-        !matches!(self, Self::SshPrivateKey)
+        matches!(
+            self,
+            Self::CookieStore
+                | Self::BrowserKeyMaterial
+                | Self::WebStorage
+                | Self::SavedCredentials
+        )
     }
     pub fn is_ssh(&self) -> bool {
         matches!(self, Self::SshPrivateKey)
@@ -26,7 +31,7 @@ impl ProtectedResourceKind {
     pub fn is_critical_browser(&self) -> bool {
         matches!(
             self,
-            Self::CookieStore | Self::SessionStore | Self::BrowserKeyMaterial
+            Self::CookieStore | Self::SavedCredentials | Self::BrowserKeyMaterial
         )
     }
     /// Stable, machine-readable snake_case kind code for tools (Phase 12).
@@ -35,12 +40,11 @@ impl ProtectedResourceKind {
     pub fn kind_code(&self) -> &'static str {
         match self {
             Self::CookieStore => "browser_cookie_store",
-            Self::SessionStore => "browser_session_store",
             Self::BrowserKeyMaterial => "browser_key_material",
             Self::WebStorage => "browser_web_storage",
             Self::SavedCredentials => "browser_saved_credentials",
-            Self::History => "browser_history",
             Self::SshPrivateKey => "ssh_private_key",
+            Self::Other => "other",
         }
     }
 }

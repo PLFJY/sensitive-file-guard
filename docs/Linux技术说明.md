@@ -8,12 +8,9 @@ Linux 的 authoritative backend 是 root 身份运行的 `guardd`，通过 fanot
 
 ## 防护范围
 
-Linux 只对已配置的具体浏览器资源和受保护目录树安装 fanotify permission
-mark：具体认证文件使用精确文件标记，Sessions、Session Storage、Local
-Storage、IndexedDB 以及 Firefox/Zen 的对应存储树使用
-`FAN_OPEN_PERM | FAN_EVENT_ON_CHILD`，SSH 私钥使用精确的
-`FAN_ACCESS_PERM`。不会安装 filesystem 或 mount mark，因此无关的文件打开和
-程序执行不会进入 guardd 的同步 permission 路径。
+Linux 始终使用 Scoped resource enforcement，只对当前保护等级选中的浏览器资源和已登记 SSH 私钥安装 fanotify permission mark。Common 的 Cookie store、保存的登录凭据和浏览器密钥材料使用精确文件标记；Strict 的 Local Storage、IndexedDB、Chromium Session Storage 与 Firefox/Zen `storage/` 等网站 origin storage 使用 `FAN_OPEN_PERM | FAN_EVENT_ON_CHILD` 目录树标记；SSH 私钥使用精确的 `FAN_ACCESS_PERM`。不会安装 filesystem 或 mount mark，因此无关的文件打开和程序执行不会进入 guardd 的同步 permission 路径。
+
+Common/Strict 只决定资源集合，不改变 fanotify、进程身份、inode/object identity、连续性、lease 或授权回调算法。Open Tabs、tab restore、History、Bookmarks 和普通浏览器 UI/导航状态不会获得保护 mark。
 
 Topology watcher 观察 profile 和 SSH 资源拓扑，在替换对象或新目录出现后重建
 索引并重新应用标记。fanotify 的目录标记不会自动继承给未来的新嵌套目录，因而
@@ -37,9 +34,7 @@ Linux fanotify 不总能提供打开者原始的读写标志，因此迁移授�
 
 `guardctl setup --home "$HOME"` 只根据已发现并验证的浏览器元数据生成配置，不猜测 SSH 私钥，也不会覆盖已有配置。审计日志只保存决策、资源类别和进程元数据，不保存 Cookie、密码、session token、数据库行或私钥内容。
 
-旧配置中的 `enforcement_mode` 已废弃，不会被静默转换；启动或配置校验会给出迁移
-错误，删除该字段后再重试。Linux 配置只描述浏览器、已登记可执行文件和 SSH 私钥
-资源。
+Linux 配置使用 `browser_protection_level: common|strict` 表达资源范围，缺失时默认为 `common`。配置只描述浏览器、已登记可执行文件和 SSH 私钥资源；Linux 后端没有执行策略选择器，未知配置字段会被拒绝。
 
 审计数据库最多保留最新 1000 条事件。写入器在每次批量提交时自动删除更早的记录；查询接口的 `limit` 只是返回数量上限。若写入队列瞬时满载，系统会丢弃新事件并增加 `audit_dropped` 计数，不会删除已经保存的旧事件。
 
@@ -52,6 +47,6 @@ Linux fanotify 不总能提供打开者原始的读写标志，因此迁移授�
 使用合成浏览器 profile 和临时 SSH key 验证：未知进程读取被拒绝；自有浏览器访问允许；迁移和 SSH 读取弹出确认并受 lease 期限约束；daemon 重启、配置错误、队列压力和 fanotify 溢出均进入可见的降级状态。
 
 性能与范围回归使用 `sudo bash scripts/benchmark-linux-root.sh`。该基准只比较
-guardd 不运行和使用 Linux 唯一的窄范围架构两种状态；无关文件打开和程序执行的
+guardd 不运行和使用 Linux Scoped 架构两种状态；无关文件打开和程序执行的
 permission-event 增量必须为 0，受保护资源的允许/拒绝结果、队列溢出和 topology
 健康状态是硬断言，耗时仅作参考。

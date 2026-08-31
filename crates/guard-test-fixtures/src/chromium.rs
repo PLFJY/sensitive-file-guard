@@ -2,8 +2,9 @@
 //!
 //! Builds a minimal but realistic Chromium profile tree (usable for Chrome,
 //! Chromium, Brave, Edge, Vivaldi) containing harmless marker bytes in place of
-//! real cookies/sessions/key material. The tree matches the resource patterns
-//! the Phase 05 registry must classify.
+//! real cookies, credentials, key material, Web Storage, and explicitly
+//! unprotected profile state. Classifier tests use the complete tree to verify
+//! both positive and negative scope boundaries.
 
 use std::fs;
 use std::io;
@@ -71,7 +72,7 @@ impl ChromiumProfile {
         fs::create_dir_all(&session_storage_dir)?;
         write_file(
             &session_storage_dir.join("00000000000000001.log"),
-            markers::SESSION_MARKER,
+            markers::WEB_STORAGE_MARKER,
         )?;
         fs::create_dir_all(&local_storage_dir)?;
         write_file(

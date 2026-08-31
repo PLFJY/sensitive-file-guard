@@ -10,26 +10,15 @@ use serde::{Deserialize, Serialize};
 use crate::browser_trust::MacBrowserEnrollment;
 use crate::code_signature::CodeSignatureInspector;
 use crate::identity::MacProcessFacts;
-use guard_core::resource::{BrowserFamily, ProtectedResourceKind};
+use guard_core::resource::BrowserFamily;
 
-pub const MAC_CONFIG_VERSION: u32 = 1;
+pub const MAC_CONFIG_VERSION: u32 = 2;
 pub const SYSTEM_CONFIG_PATH: &str =
     "/Library/Application Support/Sensitive Data Firewall/config.json";
 static NEXT_TEMP_CONFIG: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MacSystemProcessRule {
-    pub path: PathBuf,
-    pub team_id: Option<String>,
-    pub signing_id: String,
-    #[serde(default)]
-    pub platform_binary: bool,
-    pub owner_uid: u32,
-    #[serde(default)]
-    pub allow_kinds: Vec<ProtectedResourceKind>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MacTrustedToolRule {
     pub path: PathBuf,
     pub dev: u64,
@@ -40,47 +29,13 @@ pub struct MacTrustedToolRule {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MacAllowlistConfig {
-    #[serde(default)]
-    pub system_processes: Vec<MacSystemProcessRule>,
     #[serde(default)]
     pub trusted_tools: Vec<MacTrustedToolRule>,
 }
 
 impl MacAllowlistConfig {
-    pub fn with_builtin_system_rules(mut self) -> Self {
-        let path = PathBuf::from(
-            "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared",
-        );
-        if !self.system_processes.iter().any(|rule| rule.path == path) {
-            self.system_processes.push(MacSystemProcessRule {
-                path,
-                team_id: None,
-                signing_id: "com.apple.mdworker_shared".into(),
-                platform_binary: true,
-                owner_uid: 0,
-                allow_kinds: vec![ProtectedResourceKind::History],
-            });
-        }
-        self
-    }
-
-    pub fn system_rule(
-        &self,
-        process: &MacProcessFacts,
-        kind: ProtectedResourceKind,
-    ) -> Option<&MacSystemProcessRule> {
-        self.system_processes.iter().find(|rule| {
-            rule.path == process.executable.path
-                && rule.owner_uid == process.executable.owner_uid
-                && rule.platform_binary == process.code.platform_binary
-                && process.code.valid
-                && process.code.team_id == rule.team_id
-                && process.code.signing_id.as_deref() == Some(rule.signing_id.as_str())
-                && rule.allow_kinds.contains(&kind)
-        })
-    }
-
     pub fn trusted_tool_matches(&self, process: &MacProcessFacts) -> bool {
         self.trusted_tools.iter().any(|rule| {
             rule.path == process.executable.path
@@ -118,79 +73,13 @@ pub fn enroll_trusted_tool(path: &Path, owner_uid: u32) -> anyhow::Result<MacTru
     })
 }
 
-#[cfg(test)]
-mod allowlist_tests {
-    use super::*;
-
-    fn process(path: PathBuf, _kind: ProtectedResourceKind) -> MacProcessFacts {
-        MacProcessFacts {
-            key: crate::identity::AuditProcessKey {
-                pid: 7,
-                pidversion: 1,
-            },
-            uid: 501,
-            gid: 20,
-            start_time_us: 10,
-            executable: crate::identity::ExecutableSnapshot {
-                path,
-                dev: 3,
-                ino: 4,
-                owner_uid: 0,
-                mode: 0o100755,
-                size: 1,
-                mtime_ns: 1,
-                ctime_ns: 1,
-            },
-            code: crate::identity::MacCodeIdentity {
-                valid: true,
-                platform_binary: true,
-                flags: 0,
-                team_id: None,
-                signing_id: Some("com.apple.mdworker_shared".into()),
-                cdhash: [0; 20],
-            },
-            parent: None,
-            responsible: None,
-        }
-    }
-
-    #[test]
-    fn builtin_spotlight_rule_is_history_only_and_signature_pinned() {
-        let path = PathBuf::from("/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared");
-        let config = MacAllowlistConfig::default().with_builtin_system_rules();
-        let process = process(path, ProtectedResourceKind::History);
-        assert!(config
-            .system_rule(&process, ProtectedResourceKind::History)
-            .is_some());
-        assert!(config
-            .system_rule(&process, ProtectedResourceKind::CookieStore)
-            .is_none());
-    }
-
-    #[test]
-    fn builtin_rule_rejects_same_name_with_wrong_path_or_identity() {
-        let config = MacAllowlistConfig::default().with_builtin_system_rules();
-        let mut process = process(
-            PathBuf::from("/tmp/mdworker_shared"),
-            ProtectedResourceKind::History,
-        );
-        assert!(config
-            .system_rule(&process, ProtectedResourceKind::History)
-            .is_none());
-        process.executable.path = PathBuf::from("/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared");
-        process.code.signing_id = Some("com.example.fake".into());
-        assert!(config
-            .system_rule(&process, ProtectedResourceKind::History)
-            .is_none());
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MacBackendConfig {
     pub version: u32,
     #[serde(default)]
     pub policy_enabled: bool,
-    pub common_policy: PolicyConfig,
+    pub policy: PolicyConfig,
     pub browser_trust: Vec<MacBrowserEnrollment>,
     #[serde(default)]
     pub mac_allowlist: MacAllowlistConfig,
@@ -202,27 +91,7 @@ impl MacBackendConfig {
             self.version == MAC_CONFIG_VERSION,
             "unsupported macOS config version"
         );
-        self.common_policy.validate()?;
-        for rule in &self.mac_allowlist.system_processes {
-            anyhow::ensure!(
-                rule.path.is_absolute(),
-                "macOS system allowlist path must be absolute"
-            );
-            if let Some(team_id) = &rule.team_id {
-                anyhow::ensure!(
-                    !team_id.trim().is_empty(),
-                    "macOS system allowlist Team ID is empty"
-                );
-            }
-            anyhow::ensure!(
-                !rule.signing_id.trim().is_empty(),
-                "macOS system allowlist signing ID is required"
-            );
-            anyhow::ensure!(
-                !rule.allow_kinds.is_empty(),
-                "macOS system allowlist must name resource kinds"
-            );
-        }
+        self.policy.validate()?;
         for rule in &self.mac_allowlist.trusted_tools {
             anyhow::ensure!(
                 rule.path.is_absolute(),
@@ -240,7 +109,7 @@ impl MacBackendConfig {
             );
         }
         let mut ssh_paths = HashSet::new();
-        for key in &self.common_policy.ssh_keys {
+        for key in &self.policy.ssh_keys {
             anyhow::ensure!(
                 guard_ssh::is_private_key_candidate(key),
                 "SSH enrollment rejects public-key and reserved non-private-key names: {}",
@@ -254,19 +123,19 @@ impl MacBackendConfig {
                 ids.insert(browser.browser_id.0.as_str()),
                 "duplicate macOS browser trust enrollment"
             );
-            let common = self
-                .common_policy
+            let policy_browser = self
+                .policy
                 .browsers
                 .iter()
                 .find(|candidate| candidate.id == browser.browser_id.0)
-                .ok_or_else(|| anyhow::anyhow!("macOS browser trust has no common policy entry"))?;
+                .ok_or_else(|| anyhow::anyhow!("macOS browser trust has no policy entry"))?;
             anyhow::ensure!(
-                common.family == browser.family
-                    && common.profile_root == browser.profile_root
-                    && common.owner_uid == Some(browser.owner_uid),
-                "macOS browser trust facts do not match common policy metadata"
+                policy_browser.family == browser.family
+                    && policy_browser.profile_root == browser.profile_root
+                    && policy_browser.owner_uid == Some(browser.owner_uid),
+                "macOS browser trust facts do not match policy metadata"
             );
-            let common_executables = common
+            let policy_executables = policy_browser
                 .exe_paths
                 .iter()
                 .map(PathBuf::as_path)
@@ -277,24 +146,24 @@ impl MacBackendConfig {
                 .map(|executable| executable.path())
                 .collect::<HashSet<_>>();
             anyhow::ensure!(
-                common_executables == trusted_executables,
-                "macOS browser executable metadata does not match common policy"
+                policy_executables == trusted_executables,
+                "macOS browser executable metadata does not match policy"
             );
             anyhow::ensure!(
                 !browser.executables.is_empty(),
                 "macOS browser trust must include an executable"
             );
         }
-        for common in &self.common_policy.browsers {
+        for policy_browser in &self.policy.browsers {
             anyhow::ensure!(
-                common.owner_uid.is_some(),
+                policy_browser.owner_uid.is_some(),
                 "macOS browser enrollment requires an explicit owner UID"
             );
             anyhow::ensure!(
                 self.browser_trust
                     .iter()
-                    .any(|browser| browser.browser_id.0 == common.id),
-                "common browser policy has no macOS trust enrollment"
+                    .any(|browser| browser.browser_id.0 == policy_browser.id),
+                "browser policy has no macOS trust enrollment"
             );
         }
         for (index, browser) in self.browser_trust.iter().enumerate() {
@@ -315,11 +184,6 @@ impl MacBackendConfig {
         Ok(())
     }
 
-    pub fn with_builtin_mac_allowlist(mut self) -> Self {
-        self.mac_allowlist = self.mac_allowlist.with_builtin_system_rules();
-        self
-    }
-
     pub fn authoritative_path() -> &'static Path {
         Path::new(SYSTEM_CONFIG_PATH)
     }
@@ -327,7 +191,7 @@ impl MacBackendConfig {
     pub fn validate_for_peer(&self, peer_uid: u32) -> anyhow::Result<()> {
         self.validate()?;
         anyhow::ensure!(
-            self.common_policy
+            self.policy
                 .browsers
                 .iter()
                 .all(|browser| browser.owner_uid == Some(peer_uid)),
@@ -360,7 +224,7 @@ impl MacBackendConfig {
                 "macOS trusted tool must be root-owned or authenticated-peer-owned"
             );
         }
-        for executable in &self.common_policy.enrolled_exes {
+        for executable in &self.policy.enrolled_exes {
             let canonical = std::fs::canonicalize(executable)?;
             anyhow::ensure!(
                 canonical == *executable,
@@ -373,7 +237,7 @@ impl MacBackendConfig {
                 "executable enrollment must be root-owned or authenticated-peer-owned"
             );
         }
-        for key in &self.common_policy.ssh_keys {
+        for key in &self.policy.ssh_keys {
             let resource = guard_ssh::enroll_key(key)?;
             let canonical = resource.path;
             anyhow::ensure!(
@@ -404,7 +268,8 @@ impl MacBackendConfig {
         let mut config = current.cloned().unwrap_or_else(|| Self {
             version: MAC_CONFIG_VERSION,
             policy_enabled: true,
-            common_policy: PolicyConfig {
+            policy: PolicyConfig {
+                browser_protection_level: Default::default(),
                 browsers: Vec::new(),
                 enrolled_exes: Vec::new(),
                 ssh_keys: Vec::new(),
@@ -415,9 +280,9 @@ impl MacBackendConfig {
         if let Some(current) = current {
             current.validate_for_peer(peer_uid)?;
         }
-        if !config.common_policy.ssh_keys.contains(&resource.path) {
-            config.common_policy.ssh_keys.push(resource.path.clone());
-            config.common_policy.ssh_keys.sort();
+        if !config.policy.ssh_keys.contains(&resource.path) {
+            config.policy.ssh_keys.push(resource.path.clone());
+            config.policy.ssh_keys.sort();
         }
         config.validate_for_peer(peer_uid)?;
         Ok((config, resource))
@@ -442,16 +307,16 @@ impl MacBackendConfig {
                         .collect(),
                 })
                 .collect(),
-            ssh_key_paths: self.common_policy.ssh_keys.clone(),
+            ssh_key_paths: self.policy.ssh_keys.clone(),
         }
     }
 
     pub fn to_ipc_metadata(&self) -> guard_ipc::ConfigurationInfo {
         guard_ipc::ConfigurationInfo {
-            enforcement_mode: None,
+            browser_protection_level: self.policy.browser_protection_level.as_str().into(),
             policy_enabled: Some(self.policy_enabled),
             browsers: self
-                .common_policy
+                .policy
                 .browsers
                 .iter()
                 .map(|browser| guard_ipc::ConfiguredBrowserInfo {
@@ -473,30 +338,16 @@ impl MacBackendConfig {
                 })
                 .collect(),
             enrolled_exes: self
-                .common_policy
+                .policy
                 .enrolled_exes
                 .iter()
                 .map(|path| path.to_string_lossy().into_owned())
                 .collect(),
             ssh_keys: self
-                .common_policy
+                .policy
                 .ssh_keys
                 .iter()
                 .map(|path| path.to_string_lossy().into_owned())
-                .collect(),
-            mac_system_processes: self
-                .mac_allowlist
-                .system_processes
-                .iter()
-                .map(|rule| guard_ipc::MacSystemProcessInfo {
-                    path: rule.path.to_string_lossy().into_owned(),
-                    signing_id: rule.signing_id.clone(),
-                    allow_kinds: rule
-                        .allow_kinds
-                        .iter()
-                        .map(|kind| kind.kind_code().to_owned())
-                        .collect(),
-                })
                 .collect(),
             mac_trusted_tools: self
                 .mac_allowlist
@@ -535,7 +386,31 @@ impl MacBackendConfig {
 
     pub fn load_authoritative() -> anyhow::Result<Self> {
         let bytes = std::fs::read(Self::authoritative_path())?;
-        let config: Self = serde_json::from_slice(&bytes)?;
+        Self::parse_authoritative(&bytes)
+    }
+
+    fn parse_authoritative(bytes: &[u8]) -> anyhow::Result<Self> {
+        let mut value: serde_json::Value = serde_json::from_slice(bytes)?;
+        if value.get("version").and_then(serde_json::Value::as_u64) == Some(1) {
+            let object = value
+                .as_object_mut()
+                .ok_or_else(|| anyhow::anyhow!("macOS configuration must be a JSON object"))?;
+            anyhow::ensure!(
+                !(object.contains_key("policy") && object.contains_key("common_policy")),
+                "macOS configuration contains conflicting policy objects"
+            );
+            if let Some(policy) = object.remove("common_policy") {
+                object.insert("policy".into(), policy);
+            }
+            if let Some(allowlist) = object
+                .get_mut("mac_allowlist")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                allowlist.remove("system_processes");
+            }
+            object.insert("version".into(), MAC_CONFIG_VERSION.into());
+        }
+        let config: Self = serde_json::from_value(value)?;
         config.validate()?;
         Ok(config)
     }
@@ -641,7 +516,8 @@ mod tests {
         MacBackendConfig {
             version: MAC_CONFIG_VERSION,
             policy_enabled: true,
-            common_policy: PolicyConfig {
+            policy: PolicyConfig {
+                browser_protection_level: Default::default(),
                 browsers: vec![BrowserEnrollmentConfig {
                     id: "chrome".to_owned(),
                     family: BrowserFamily::Chromium,
@@ -671,14 +547,55 @@ mod tests {
     }
 
     #[test]
-    fn mac_config_round_trips_without_linux_backend_mode() {
+    fn mac_config_round_trips_with_browser_protection_level() {
         let config = config();
         config.validate().unwrap();
         let json = serde_json::to_string(&config).unwrap();
-        assert!(!json.contains("enforcement_mode"));
         assert_eq!(
             serde_json::from_str::<MacBackendConfig>(&json).unwrap(),
             config
+        );
+        assert!(json.contains("browser_protection_level"));
+    }
+
+    #[test]
+    fn version_one_config_migrates_to_common() {
+        let mut value = serde_json::to_value(config()).unwrap();
+        value["version"] = serde_json::json!(1);
+        let mut policy = value.as_object_mut().unwrap().remove("policy").unwrap();
+        policy
+            .as_object_mut()
+            .unwrap()
+            .remove("browser_protection_level");
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("common_policy".into(), policy);
+        value["mac_allowlist"]["system_processes"] = serde_json::json!([{
+            "path": "/System/synthetic-metadata-worker",
+            "team_id": null,
+            "signing_id": "com.example.synthetic",
+            "platform_binary": true,
+            "owner_uid": 0,
+            "allow_kinds": ["History"]
+        }]);
+
+        let migrated =
+            MacBackendConfig::parse_authoritative(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(migrated.version, MAC_CONFIG_VERSION);
+        assert_eq!(
+            migrated.policy.browser_protection_level,
+            guard_platform::config::BrowserProtectionLevel::Common
+        );
+        assert!(migrated.mac_allowlist.trusted_tools.is_empty());
+    }
+
+    #[test]
+    fn current_schema_rejects_unknown_allowlist_fields() {
+        let mut value = serde_json::to_value(config()).unwrap();
+        value["mac_allowlist"]["unexpected_rule_set"] = serde_json::json!([]);
+        assert!(
+            MacBackendConfig::parse_authoritative(&serde_json::to_vec(&value).unwrap()).is_err()
         );
     }
 
@@ -695,11 +612,11 @@ mod tests {
         let mut nested = config.browser_trust[0].clone();
         nested.browser_id = BrowserId("nested".into());
         nested.profile_root = nested.profile_root.join("Default");
-        let mut common = config.common_policy.browsers[0].clone();
-        common.id = "nested".into();
-        common.profile_root = nested.profile_root.clone();
+        let mut policy_browser = config.policy.browsers[0].clone();
+        policy_browser.id = "nested".into();
+        policy_browser.profile_root = nested.profile_root.clone();
         config.browser_trust.push(nested);
-        config.common_policy.browsers.push(common);
+        config.policy.browsers.push(policy_browser);
         assert!(config.validate().is_err());
     }
 
@@ -738,10 +655,10 @@ mod tests {
     #[test]
     fn ipc_metadata_is_scoped_to_authenticated_peer() {
         let mut config = config();
-        let mut other = config.common_policy.browsers[0].clone();
+        let mut other = config.policy.browsers[0].clone();
         other.id = "other-user".to_owned();
         other.owner_uid = Some(502);
-        config.common_policy.browsers.push(other);
+        config.policy.browsers.push(other);
 
         let metadata = config.to_ipc_metadata_for_uid(501);
         assert_eq!(metadata.browsers.len(), 1);
@@ -764,7 +681,8 @@ mod tests {
         let config = MacBackendConfig {
             version: MAC_CONFIG_VERSION,
             policy_enabled: true,
-            common_policy: PolicyConfig {
+            policy: PolicyConfig {
+                browser_protection_level: Default::default(),
                 browsers: vec![BrowserEnrollmentConfig {
                     id: "custom".into(),
                     family: BrowserFamily::Chromium,
@@ -800,7 +718,7 @@ mod tests {
         std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o000)).unwrap();
         let (config, resource) = MacBackendConfig::with_ssh_key_for_peer(None, &key, uid).unwrap();
         assert!(config.policy_enabled);
-        assert_eq!(config.common_policy.ssh_keys, vec![resource.path]);
+        assert_eq!(config.policy.ssh_keys, vec![resource.path]);
         assert!(config.browser_trust.is_empty());
         assert_eq!(config.to_ipc_metadata_for_uid(uid).ssh_keys.len(), 1);
 

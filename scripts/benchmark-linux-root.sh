@@ -49,6 +49,7 @@ python3 - "$CONFIG" "$PROFILE" "$ENROLLED" <<'PY'
 import json, sys
 path, profile, executable = sys.argv[1:]
 json.dump({
+    "browser_protection_level": "common",
     "browsers": [{
         "id": "synthetic-chromium", "family": "Chromium",
         "profile_root": profile, "owner_uid": 0,

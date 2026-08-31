@@ -24,7 +24,8 @@ scripts/macos/build-deploy-self-use.sh
 
 3. 重启进入 macOS Recovery，手动执行 `csrutil disable`，再重启回系统并运行 `csrutil status`。Guard 不执行这一步。
 4. 执行 `sudo systemextensionsctl developer on`，打开 `Sensitive File Guard.app`，在 Protection 页面点击“安装/更新防护扩展”，并按系统提示批准完全磁盘访问。重复点击不是无条件跳过：macOS 会按当前包版本提交安装或替换更新请求；页面会明确显示 Active、等待批准、需要重启或失败原因。
-5. 运行现有 `scripts/macos/run-*-acceptance.sh`。target-selection 验收会自动暂存和恢复合成 profile；它只会请求 macOS 本机认证，不要求手工录入 profile。
+5. 在 Protection 页面选择 Browser Protection Level。Common（推荐）保护浏览器 Cookie、保存的登录凭据和所需密钥材料；Strict 额外保护支持的网站 origin storage。SSH 私钥单独登记，不受该选择影响。
+6. 运行现有 `scripts/macos/run-*-acceptance.sh`。target-selection 验收会自动暂存和恢复合成 profile；它只会请求 macOS 本机认证，不要求手工录入 profile。
 
 ## 确认助手和通知自检
 

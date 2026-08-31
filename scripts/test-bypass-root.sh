@@ -90,6 +90,7 @@ printf 'GUARD_UNICODE_COOKIE_FIXTURE' > "$UNICODE_UDD/Default/Network/Cookies"
 SOCK="$WORK/guardd.sock"
 cat > "$WORK/config.json" <<EOF
 {
+  "browser_protection_level": "common",
   "browsers": [
     { "id": "chrome", "family": "chromium", "profile_root": "$CHROME_UDD", "owner_uid": 0, "exe_paths": [] },
     { "id": "unicode_chrome", "family": "chromium", "profile_root": "$UNICODE_UDD", "owner_uid": 0, "exe_paths": [] }

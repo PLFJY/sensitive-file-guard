@@ -83,6 +83,7 @@ printf '# Project\n\nNormal files an agent edits.\n' > "$PROJECT_DIR/README.md"
 SOCK="$WORK/guardd.sock"
 cat > "$WORK/config.json" <<EOF
 {
+  "browser_protection_level": "common",
   "browsers": [
     {
       "id": "chrome",

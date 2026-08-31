@@ -112,19 +112,19 @@ trap cleanup EXIT
 
 UUID="$(tr -d '\n' < /proc/sys/kernel/random/uuid)"
 CHROME_COOKIE_CANARY="SDF_CANARY_CHROMIUM_COOKIE_${UUID}"
-CHROME_SESSION_CANARY="SDF_CANARY_CHROMIUM_SESSION_${UUID}"
+CHROME_WEB_STORAGE_CANARY="SDF_CANARY_CHROMIUM_WEB_STORAGE_${UUID}"
 FIREFOX_COOKIE_CANARY="SDF_CANARY_FIREFOX_COOKIE_${UUID}"
 REPLACEMENT_CANARY="SDF_CANARY_REPLACEMENT_COOKIE_${UUID}"
 
 CHROME_ROOT="$WORK/disposable-chromium"
 CHROME_PROFILE="$CHROME_ROOT/Default"
 CHROME_DB="$CHROME_PROFILE/Network/Cookies"
-CHROME_SESSION="$CHROME_PROFILE/Sessions/Session_1"
+CHROME_WEB_STORAGE="$CHROME_PROFILE/Local Storage/origin-data"
 FIREFOX_PROFILE="$WORK/disposable-firefox/profile.synthetic"
 FIREFOX_DB="$FIREFOX_PROFILE/cookies.sqlite"
 RUNTIME="$WORK/runtime"
-mkdir -p "$CHROME_PROFILE/Network" "$CHROME_PROFILE/Sessions" \
-  "$FIREFOX_PROFILE/sessionstore-backups" "$RUNTIME"
+mkdir -p "$CHROME_PROFILE/Network" "$CHROME_PROFILE/Local Storage" \
+  "$FIREFOX_PROFILE" "$RUNTIME"
 
 make_cookie_db() {
   local path="$1"
@@ -146,13 +146,11 @@ PY
 
 make_cookie_db "$CHROME_DB" "$CHROME_COOKIE_CANARY"
 make_cookie_db "$FIREFOX_DB" "$FIREFOX_COOKIE_CANARY"
-printf '%s\n' "$CHROME_SESSION_CANARY" > "$CHROME_SESSION"
+printf '%s\n' "$CHROME_WEB_STORAGE_CANARY" > "$CHROME_WEB_STORAGE"
 printf '{"profile":"synthetic-only"}\n' > "$CHROME_ROOT/Local State"
 printf '{"synthetic":true}\n' > "$CHROME_PROFILE/Preferences"
 printf '{"synthetic":true}\n' > "$FIREFOX_PROFILE/logins.json"
 printf 'synthetic-key-material-only\n' > "$FIREFOX_PROFILE/key4.db"
-printf '%s\n' "$FIREFOX_COOKIE_CANARY" \
-  > "$FIREFOX_PROFILE/sessionstore-backups/recovery.jsonlz4"
 
 CHROME_PROBE="$WORK/synthetic-chromium-browser"
 FIREFOX_PROBE="$WORK/synthetic-firefox-browser"
@@ -172,6 +170,7 @@ import sys
 
 path, chromium, firefox, chromium_exe, firefox_exe, uid = sys.argv[1:]
 config = {
+    "browser_protection_level": "strict",
     "browsers": [
         {
             "id": "synthetic-chromium",
@@ -369,8 +368,8 @@ assert_firewall_denied "child process" "$CHROME_COOKIE_CANARY" \
   "$PROBE" child-read "$CHROME_DB"
 assert_firewall_denied "Firefox SQLite" "$FIREFOX_COOKIE_CANARY" \
   "$PROBE" sqlite "$FIREFOX_DB"
-assert_firewall_denied "session-store read" "$CHROME_SESSION_CANARY" \
-  "$PROBE" read "$CHROME_SESSION"
+assert_firewall_denied "Web Storage read" "$CHROME_WEB_STORAGE_CANARY" \
+  "$PROBE" read "$CHROME_WEB_STORAGE"
 
 RENAMED_DB="$CHROME_PROFILE/Network/Cookies.renamed"
 run_as_test_user mv "$CHROME_DB" "$RENAMED_DB"
@@ -493,17 +492,17 @@ else
 fi
 
 if start_local_sink "$SINK_SOCKET" "$SINK_OUTPUT"; then
-  assert_firewall_denied "session-to-local-sink" "$CHROME_SESSION_CANARY" \
-    "$PROBE" exfil-unix "$CHROME_SESSION" "$SINK_SOCKET"
+  assert_firewall_denied "Web-Storage-to-local-sink" "$CHROME_WEB_STORAGE_CANARY" \
+    "$PROBE" exfil-unix "$CHROME_WEB_STORAGE" "$SINK_SOCKET"
   wait "$SINK_PID" || true
   SINK_PID=""
   if [ -s "$SINK_OUTPUT" ]; then
-    note_fail "unauthorized session canary reached the local sink"
+    note_fail "unauthorized Web Storage canary reached the local sink"
   else
-    note_pass "unauthorized session sink received zero canary bytes"
+    note_pass "unauthorized Web Storage sink received zero canary bytes"
   fi
 else
-  note_fail "could not restart AF_UNIX synthetic sink for session probe"
+  note_fail "could not restart AF_UNIX synthetic sink for Web Storage probe"
 fi
 
 echo "==> Explicitly enrolled browser probes"
@@ -547,23 +546,23 @@ sleep 0.5
 assert_firewall_denied "atomic replacement inode" "$REPLACEMENT_CANARY" \
   "$PROBE" sqlite "$CHROME_DB"
 
-NEW_TREE_SOURCE="$RUNTIME/new-session-tree"
+NEW_TREE_SOURCE="$RUNTIME/new-web-storage-tree"
 mkdir -p "$NEW_TREE_SOURCE/nested"
-printf '%s\n' "$CHROME_SESSION_CANARY" > "$NEW_TREE_SOURCE/nested/Session_2"
+printf '%s\n' "$CHROME_WEB_STORAGE_CANARY" > "$NEW_TREE_SOURCE/nested/origin-data"
 chown -R "$TEST_UID:$TEST_GID" "$NEW_TREE_SOURCE"
 chmod 0700 "$NEW_TREE_SOURCE" "$NEW_TREE_SOURCE/nested"
-chmod 0600 "$NEW_TREE_SOURCE/nested/Session_2"
-run_as_test_user mv "$NEW_TREE_SOURCE" "$CHROME_PROFILE/Sessions/new"
-NEW_NESTED="$CHROME_PROFILE/Sessions/new/nested/Session_2"
+chmod 0600 "$NEW_TREE_SOURCE/nested/origin-data"
+run_as_test_user mv "$NEW_TREE_SOURCE" "$CHROME_PROFILE/Local Storage/new"
+NEW_NESTED="$CHROME_PROFILE/Local Storage/new/nested/origin-data"
 sleep 0.5
-assert_firewall_denied "new nested session resource" "$CHROME_SESSION_CANARY" \
+assert_firewall_denied "new nested web storage resource" "$CHROME_WEB_STORAGE_CANARY" \
   "$PROBE" read "$NEW_NESTED"
 
 echo "==> Audit content safety"
 run_as_test_user "$GUARDCTL" --socket "$SOCKET" --json events --limit 100 \
   > "$EVENTS_JSON"
 if grep -Fq -e "$CHROME_COOKIE_CANARY" -e "$FIREFOX_COOKIE_CANARY" \
-  -e "$CHROME_SESSION_CANARY" -e "$REPLACEMENT_CANARY" \
+  -e "$CHROME_WEB_STORAGE_CANARY" -e "$REPLACEMENT_CANARY" \
   "$EVENTS_JSON" "$DAEMON_LOG"; then
   note_fail "audit/daemon logs contain synthetic credential contents"
 else

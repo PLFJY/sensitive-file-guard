@@ -84,6 +84,7 @@ PRIV_KEY="$SSH_DIR/id_ed25519"
 # --- config ---
 cat > "$WORK/config.json" <<EOF
 {
+  "browser_protection_level": "common",
   "browsers": [
     { "id": "chrome", "family": "chromium", "profile_root": "$CHROME_UDD", "owner_uid": 0, "exe_paths": [] }
   ],

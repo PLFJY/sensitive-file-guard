@@ -55,9 +55,8 @@ wait "$chrome_pid" 2>/dev/null || true
 chrome_pid=''
 test -f "$chrome_profile/Local State"
 test -f "$chrome_profile/Default/Login Data"
-test -f "$chrome_profile/Default/Web Data"
 test -d "$chrome_profile/Default/Session Storage"
-echo 'PASS: Chrome used only its disposable profile and wrote protected resource classes'
+echo 'PASS: Chrome used only its disposable profile and wrote credential resources plus website storage'
 
 "$firefox" \
     --headless \
@@ -71,7 +70,7 @@ test -s "$test_root/firefox.png"
 test -f "$firefox_profile/cookies.sqlite"
 test -f "$firefox_profile/key4.db"
 test -d "$firefox_profile/storage"
-echo 'PASS: Firefox used only its disposable profile and wrote protected resource classes'
+echo 'PASS: Firefox used only its disposable profile and wrote credential resources plus website storage'
 
 chrome_identity=$(codesign -dv --verbose=4 "$chrome" 2>&1)
 firefox_identity=$(codesign -dv --verbose=4 "$firefox" 2>&1)

@@ -76,6 +76,8 @@ fn render_loader_cache(template: &str, app: &std::path::Path) -> String {
 pub struct EditableConfiguration {
     #[serde(default)]
     pub policy_enabled: bool,
+    #[serde(default)]
+    pub browser_protection_level: guard_platform::config::BrowserProtectionLevel,
     pub browsers: Vec<guard_platform::config::BrowserEnrollmentConfig>,
     pub enrolled_exes: Vec<std::path::PathBuf>,
     pub ssh_keys: Vec<std::path::PathBuf>,
@@ -393,6 +395,7 @@ pub fn initial_configuration_if_missing(backend_reachable: bool) -> Option<Edita
     if cfg!(target_os = "macos") && backend_reachable {
         Some(EditableConfiguration {
             policy_enabled: false,
+            browser_protection_level: Default::default(),
             browsers: Vec::new(),
             enrolled_exes: Vec::new(),
             ssh_keys: Vec::new(),
@@ -648,6 +651,8 @@ pub fn set_user_agent_enabled(_enabled: bool) -> anyhow::Result<()> {
 }
 
 pub fn editable_from_metadata(info: guard_ipc::ConfigurationInfo) -> Option<EditableConfiguration> {
+    let browser_protection_level =
+        guard_platform::config::BrowserProtectionLevel::parse(&info.browser_protection_level)?;
     let mut browsers = Vec::with_capacity(info.browsers.len());
     for browser in info.browsers {
         let family = match browser.family.as_str() {
@@ -670,25 +675,6 @@ pub fn editable_from_metadata(info: guard_ipc::ConfigurationInfo) -> Option<Edit
 
     #[cfg(target_os = "macos")]
     let mac_allowlist = platform_macos::config::MacAllowlistConfig {
-        system_processes: info
-            .mac_system_processes
-            .into_iter()
-            .map(|rule| platform_macos::config::MacSystemProcessRule {
-                path: rule.path.into(),
-                team_id: None,
-                signing_id: rule.signing_id,
-                platform_binary: true,
-                owner_uid: 0,
-                allow_kinds: rule
-                    .allow_kinds
-                    .into_iter()
-                    .filter_map(|kind| match kind.as_str() {
-                        "browser_history" => Some(guard_core::ProtectedResourceKind::History),
-                        _ => None,
-                    })
-                    .collect(),
-            })
-            .collect(),
         trusted_tools: info
             .mac_trusted_tools
             .into_iter()
@@ -705,6 +691,7 @@ pub fn editable_from_metadata(info: guard_ipc::ConfigurationInfo) -> Option<Edit
 
     Some(EditableConfiguration {
         policy_enabled: info.policy_enabled.unwrap_or(cfg!(target_os = "linux")),
+        browser_protection_level,
         browsers,
         enrolled_exes: info.enrolled_exes.into_iter().map(Into::into).collect(),
         ssh_keys: info.ssh_keys.into_iter().map(Into::into).collect(),
@@ -1274,7 +1261,7 @@ fn mac_config_from_editable(
         platform_macos::code_signature::NativeCodeSignatureInspector,
     ));
     let verified = discovery.discover_verified(&home).enrollments;
-    let mut common_browsers = Vec::with_capacity(editable.browsers.len());
+    let mut policy_browsers = Vec::with_capacity(editable.browsers.len());
     let mut browser_trust = Vec::with_capacity(editable.browsers.len());
     for browser in editable.browsers {
         anyhow::ensure!(
@@ -1307,28 +1294,28 @@ fn mac_config_from_editable(
                     peer_uid,
                 )
             })?;
-        let mut common = browser;
-        common.owner_uid = Some(peer_uid);
-        common.exe_paths = enrollment
+        let mut policy_browser = browser;
+        policy_browser.owner_uid = Some(peer_uid);
+        policy_browser.exe_paths = enrollment
             .executables
             .iter()
             .map(|executable| executable.path().to_path_buf())
             .collect();
-        common_browsers.push(common);
+        policy_browsers.push(policy_browser);
         browser_trust.push(enrollment);
     }
     let config = platform_macos::config::MacBackendConfig {
         version: platform_macos::config::MAC_CONFIG_VERSION,
         policy_enabled: editable.policy_enabled,
-        common_policy: guard_platform::config::PolicyConfig {
-            browsers: common_browsers,
+        policy: guard_platform::config::PolicyConfig {
+            browser_protection_level: editable.browser_protection_level,
+            browsers: policy_browsers,
             enrolled_exes: editable.enrolled_exes,
             ssh_keys: editable.ssh_keys,
         },
         browser_trust,
         mac_allowlist: editable.mac_allowlist,
-    }
-    .with_builtin_mac_allowlist();
+    };
     config.validate_for_peer(peer_uid)?;
     Ok(config)
 }

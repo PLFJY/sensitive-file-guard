@@ -1957,6 +1957,7 @@ mod tests {
         };
         let index = crate::resource_index::MacResourceIndex::from_browser_enrollments(
             std::slice::from_ref(&enrollment),
+            guard_platform::config::BrowserProtectionLevel::Common,
         )
         .unwrap();
         let trust = MacBrowserTrustStore::load_and_revalidate(vec![enrollment]).unwrap();
@@ -2269,6 +2270,7 @@ mod tests {
         let index = crate::resource_index::MacResourceIndex::from_enrollments(
             &[],
             std::slice::from_ref(&key),
+            guard_platform::config::BrowserProtectionLevel::Common,
         )
         .unwrap();
         let config = EndpointSecurityConfig::browser(

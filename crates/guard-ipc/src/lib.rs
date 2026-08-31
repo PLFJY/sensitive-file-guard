@@ -484,25 +484,19 @@ pub struct BrowserInfo {
 /// browser database rows, SSH key bytes, cookies, or credentials.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigurationInfo {
-    #[cfg(target_os = "macos")]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enforcement_mode: Option<String>,
+    #[serde(default = "default_browser_protection_level")]
+    pub browser_protection_level: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy_enabled: Option<bool>,
     pub browsers: Vec<ConfiguredBrowserInfo>,
     pub enrolled_exes: Vec<String>,
     pub ssh_keys: Vec<String>,
     #[serde(default)]
-    pub mac_system_processes: Vec<MacSystemProcessInfo>,
-    #[serde(default)]
     pub mac_trusted_tools: Vec<MacTrustedToolInfo>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MacSystemProcessInfo {
-    pub path: String,
-    pub signing_id: String,
-    pub allow_kinds: Vec<String>,
+fn default_browser_protection_level() -> String {
+    "common".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

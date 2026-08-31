@@ -484,24 +484,21 @@ fn parse_deny_reason(s: String) -> DenyReason {
 fn resource_kind_str(k: ProtectedResourceKind) -> &'static str {
     match k {
         ProtectedResourceKind::CookieStore => "cookie_store",
-        ProtectedResourceKind::SessionStore => "session_store",
         ProtectedResourceKind::BrowserKeyMaterial => "browser_key_material",
         ProtectedResourceKind::WebStorage => "web_storage",
         ProtectedResourceKind::SavedCredentials => "saved_credentials",
-        ProtectedResourceKind::History => "history",
         ProtectedResourceKind::SshPrivateKey => "ssh_private_key",
+        ProtectedResourceKind::Other => "other",
     }
 }
 fn parse_resource_kind(s: String) -> ProtectedResourceKind {
     match s.as_str() {
         "cookie_store" => ProtectedResourceKind::CookieStore,
-        "session_store" => ProtectedResourceKind::SessionStore,
         "browser_key_material" => ProtectedResourceKind::BrowserKeyMaterial,
         "web_storage" => ProtectedResourceKind::WebStorage,
         "saved_credentials" => ProtectedResourceKind::SavedCredentials,
-        "history" => ProtectedResourceKind::History,
         "ssh_private_key" => ProtectedResourceKind::SshPrivateKey,
-        _ => ProtectedResourceKind::History,
+        _ => ProtectedResourceKind::Other,
     }
 }
 
@@ -534,6 +531,16 @@ mod tests {
     use guard_core::policy::Decision;
     use guard_core::resource::{BrowserId, ProfileId, ProtectedResourceKind};
     use std::path::PathBuf;
+
+    #[test]
+    fn unrecognized_persisted_resource_kind_is_inert() {
+        assert_eq!(
+            parse_resource_kind("unrecognized_kind".into()),
+            ProtectedResourceKind::Other
+        );
+        assert!(!ProtectedResourceKind::Other.is_browser());
+        assert!(!ProtectedResourceKind::Other.is_ssh());
+    }
 
     fn sample_record(uid: u32, path: &str, decision: Decision) -> AuditRecord {
         AuditRecord {

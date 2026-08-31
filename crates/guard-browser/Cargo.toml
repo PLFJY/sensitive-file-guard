@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 guard-core.workspace = true
+guard-platform.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

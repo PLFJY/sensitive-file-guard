@@ -108,6 +108,7 @@ echo "isolated ssh-agent ready (pid=$SSH_AGENT_PID, sock=$AGENT_SOCK)"
 SOCK="$WORK/guardd.sock"
 cat > "$WORK/config.json" <<EOF
 {
+  "browser_protection_level": "common",
   "browsers": [],
   "enrolled_exes": [],
   "ssh_keys": ["$PRIV_KEY"]

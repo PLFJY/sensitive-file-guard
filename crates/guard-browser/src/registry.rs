@@ -7,7 +7,7 @@
 //! - **Concrete files** (critical files like `Cookies`, `Login Data`, `key4.db`)
 //!   are enrolled individually and matched by exact canonical path. This gives
 //!   precise, file-identity-anchored protection for the highest-value targets.
-//! - **Directory trees** (`Sessions/`, `Local Storage/`, `storage/`, ...) are
+//! - **Directory trees** (`Local Storage/`, `IndexedDB/`, `storage/`, ...) are
 //!   enrolled as `TreeRoot`s and matched by path prefix, so a file created
 //!   inside the tree after discovery is still classified as protected without
 //!   re-scanning on every open. The platform mediator marks these tree

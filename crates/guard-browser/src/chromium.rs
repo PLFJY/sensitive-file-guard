@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use guard_core::resource::{
     BrowserId, ProfileId, ProtectedResource, ProtectedResourceId, ProtectedResourceKind,
 };
+use guard_platform::config::BrowserProtectionLevel;
 
 use crate::registry::TreeRoot;
 
@@ -31,33 +32,53 @@ pub enum Classified {
 /// Classify a path relative to the profile directory (e.g. `Network/Cookies`,
 /// `Local Storage`, `Login Data`). Pure function, unit-testable without a
 /// filesystem.
-pub fn classify_profile_relative(rel: &Path) -> Classified {
+pub fn classify_profile_relative(rel: &Path, level: BrowserProtectionLevel) -> Classified {
     let Some(name) = rel.file_name().and_then(|n| n.to_str()) else {
         return Classified::None;
     };
     // Concrete cookie files under `Network/` (multi-component path).
     if rel.parent() == Some(Path::new("Network"))
-        && matches!(name, "Cookies" | "Cookies-wal" | "Cookies-shm")
+        && matches!(
+            name,
+            "Cookies" | "Cookies-wal" | "Cookies-shm" | "Cookies-journal"
+        )
     {
-        return Classified::File(ProtectedResourceKind::CookieStore);
+        return protected_file(ProtectedResourceKind::CookieStore, level);
+    }
+    if rel.parent() != Some(Path::new("")) {
+        return Classified::None;
     }
     match name {
-        // Legacy cookie location (profile-relative).
-        "Cookies" | "Cookies-wal" | "Cookies-shm" => {
-            Classified::File(ProtectedResourceKind::CookieStore)
+        // Profile-root cookie location.
+        "Cookies" | "Cookies-wal" | "Cookies-shm" | "Cookies-journal" => {
+            protected_file(ProtectedResourceKind::CookieStore, level)
         }
-        "Local State" => Classified::File(ProtectedResourceKind::BrowserKeyMaterial),
-        // `Login Data*` and `Web Data*` (incl. -journal sidecars).
+        "Local State" => protected_file(ProtectedResourceKind::BrowserKeyMaterial, level),
+        // `Login Data*` includes the SQLite sidecars used by Chromium's saved
+        // password store.
         _ if name == "Login Data" || name.starts_with("Login Data") => {
-            Classified::File(ProtectedResourceKind::SavedCredentials)
+            protected_file(ProtectedResourceKind::SavedCredentials, level)
         }
-        _ if name == "Web Data" || name.starts_with("Web Data") => {
-            Classified::File(ProtectedResourceKind::SavedCredentials)
+        "Session Storage" | "Local Storage" | "IndexedDB" => {
+            protected_tree(ProtectedResourceKind::WebStorage, level)
         }
-        // Directory trees.
-        "Sessions" | "Session Storage" => Classified::Tree(ProtectedResourceKind::SessionStore),
-        "Local Storage" | "IndexedDB" => Classified::Tree(ProtectedResourceKind::WebStorage),
         _ => Classified::None,
+    }
+}
+
+fn protected_file(kind: ProtectedResourceKind, level: BrowserProtectionLevel) -> Classified {
+    if level.protects(kind) {
+        Classified::File(kind)
+    } else {
+        Classified::None
+    }
+}
+
+fn protected_tree(kind: ProtectedResourceKind, level: BrowserProtectionLevel) -> Classified {
+    if level.protects(kind) {
+        Classified::Tree(kind)
+    } else {
+        Classified::None
     }
 }
 
@@ -68,6 +89,7 @@ pub fn discover(
     browser: &BrowserId,
     user_data_dir: &Path,
     owner_uid: u32,
+    level: BrowserProtectionLevel,
 ) -> std::io::Result<(Vec<ProtectedResource>, Vec<TreeRoot>)> {
     let mut files = Vec::new();
     let mut trees = Vec::new();
@@ -97,6 +119,7 @@ pub fn discover(
                 &profile_id,
                 &profile_dir,
                 owner_uid,
+                level,
                 &mut files,
                 &mut trees,
             );
@@ -106,8 +129,8 @@ pub fn discover(
 }
 
 /// True if `dir` looks like a Chromium profile dir (contains a cookie store or
-/// `Preferences`). Used to avoid treating `Snapshots`/`System Profile`/etc. as
-/// profiles.
+/// `Preferences`). This keeps `Snapshots`/`System Profile`/etc. out of profile
+/// discovery.
 fn is_chromium_profile(dir: &Path) -> bool {
     dir.join("Network").join("Cookies").is_file()
         || dir.join("Cookies").is_file()
@@ -120,6 +143,7 @@ fn discover_profile(
     profile_id: &str,
     profile_dir: &Path,
     owner_uid: u32,
+    level: BrowserProtectionLevel,
     files: &mut Vec<ProtectedResource>,
     trees: &mut Vec<TreeRoot>,
 ) {
@@ -138,7 +162,7 @@ fn discover_profile(
                 continue;
             };
             let rel = path.strip_prefix(profile_dir).unwrap_or(&path);
-            match classify_profile_relative(rel) {
+            match classify_profile_relative(rel, level) {
                 Classified::File(kind) => {
                     if ft.is_file() {
                         files.push(resource(&path, kind, browser, profile_id, owner_uid));
@@ -193,24 +217,24 @@ mod tests {
 
     #[test]
     fn classify_cookie_sidecars() {
-        assert_eq!(
-            classify_profile_relative(Path::new("Network/Cookies")),
-            Classified::File(ProtectedResourceKind::CookieStore)
-        );
-        assert_eq!(
-            classify_profile_relative(Path::new("Network/Cookies-wal")),
-            Classified::File(ProtectedResourceKind::CookieStore)
-        );
-        assert_eq!(
-            classify_profile_relative(Path::new("Network/Cookies-shm")),
-            Classified::File(ProtectedResourceKind::CookieStore)
-        );
+        for path in [
+            "Network/Cookies",
+            "Network/Cookies-wal",
+            "Network/Cookies-shm",
+            "Network/Cookies-journal",
+        ] {
+            assert_eq!(
+                classify_profile_relative(Path::new(path), BrowserProtectionLevel::Common),
+                Classified::File(ProtectedResourceKind::CookieStore),
+                "{path}"
+            );
+        }
     }
 
     #[test]
-    fn classify_legacy_cookies() {
+    fn classify_profile_root_cookies() {
         assert_eq!(
-            classify_profile_relative(Path::new("Cookies")),
+            classify_profile_relative(Path::new("Cookies"), BrowserProtectionLevel::Common),
             Classified::File(ProtectedResourceKind::CookieStore)
         );
     }
@@ -218,57 +242,67 @@ mod tests {
     #[test]
     fn classify_local_state_key_material() {
         assert_eq!(
-            classify_profile_relative(Path::new("Local State")),
+            classify_profile_relative(Path::new("Local State"), BrowserProtectionLevel::Common),
             Classified::File(ProtectedResourceKind::BrowserKeyMaterial)
         );
     }
 
     #[test]
-    fn classify_login_and_web_data_saved_credentials() {
+    fn common_classifies_saved_credentials() {
         assert_eq!(
-            classify_profile_relative(Path::new("Login Data")),
+            classify_profile_relative(Path::new("Login Data"), BrowserProtectionLevel::Common),
             Classified::File(ProtectedResourceKind::SavedCredentials)
         );
         assert_eq!(
-            classify_profile_relative(Path::new("Login Data-journal")),
-            Classified::File(ProtectedResourceKind::SavedCredentials)
-        );
-        assert_eq!(
-            classify_profile_relative(Path::new("Web Data")),
+            classify_profile_relative(
+                Path::new("Login Data-journal"),
+                BrowserProtectionLevel::Common
+            ),
             Classified::File(ProtectedResourceKind::SavedCredentials)
         );
     }
 
     #[test]
-    fn classify_session_and_storage_trees() {
+    fn strict_classifies_authentication_capable_storage_only() {
         assert_eq!(
-            classify_profile_relative(Path::new("Sessions")),
-            Classified::Tree(ProtectedResourceKind::SessionStore)
-        );
-        assert_eq!(
-            classify_profile_relative(Path::new("Session Storage")),
-            Classified::Tree(ProtectedResourceKind::SessionStore)
-        );
-        assert_eq!(
-            classify_profile_relative(Path::new("Local Storage")),
+            classify_profile_relative(Path::new("Session Storage"), BrowserProtectionLevel::Strict),
             Classified::Tree(ProtectedResourceKind::WebStorage)
         );
         assert_eq!(
-            classify_profile_relative(Path::new("IndexedDB")),
+            classify_profile_relative(Path::new("Local Storage"), BrowserProtectionLevel::Strict),
+            Classified::Tree(ProtectedResourceKind::WebStorage)
+        );
+        assert_eq!(
+            classify_profile_relative(Path::new("IndexedDB"), BrowserProtectionLevel::Strict),
             Classified::Tree(ProtectedResourceKind::WebStorage)
         );
     }
 
     #[test]
-    fn classify_unrelated_path_is_none() {
-        assert_eq!(
-            classify_profile_relative(Path::new("README")),
-            Classified::None
-        );
-        assert_eq!(
-            classify_profile_relative(Path::new("Bookmarks")),
-            Classified::None
-        );
+    fn common_excludes_web_storage() {
+        for path in ["Session Storage", "Local Storage", "IndexedDB"] {
+            assert_eq!(
+                classify_profile_relative(Path::new(path), BrowserProtectionLevel::Common),
+                Classified::None,
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn all_levels_exclude_noncredential_profile_state() {
+        for level in [
+            BrowserProtectionLevel::Common,
+            BrowserProtectionLevel::Strict,
+        ] {
+            for path in ["Sessions", "History", "Bookmarks", "Web Data", "README"] {
+                assert_eq!(
+                    classify_profile_relative(Path::new(path), level),
+                    Classified::None,
+                    "{level:?}: {path}"
+                );
+            }
+        }
     }
 
     // --- discovery against synthetic fixtures (no real profiles) ---
@@ -277,10 +311,15 @@ mod tests {
     fn discover_synthetic_chromium_profile() {
         let p = ChromiumProfile::create("Default").expect("create fixture");
         let browser = BrowserId("chrome".into());
-        let (files, trees) = discover(&browser, &p.user_data_dir, 1000).expect("discover");
+        let (files, trees) = discover(
+            &browser,
+            &p.user_data_dir,
+            1000,
+            BrowserProtectionLevel::Strict,
+        )
+        .expect("discover");
 
-        // Local State + Cookies + Cookies-wal + Cookies-shm + Login Data + Web Data
-        assert!(files.len() >= 6, "got {} files", files.len());
+        assert!(files.len() >= 5, "got {} files", files.len());
         let kinds: Vec<_> = files.iter().map(|r| r.kind).collect();
         assert!(kinds.contains(&ProtectedResourceKind::BrowserKeyMaterial));
         assert!(kinds.contains(&ProtectedResourceKind::CookieStore));
@@ -293,10 +332,11 @@ mod tests {
             .count();
         assert_eq!(cookie_count, 3, "Cookies + wal + shm");
 
-        // tree roots: Sessions, Session Storage, Local Storage, IndexedDB
+        assert!(!files.iter().any(|resource| resource.path == p.web_data));
+
         let tree_kinds: Vec<_> = trees.iter().map(|t| t.kind).collect();
-        assert!(tree_kinds.contains(&ProtectedResourceKind::SessionStore));
         assert!(tree_kinds.contains(&ProtectedResourceKind::WebStorage));
+        assert!(!trees.iter().any(|tree| tree.dir == p.sessions_dir));
 
         // every resource is owned by the synthetic browser
         assert!(files.iter().all(|r| r.browser.as_ref() == Some(&browser)));
@@ -311,7 +351,13 @@ mod tests {
         fs::write(profile2.join("Network").join("Cookies"), b"synthetic").unwrap();
 
         let browser = BrowserId("chrome".into());
-        let (files, _trees) = discover(&browser, &p.user_data_dir, 1000).expect("discover");
+        let (files, _trees) = discover(
+            &browser,
+            &p.user_data_dir,
+            1000,
+            BrowserProtectionLevel::Common,
+        )
+        .expect("discover");
         let profiles: std::collections::HashSet<_> = files
             .iter()
             .filter_map(|r| r.profile.as_ref().map(|p| p.0.clone()))
@@ -326,7 +372,13 @@ mod tests {
         // dir proves no developer real profile is enumerated.
         let p = ChromiumProfile::create("Default").expect("create fixture");
         let browser = BrowserId("chrome".into());
-        let (files, _) = discover(&browser, &p.user_data_dir, 1000).expect("discover");
+        let (files, _) = discover(
+            &browser,
+            &p.user_data_dir,
+            1000,
+            BrowserProtectionLevel::Common,
+        )
+        .expect("discover");
         for r in &files {
             assert!(r.path.starts_with(&p.user_data_dir));
         }

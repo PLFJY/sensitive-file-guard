@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use guard_core::resource::{
     BrowserId, ProfileId, ProtectedResource, ProtectedResourceId, ProtectedResourceKind,
 };
+use guard_platform::config::BrowserProtectionLevel;
 
 use crate::registry::TreeRoot;
 
@@ -19,27 +20,42 @@ pub enum Classified {
 }
 
 /// Classify a path relative to a Firefox profile dir. Pure / unit-testable.
-pub fn classify_profile_relative(rel: &Path) -> Classified {
+pub fn classify_profile_relative(rel: &Path, level: BrowserProtectionLevel) -> Classified {
     let Some(name) = rel.file_name().and_then(|n| n.to_str()) else {
         return Classified::None;
     };
+    if rel.parent() != Some(Path::new("")) {
+        return Classified::None;
+    }
     match name {
-        "cookies.sqlite" | "cookies.sqlite-wal" | "cookies.sqlite-shm" => {
-            Classified::File(ProtectedResourceKind::CookieStore)
-        }
-        "logins.json" => Classified::File(ProtectedResourceKind::SavedCredentials),
-        "key4.db" => Classified::File(ProtectedResourceKind::BrowserKeyMaterial),
-        // Firefox's legacy local-storage database remains used by profiles
-        // that have not migrated all origins into the `storage/` tree. Its
-        // contents can carry authenticated web state, so protect SQLite
-        // sidecars with the same WebStorage classification.
+        "cookies.sqlite"
+        | "cookies.sqlite-wal"
+        | "cookies.sqlite-shm"
+        | "cookies.sqlite-journal" => protected_file(ProtectedResourceKind::CookieStore, level),
+        "logins.json" => protected_file(ProtectedResourceKind::SavedCredentials, level),
+        "key4.db" => protected_file(ProtectedResourceKind::BrowserKeyMaterial, level),
         "webappsstore.sqlite"
         | "webappsstore.sqlite-wal"
         | "webappsstore.sqlite-shm"
-        | "webappsstore.sqlite-journal" => Classified::File(ProtectedResourceKind::WebStorage),
-        "sessionstore-backups" => Classified::Tree(ProtectedResourceKind::SessionStore),
-        "storage" => Classified::Tree(ProtectedResourceKind::WebStorage),
+        | "webappsstore.sqlite-journal" => protected_file(ProtectedResourceKind::WebStorage, level),
+        "storage" => protected_tree(ProtectedResourceKind::WebStorage, level),
         _ => Classified::None,
+    }
+}
+
+fn protected_file(kind: ProtectedResourceKind, level: BrowserProtectionLevel) -> Classified {
+    if level.protects(kind) {
+        Classified::File(kind)
+    } else {
+        Classified::None
+    }
+}
+
+fn protected_tree(kind: ProtectedResourceKind, level: BrowserProtectionLevel) -> Classified {
+    if level.protects(kind) {
+        Classified::Tree(kind)
+    } else {
+        Classified::None
     }
 }
 
@@ -52,6 +68,7 @@ pub fn discover(
     browser: &BrowserId,
     root: &Path,
     owner_uid: u32,
+    level: BrowserProtectionLevel,
 ) -> std::io::Result<(Vec<ProtectedResource>, Vec<TreeRoot>)> {
     let mut files = Vec::new();
     let mut trees = Vec::new();
@@ -83,6 +100,7 @@ pub fn discover(
             &profile_id,
             &profile_dir,
             owner_uid,
+            level,
             &mut files,
             &mut trees,
         );
@@ -95,6 +113,7 @@ fn discover_profile(
     profile_id: &str,
     profile_dir: &Path,
     owner_uid: u32,
+    level: BrowserProtectionLevel,
     files: &mut Vec<ProtectedResource>,
     trees: &mut Vec<TreeRoot>,
 ) {
@@ -108,7 +127,7 @@ fn discover_profile(
             continue;
         };
         let rel = path.strip_prefix(profile_dir).unwrap_or(&path);
-        match classify_profile_relative(rel) {
+        match classify_profile_relative(rel, level) {
             Classified::File(kind) => {
                 if ft.is_file() {
                     files.push(resource(&path, kind, browser, &profile, owner_uid));
@@ -153,47 +172,29 @@ mod tests {
     use guard_test_fixtures::firefox::FirefoxProfile;
 
     #[test]
-    fn classify_cookie_sidecars() {
-        assert_eq!(
-            classify_profile_relative(Path::new("cookies.sqlite")),
-            Classified::File(ProtectedResourceKind::CookieStore)
-        );
-        assert_eq!(
-            classify_profile_relative(Path::new("cookies.sqlite-wal")),
-            Classified::File(ProtectedResourceKind::CookieStore)
-        );
-        assert_eq!(
-            classify_profile_relative(Path::new("cookies.sqlite-shm")),
-            Classified::File(ProtectedResourceKind::CookieStore)
-        );
+    fn common_classifies_credential_resources() {
+        for (path, kind) in [
+            ("cookies.sqlite", ProtectedResourceKind::CookieStore),
+            ("cookies.sqlite-wal", ProtectedResourceKind::CookieStore),
+            ("cookies.sqlite-shm", ProtectedResourceKind::CookieStore),
+            ("cookies.sqlite-journal", ProtectedResourceKind::CookieStore),
+            ("logins.json", ProtectedResourceKind::SavedCredentials),
+            ("key4.db", ProtectedResourceKind::BrowserKeyMaterial),
+        ] {
+            assert_eq!(
+                classify_profile_relative(Path::new(path), BrowserProtectionLevel::Common),
+                Classified::File(kind),
+                "{path}"
+            );
+        }
     }
 
     #[test]
-    fn classify_logins_and_keymaterial() {
+    fn strict_classifies_authentication_capable_web_storage() {
         assert_eq!(
-            classify_profile_relative(Path::new("logins.json")),
-            Classified::File(ProtectedResourceKind::SavedCredentials)
-        );
-        assert_eq!(
-            classify_profile_relative(Path::new("key4.db")),
-            Classified::File(ProtectedResourceKind::BrowserKeyMaterial)
-        );
-    }
-
-    #[test]
-    fn classify_session_and_storage_trees() {
-        assert_eq!(
-            classify_profile_relative(Path::new("sessionstore-backups")),
-            Classified::Tree(ProtectedResourceKind::SessionStore)
-        );
-        assert_eq!(
-            classify_profile_relative(Path::new("storage")),
+            classify_profile_relative(Path::new("storage"), BrowserProtectionLevel::Strict),
             Classified::Tree(ProtectedResourceKind::WebStorage)
         );
-    }
-
-    #[test]
-    fn classify_legacy_webappsstore_with_sqlite_sidecars() {
         for path in [
             "webappsstore.sqlite",
             "webappsstore.sqlite-wal",
@@ -201,7 +202,7 @@ mod tests {
             "webappsstore.sqlite-journal",
         ] {
             assert_eq!(
-                classify_profile_relative(Path::new(path)),
+                classify_profile_relative(Path::new(path), BrowserProtectionLevel::Strict),
                 Classified::File(ProtectedResourceKind::WebStorage),
                 "{path}"
             );
@@ -209,22 +210,39 @@ mod tests {
     }
 
     #[test]
-    fn classify_unrelated_is_none() {
-        assert_eq!(
-            classify_profile_relative(Path::new("prefs.js")),
-            Classified::None
-        );
-        assert_eq!(
-            classify_profile_relative(Path::new("places.sqlite")),
-            Classified::None
-        );
+    fn common_and_strict_exclude_navigation_state() {
+        for level in [
+            BrowserProtectionLevel::Common,
+            BrowserProtectionLevel::Strict,
+        ] {
+            for path in ["sessionstore-backups", "places.sqlite", "prefs.js"] {
+                assert_eq!(
+                    classify_profile_relative(Path::new(path), level),
+                    Classified::None,
+                    "{path}"
+                );
+            }
+        }
+        for path in ["storage", "webappsstore.sqlite"] {
+            assert_eq!(
+                classify_profile_relative(Path::new(path), BrowserProtectionLevel::Common),
+                Classified::None,
+                "{path}"
+            );
+        }
     }
 
     #[test]
     fn discover_synthetic_firefox_profile() {
         let p = FirefoxProfile::create("test-profile").expect("create fixture");
         let browser = BrowserId("firefox".into());
-        let (files, trees) = discover(&browser, &p.profile_dir, 1000).expect("discover");
+        let (files, trees) = discover(
+            &browser,
+            &p.profile_dir,
+            1000,
+            BrowserProtectionLevel::Strict,
+        )
+        .expect("discover");
 
         let kinds: Vec<_> = files.iter().map(|r| r.kind).collect();
         assert!(kinds.contains(&ProtectedResourceKind::CookieStore));
@@ -243,8 +261,10 @@ mod tests {
         assert_eq!(cookie_count, 2);
 
         let tree_kinds: Vec<_> = trees.iter().map(|t| t.kind).collect();
-        assert!(tree_kinds.contains(&ProtectedResourceKind::SessionStore));
         assert!(tree_kinds.contains(&ProtectedResourceKind::WebStorage));
+        assert!(!trees
+            .iter()
+            .any(|tree| tree.dir == p.sessionstore_backups_dir));
 
         assert!(files.iter().all(|r| r.browser.as_ref() == Some(&browser)));
     }
@@ -258,7 +278,13 @@ mod tests {
         fs::write(profile_b.join("cookies.sqlite"), b"synthetic").unwrap();
 
         let browser = BrowserId("firefox".into());
-        let (files, _) = discover(&browser, p.root_path(), 1000).expect("discover");
+        let (files, _) = discover(
+            &browser,
+            p.root_path(),
+            1000,
+            BrowserProtectionLevel::Common,
+        )
+        .expect("discover");
         let profiles: std::collections::HashSet<_> = files
             .iter()
             .filter_map(|r| r.profile.as_ref().map(|p| p.0.clone()))
@@ -271,7 +297,13 @@ mod tests {
     fn discover_does_not_touch_real_profiles() {
         let p = FirefoxProfile::create("test-profile").expect("create fixture");
         let browser = BrowserId("firefox".into());
-        let (files, _) = discover(&browser, p.root_path(), 1000).expect("discover");
+        let (files, _) = discover(
+            &browser,
+            p.root_path(),
+            1000,
+            BrowserProtectionLevel::Common,
+        )
+        .expect("discover");
         for r in &files {
             assert!(r.path.starts_with(p.root_path()));
         }

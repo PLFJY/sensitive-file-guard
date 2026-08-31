@@ -1,4 +1,5 @@
 {
+  "browser_protection_level": "common",
   "browsers": [],
   "enrolled_exes": [],
   "ssh_keys": []

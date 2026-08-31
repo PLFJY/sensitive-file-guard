@@ -1,9 +1,8 @@
 //! Browser profile discovery and protected-resource classification.
 //!
-//! Phase 05: concrete Chromium-family + Firefox discovery and a protected
-//! resource registry. Discovery is driven by explicit `BrowserId`/family
-//! enrollment from config — no permanent trust is granted merely because a
-//! path is called "Chrome".
+//! Discovery is driven by explicit `BrowserId`/family enrollment and a browser
+//! protection level. No permanent trust is granted merely because a path is
+//! called "Chrome".
 
 pub mod chromium;
 pub mod firefox;
@@ -15,6 +14,7 @@ pub use firefox::discover as discover_firefox;
 pub use registry::{ProtectedResourceRegistry, TreeRoot};
 
 use guard_core::resource::BrowserId;
+use guard_platform::config::BrowserProtectionLevel;
 
 /// A custom (non-standard-location) browser profile enrollment requested by
 /// the user via config. `family` selects the pattern set; `root` is either a
@@ -25,6 +25,7 @@ pub struct CustomProfile {
     pub family: guard_core::resource::BrowserFamily,
     pub root: std::path::PathBuf,
     pub owner_uid: u32,
+    pub protection_level: BrowserProtectionLevel,
 }
 
 impl CustomProfile {
@@ -32,13 +33,24 @@ impl CustomProfile {
     pub fn enroll_into(&self, registry: &mut ProtectedResourceRegistry) -> std::io::Result<()> {
         use guard_core::resource::BrowserFamily;
         let (files, trees) = match self.family {
-            BrowserFamily::Chromium => {
-                discover_chromium(&self.browser, &self.root, self.owner_uid)?
-            }
-            BrowserFamily::Firefox | BrowserFamily::Zen => {
-                discover_firefox(&self.browser, &self.root, self.owner_uid)?
-            }
-            BrowserFamily::Safari => safari::discover(&self.browser, &self.root, self.owner_uid)?,
+            BrowserFamily::Chromium => discover_chromium(
+                &self.browser,
+                &self.root,
+                self.owner_uid,
+                self.protection_level,
+            )?,
+            BrowserFamily::Firefox | BrowserFamily::Zen => discover_firefox(
+                &self.browser,
+                &self.root,
+                self.owner_uid,
+                self.protection_level,
+            )?,
+            BrowserFamily::Safari => safari::discover(
+                &self.browser,
+                &self.root,
+                self.owner_uid,
+                self.protection_level,
+            )?,
         };
         for f in files {
             registry.enroll_file(f);
@@ -66,12 +78,14 @@ mod tests {
             family: BrowserFamily::Chromium,
             root: p.user_data_dir.clone(),
             owner_uid: 1000,
+            protection_level: BrowserProtectionLevel::Strict,
         };
         custom.enroll_into(&mut reg).expect("enroll");
-        assert!(reg.file_count() >= 6);
+        assert_eq!(reg.file_count(), 5);
         assert!(!reg.trees().is_empty());
         // A protected file classifies.
         assert!(reg.classify(&p.cookies).is_some());
+        assert!(reg.classify(&p.web_data).is_none());
         // A tree descendant classifies.
         let descendant = p.local_storage_dir.join("https_example.com_0.localstorage");
         assert!(reg.classify(&descendant).is_some());
@@ -86,6 +100,7 @@ mod tests {
             family: BrowserFamily::Firefox,
             root: p.profile_dir.clone(),
             owner_uid: 1000,
+            protection_level: BrowserProtectionLevel::Strict,
         };
         custom.enroll_into(&mut reg).expect("enroll");
         assert!(reg.classify(&p.cookies_sqlite).is_some());
