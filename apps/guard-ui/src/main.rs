@@ -2015,6 +2015,9 @@ fn present_pending_dialog(
                 "Blocking this request…"
             }
         )));
+        if is_allow {
+            hide_pending_dialog_for_system_authentication(dialog);
+        }
         resolve_pending_in_background(
             response_window.clone(),
             response_controller.clone(),
@@ -2140,7 +2143,18 @@ fn retry_pending_dialog(
         dialog.set_secondary_text(Some(&format!(
             "{details}\n\n{error} You can try again or block this request."
         )));
+        if !dialog.is_visible() {
+            dialog.present();
+        }
     }
+}
+
+fn hide_pending_dialog_for_system_authentication(dialog: &gtk::MessageDialog) {
+    #[cfg(target_os = "macos")]
+    dialog.set_visible(false);
+
+    #[cfg(not(target_os = "macos"))]
+    let _ = dialog;
 }
 
 fn complete_pending_dialog(
