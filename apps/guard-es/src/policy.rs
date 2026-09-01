@@ -20,6 +20,7 @@ use platform_macos::endpoint_security::{
     AuthOpenFacts, MacAuthorizationEvent, MacPendingPermission, MacProtectedResources,
     ES_FFLAG_READ, ES_FFLAG_WRITE,
 };
+use platform_macos::identity::is_verified_spotlight_indexer;
 use platform_macos::resource_index::{MacResourceIndex, TargetSelectionPlan};
 
 pub const MIGRATION_LEASE_SECS: u64 = 10 * 60;
@@ -323,11 +324,7 @@ impl MacPolicy {
                 inner.stats.denied = inner.stats.denied.saturating_add(1);
                 drop(inner);
                 self.record(
-                    if event.resource.kind == ProtectedResourceKind::SshPrivateKey {
-                        "ssh_key_access_blocked"
-                    } else {
-                        "browser_access_denied"
-                    },
+                    denial_event_code(&event.resource, &event.facts.process),
                     &event.resource,
                     None,
                     Decision::Deny(DenyReason::UnknownProcess),
@@ -444,11 +441,7 @@ impl MacPolicy {
                 inner.stats.denied = inner.stats.denied.saturating_add(1);
                 drop(inner);
                 self.record(
-                    if event.resource.kind == ProtectedResourceKind::SshPrivateKey {
-                        "ssh_key_access_blocked"
-                    } else {
-                        "browser_access_denied"
-                    },
+                    denial_event_code(&event.resource, &event.facts.process),
                     &event.resource,
                     Some(&process),
                     Decision::Deny(reason),
@@ -1258,6 +1251,22 @@ impl MacPolicy {
     }
 }
 
+fn denial_event_code(
+    resource: &ProtectedResource,
+    process: &platform_macos::identity::MacProcessFacts,
+) -> &'static str {
+    if resource.kind == ProtectedResourceKind::SshPrivateKey {
+        "ssh_key_access_blocked"
+    } else if resource.kind.is_browser() && is_verified_spotlight_indexer(process) {
+        // Verified Spotlight indexers remain subject to File Shield denial.
+        // Their browser-resource denials are retained in audit without presenting
+        // repetitive user notifications.
+        "spotlight_browser_secret_denied"
+    } else {
+        "browser_access_denied"
+    }
+}
+
 pub fn prepare_config(
     config: Option<&MacBackendConfig>,
 ) -> anyhow::Result<(MacResourceIndex, MacBrowserTrustStore, bool)> {
@@ -1607,6 +1616,119 @@ mod tests {
                 .unwrap()
                 .observe(facts, Instant::now())
                 .unwrap();
+        }
+    }
+
+    fn verified_spotlight_worker(fixture: &Fixture, pid: u32) -> MacProcessFacts {
+        let mut facts = fixture.facts("reader", pid, None);
+        facts.executable.path = std::path::PathBuf::from(
+            "/System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Support/mdworker_shared",
+        );
+        facts.executable.owner_uid = 0;
+        facts.code.valid = true;
+        facts.code.platform_binary = true;
+        facts.code.team_id = None;
+        facts.code.signing_id = Some("com.apple.mdworker_shared".into());
+        facts
+    }
+
+    #[test]
+    fn verified_spotlight_browser_denials_are_audited_with_a_silent_event_code() {
+        let mut fixture = Fixture::new();
+        let template = fixture.resources.get("browser-a").unwrap().clone();
+        for (index, kind) in [
+            guard_core::ProtectedResourceKind::CookieStore,
+            guard_core::ProtectedResourceKind::SavedCredentials,
+            guard_core::ProtectedResourceKind::BrowserKeyMaterial,
+            guard_core::ProtectedResourceKind::WebStorage,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let source = format!("spotlight-{index}");
+            let mut resource = template.clone();
+            resource.id = guard_core::ProtectedResourceId(source.clone());
+            resource.kind = kind;
+            fixture.resources.insert(source.clone(), resource);
+
+            let worker = verified_spotlight_worker(&fixture, 500 + index as u32);
+            fixture.observe(worker.clone());
+            let (event, state) = fixture.event(
+                worker,
+                &source,
+                ES_FFLAG_READ,
+                Some(Duration::from_secs(10)),
+            );
+            fixture.policy.handle_at(event, 5_000 + index as u64);
+            assert_eq!(*state.lock().unwrap(), Terminal::Flags(0));
+        }
+
+        let events = fixture
+            .policy
+            .recent_events(fixture.uid, 100, None, None)
+            .unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event_code == "spotlight_browser_secret_denied")
+                .count(),
+            4
+        );
+        assert!(events
+            .iter()
+            .filter(|event| event.event_code == "spotlight_browser_secret_denied")
+            .all(|event| event.decision.contains("Deny")));
+    }
+
+    #[test]
+    fn spotlight_ssh_denial_keeps_the_normal_visible_event_code() {
+        let fixture = Fixture::new();
+        let mut worker = verified_spotlight_worker(&fixture, 510);
+        worker.uid = fixture.uid.saturating_add(1);
+        let worker_uid = worker.uid;
+        fixture.observe(worker.clone());
+        let (event, state) =
+            fixture.event(worker, "ssh", ES_FFLAG_READ, Some(Duration::from_secs(10)));
+        fixture.policy.handle_at(event, 5_100);
+        assert_eq!(*state.lock().unwrap(), Terminal::Flags(0));
+
+        let events = fixture
+            .policy
+            .recent_events(worker_uid, 100, None, None)
+            .unwrap();
+        assert!(events
+            .iter()
+            .any(|event| event.event_code == "ssh_key_access_blocked"));
+        assert!(!events
+            .iter()
+            .any(|event| event.event_code == "spotlight_browser_secret_denied"));
+    }
+
+    #[test]
+    fn spotlight_like_processes_keep_the_normal_browser_denial_event_code() {
+        let fixture = Fixture::new();
+        let resource = fixture.resources.get("browser-a").unwrap();
+        let worker = verified_spotlight_worker(&fixture, 520);
+        assert_eq!(
+            denial_event_code(resource, &worker),
+            "spotlight_browser_secret_denied"
+        );
+
+        for mutate in [
+            |facts: &mut MacProcessFacts| {
+                facts.executable.path = std::path::PathBuf::from("/tmp/mdworker_shared")
+            },
+            |facts: &mut MacProcessFacts| facts.code.signing_id = Some("com.apple.wrong".into()),
+            |facts: &mut MacProcessFacts| facts.code.platform_binary = false,
+            |facts: &mut MacProcessFacts| facts.code.valid = false,
+            |facts: &mut MacProcessFacts| facts.executable.owner_uid = 1,
+        ] {
+            let mut unverified = worker.clone();
+            mutate(&mut unverified);
+            assert_eq!(
+                denial_event_code(resource, &unverified),
+                "browser_access_denied"
+            );
         }
     }
 

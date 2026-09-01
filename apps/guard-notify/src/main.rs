@@ -241,7 +241,7 @@ impl MacEventObserver {
             .filter(|event| {
                 event.id > previous
                     && event.decision.contains("Deny")
-                    && event.event_code != "system_process_access_suppressed"
+                    && event.event_code != "spotlight_browser_secret_denied"
             })
             .collect()
     }
@@ -846,6 +846,32 @@ mod tests {
         allowed.decision = "Allow".into();
         assert!(observer.observe(vec![allowed]).is_empty());
         assert_eq!(observer.last_seen(), Some(3));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_event_observer_keeps_spotlight_denials_in_the_feed_without_notifying() {
+        let mut observer = MacEventObserver::default();
+        assert!(observer
+            .observe(vec![event(1, "/synthetic/Cookies")])
+            .is_empty());
+
+        let mut spotlight = event(2, "/synthetic/logins.json");
+        spotlight.id = 2;
+        spotlight.event_code = "spotlight_browser_secret_denied".into();
+        let mut visible = event(3, "/synthetic/Cookies");
+        visible.id = 3;
+        visible.event_code = "browser_access_denied".into();
+        let delivered = observer.observe(vec![spotlight, visible]);
+
+        assert_eq!(observer.last_seen(), Some(3));
+        assert_eq!(
+            delivered
+                .iter()
+                .map(|event| event.event_code.as_str())
+                .collect::<Vec<_>>(),
+            vec!["browser_access_denied"]
+        );
     }
 
     #[cfg(target_os = "macos")]

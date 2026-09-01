@@ -49,6 +49,29 @@ pub struct MacProcessFacts {
     pub responsible: Option<AuditProcessKey>,
 }
 
+const SPOTLIGHT_INDEXERS: &[(&str, &str)] = &[
+    (
+        "/System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Support/mds",
+        "com.apple.mds",
+    ),
+    (
+        "/System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Support/mdworker_shared",
+        "com.apple.mdworker_shared",
+    ),
+];
+
+/// Returns true only for the Apple Spotlight indexers whose executable and
+/// Endpoint Security code-identity facts all match a pinned platform binary.
+pub fn is_verified_spotlight_indexer(process: &MacProcessFacts) -> bool {
+    process.executable.owner_uid == 0
+        && process.code.valid
+        && process.code.platform_binary
+        && SPOTLIGHT_INDEXERS.iter().any(|(path, signing_id)| {
+            process.executable.path == Path::new(path)
+                && process.code.signing_id.as_deref() == Some(*signing_id)
+        })
+}
+
 impl MacProcessFacts {
     pub fn stable_id(&self) -> ProcessStableId {
         ProcessStableId {
@@ -309,6 +332,46 @@ mod tests {
             parent,
             responsible: None,
         }
+    }
+
+    #[test]
+    fn spotlight_indexer_requires_pinned_path_owner_and_code_identity() {
+        let mut process = facts(42, 1, 100, None);
+        process.executable.path = PathBuf::from(
+            "/System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Support/mdworker_shared",
+        );
+        process.executable.owner_uid = 0;
+        process.code.valid = true;
+        process.code.platform_binary = true;
+        process.code.signing_id = Some("com.apple.mdworker_shared".into());
+        assert!(is_verified_spotlight_indexer(&process));
+
+        process.executable.path = PathBuf::from(
+            "/System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Support/mds",
+        );
+        process.code.signing_id = Some("com.apple.mds".into());
+        assert!(is_verified_spotlight_indexer(&process));
+
+        process.executable.path = PathBuf::from("/tmp/mdworker_shared");
+        assert!(!is_verified_spotlight_indexer(&process));
+        process.executable.path = PathBuf::from(
+            "/System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Support/mdworker_shared",
+        );
+
+        process.code.signing_id = Some("com.apple.wrong".into());
+        assert!(!is_verified_spotlight_indexer(&process));
+        process.code.signing_id = Some("com.apple.mdworker_shared".into());
+
+        process.code.platform_binary = false;
+        assert!(!is_verified_spotlight_indexer(&process));
+        process.code.platform_binary = true;
+
+        process.code.valid = false;
+        assert!(!is_verified_spotlight_indexer(&process));
+        process.code.valid = true;
+
+        process.executable.owner_uid = 501;
+        assert!(!is_verified_spotlight_indexer(&process));
     }
 
     #[test]
