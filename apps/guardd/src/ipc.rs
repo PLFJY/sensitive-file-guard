@@ -131,6 +131,13 @@ fn handle_request_with_connection(
         RequestOp::PendingHelperPoll | RequestOp::PendingHelperStatus => {
             Response::err("pending_helper_health is unavailable on the Linux transport")
         }
+        // This fixture-only switch belongs to the macOS Endpoint Security
+        // acceptance harness. Linux has no corresponding pending-prompt
+        // suppression state, so reject it explicitly instead of treating it
+        // as a policy operation.
+        RequestOp::AcceptanceSetBlockSuppression { .. } => {
+            Response::err("acceptance_block_suppression is unavailable on the Linux transport")
+        }
         RequestOp::ConfigCheck => handle_config_check(state, creds),
         RequestOp::Events {
             limit,
