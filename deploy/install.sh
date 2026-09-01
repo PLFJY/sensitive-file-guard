@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# deploy/install.sh — install/uninstall guardd as a systemd service.
+# deploy/install.sh — install guardd as a systemd service.
 #
 # Usage:
-#   sudo deploy/install.sh              # install
-#   sudo deploy/install.sh --uninstall  # uninstall
+#   sudo deploy/install.sh
 #
 # Build as an unprivileged user first with `cargo build --release`, then run
 # this script with sudo.  It installs already-built artifacts and deliberately
@@ -33,14 +32,21 @@ CONFIG_DST="$CONFIG_DIR/config.json"
 CONFIG_EXAMPLE="$REPO/deploy/guardd-config.example.json"
 CONFIG_EXAMPLE_DST="/usr/local/share/guardd/guardd-config.example.json"
 STATE_DIR="/var/lib/guardd"
-RUN_DIR="/run/guardd"
 POLKIT_SRC="$REPO/deploy/org.guardd.policy"
 POLKIT_DST="/usr/share/polkit-1/actions/org.guardd.policy"
 ACCESS_GROUP="guardd-users"
 
-UNINSTALL=false
-if [ "${1:-}" = "--uninstall" ]; then
-  UNINSTALL=true
+usage() {
+  echo "Usage: sudo $0"
+}
+
+if [ "$#" -ne 0 ]; then
+  if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+    usage
+    exit 0
+  fi
+  usage >&2
+  exit 2
 fi
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -48,29 +54,38 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 2
 fi
 
-if [ "$UNINSTALL" = true ]; then
-  echo "==> Uninstalling guardd service"
-  systemctl stop guardd 2>/dev/null || true
-  systemctl disable guardd 2>/dev/null || true
-  rm -f "$UNIT_DST"
-  rm -f "$NOTIFY_UNIT_DST"
-  rm -f "$POLKIT_DST"
-  rm -f "$CONFIG_EXAMPLE_DST"
-  systemctl daemon-reload
-  rm -f "$GUARDD_DST" "$GUARDCTL_DST" "$GUARD_NOTIFY_DST" "$BIN_DIR/guard-tui"
-  rm -f "$GUARD_UI_DST" "/usr/share/applications/io.github.plfjy.SensitiveFileGuard.desktop" "/usr/share/metainfo/io.github.plfjy.SensitiveFileGuard.metainfo.xml" "/usr/share/icons/hicolor/scalable/apps/io.github.plfjy.SensitiveFileGuard.svg"
-  echo "    Removed: $UNIT_DST, $NOTIFY_UNIT_DST, $POLKIT_DST, $CONFIG_EXAMPLE_DST, $GUARDD_DST, $GUARDCTL_DST, $GUARD_NOTIFY_DST (and any obsolete terminal UI binary)"
-  echo "    Preserved: $CONFIG_DIR (edit to remove), $STATE_DIR (audit DB)"
-  echo "==> Uninstall complete"
-  exit 0
-fi
-
 echo "==> Installing guardd service"
+
+if ! command -v systemctl >/dev/null; then
+  echo "ERROR: systemctl is required to install the guardd service"
+  exit 2
+fi
 
 if ! command -v pkcheck >/dev/null; then
   echo "ERROR: pkcheck is required for sensitive IPC authorization (install polkit)"
   exit 2
 fi
+
+# Validate every source artifact before changing host state. This avoids a
+# partial installation such as a new group with no matching service binary.
+for source in \
+  "$UNIT_SRC" "$NOTIFY_UNIT_SRC" "$CONFIG_EXAMPLE" "$POLKIT_SRC" \
+  "$DESKTOP_SRC" "$METAINFO_SRC" "$ICON_SRC"; do
+  if [ ! -f "$source" ]; then
+    echo "ERROR: missing installation asset: $source"
+    exit 2
+  fi
+done
+
+# Never compile as root: doing so pollutes root's Cargo home and makes the
+# result depend on a privileged toolchain. Refuse stale/missing artifacts.
+for artifact in "$GUARDD_BIN" "$GUARDCTL_BIN" "$GUARD_NOTIFY_BIN" "$GUARD_UI_BIN"; do
+  if [ ! -x "$artifact" ]; then
+    echo "ERROR: missing release artifact: $artifact"
+    echo "Build first as your normal user: cargo build --release"
+    exit 2
+  fi
+done
 
 # Transport access is separate from authorization: this group can connect to
 # the socket, while migration/SSH mutations still require polkit.
@@ -83,16 +98,6 @@ if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
   echo "    Added $SUDO_USER to $ACCESS_GROUP (log out/in before using the socket)"
 fi
 
-# Never compile as root: doing so pollutes root's Cargo home and makes the
-# result depend on a privileged toolchain. Refuse stale/missing artifacts.
-for artifact in "$GUARDD_BIN" "$GUARDCTL_BIN" "$GUARD_NOTIFY_BIN" "$GUARD_UI_BIN"; do
-  if [ ! -x "$artifact" ]; then
-    echo "ERROR: missing release artifact: $artifact"
-    echo "Build first as your normal user: cargo build --release"
-    exit 2
-  fi
-done
-
 # Install binaries.
 mkdir -p "$BIN_DIR"
 install -m 0755 "$GUARDD_BIN" "$GUARDD_DST"
@@ -100,7 +105,7 @@ install -m 0755 "$GUARDCTL_BIN" "$GUARDCTL_DST"
 install -m 0755 "$GUARD_NOTIFY_BIN" "$GUARD_NOTIFY_DST"
 install -m 0755 "$GUARD_UI_BIN" "$GUARD_UI_DST"
 # Remove the binary installed by releases that still shipped the terminal UI.
-rm -f "$BIN_DIR/guard-tui"
+rm -f -- "$BIN_DIR/guard-tui"
 install -Dm0644 "$DESKTOP_SRC" /usr/share/applications/io.github.plfjy.SensitiveFileGuard.desktop
 install -Dm0644 "$METAINFO_SRC" /usr/share/metainfo/io.github.plfjy.SensitiveFileGuard.metainfo.xml
 install -Dm0644 "$ICON_SRC" /usr/share/icons/hicolor/scalable/apps/io.github.plfjy.SensitiveFileGuard.svg
@@ -130,6 +135,10 @@ sed "s|@GUARDD_BINDIR@|$BIN_DIR|g" "$NOTIFY_UNIT_SRC" > "$NOTIFY_UNIT_DST"
 chmod 0644 "$NOTIFY_UNIT_DST"
 install -m 0644 "$POLKIT_SRC" "$POLKIT_DST"
 systemctl daemon-reload
+if systemctl is-active --quiet guardd; then
+  echo "    Restarting active guardd service to apply the upgrade"
+  systemctl try-restart guardd
+fi
 echo "    Installed: $UNIT_DST, $POLKIT_DST"
 
 echo
@@ -138,4 +147,4 @@ echo "    1. Create reviewed protection config: sudo guardctl setup --home /home
 echo "    2. Optionally choose an existing key: guardctl ssh suggest"
 echo "    3. Start: sudo systemctl enable --now guardd"
 echo "    4. Verify: guardctl status"
-echo "    5. Desktop notifications (as your user): systemctl --user daemon-reload && systemctl --user enable --now guard-notify"
+echo "    5. Desktop notifications (as your user): systemctl --user daemon-reload && systemctl --user enable guard-notify && systemctl --user restart guard-notify"

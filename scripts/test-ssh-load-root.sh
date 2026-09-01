@@ -41,9 +41,9 @@ for tool in ssh-keygen ssh-add ssh-agent; do
   fi
 done
 
-echo "==> Building release binaries"
-cd "$REPO"
-cargo build --release 2>&1 | grep -E '(Compiling guardd|Compiling guardctl|Finished|error)' || true
+echo "==> Checking pre-built release binaries"
+# Build as the normal user before entering this root-only gate. The test must
+# never populate root's Cargo home or produce root-owned build artifacts.
 test -x "$GUARDD" || { echo "guardd binary missing"; exit 1; }
 test -x "$GUARDCTL" || { echo "guardctl binary missing"; exit 1; }
 
@@ -59,7 +59,7 @@ cleanup() {
     kill -TERM "$SSH_AGENT_PID" 2>/dev/null || true
     wait "$SSH_AGENT_PID" 2>/dev/null || true
   fi
-  rm -rf "$WORK"
+  rm -rf -- "$WORK"
 }
 trap cleanup EXIT
 

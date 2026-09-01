@@ -70,7 +70,8 @@ echo "==> 启动防护服务"
 sudo systemctl daemon-reload
 sudo systemctl enable --now guardd
 systemctl --user daemon-reload
-systemctl --user enable --now guard-notify
+systemctl --user enable guard-notify
+systemctl --user restart guard-notify
 
 echo "==> 验证服务状态"
 sudo systemctl --no-pager --full status guardd || true

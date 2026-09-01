@@ -48,20 +48,21 @@ as_user_session() {
 }
 cleanup() {
   if [ -e "$RULE" ]; then
-    unlink "$RULE" || true
+    rm -f -- "$RULE" || true
     systemctl restart polkit.service >/dev/null 2>&1 || true
   fi
   if [ "$INSTALLED" -eq 1 ]; then
     user_systemctl disable --now guard-notify >/dev/null 2>&1 || true
     systemctl stop guardd >/dev/null 2>&1 || true
-    bash "$REPO/deploy/install.sh" --uninstall >/dev/null 2>&1 || true
+    bash "$REPO/deploy/uninstall.sh" >/dev/null 2>&1 || true
   fi
   if [ -f /etc/guardd/config.json ] && grep -q "$WORK" /etc/guardd/config.json; then
-    unlink /etc/guardd/config.json || true
+    rm -f -- /etc/guardd/config.json || true
   fi
   rmdir /etc/guardd 2>/dev/null || true
-  if [ -f /var/lib/guardd/audit.db ]; then unlink /var/lib/guardd/audit.db || true; fi
+  if [ -f /var/lib/guardd/audit.db ]; then rm -f -- /var/lib/guardd/audit.db || true; fi
   rmdir /var/lib/guardd 2>/dev/null || true
+  rmdir /var/log/guardd 2>/dev/null || true
   if [ "$KEEP_WORK" = 1 ]; then
     echo "Synthetic installed-auth artifacts retained at: $WORK"
   else
@@ -74,11 +75,25 @@ if [ -e /etc/systemd/system/guardd.service ] || [ -e /etc/guardd/config.json ]; 
   echo "ERROR: refusing to overwrite an existing guardd installation/config"
   exit 2
 fi
+if [ -e /var/lib/guardd/audit.db ]; then
+  echo "ERROR: refusing to overwrite existing guardd audit state"
+  exit 2
+fi
 if [ ! -S "/run/user/$TEST_UID/bus" ]; then
   echo "ERROR: logged-in user's D-Bus session is unavailable"
   exit 2
 fi
 command -v setpriv >/dev/null || { echo "ERROR: setpriv is required"; exit 2; }
+for artifact in \
+  "$REPO/target/release/guardd" \
+  "$REPO/target/release/guardctl" \
+  "$REPO/target/release/guard-notify" \
+  "$REPO/target/release/guard-test-probe"; do
+  [ -x "$artifact" ] || {
+    echo "ERROR: missing $artifact; build release binaries as $TEST_USER first"
+    exit 2
+  }
+done
 
 chmod 0755 "$WORK"
 PROFILE="$WORK/disposable-chromium"
@@ -298,7 +313,7 @@ fi
 pkill -TERM -P "$USER_AGENT_RUNNER" 2>/dev/null || true
 kill -TERM "$USER_AGENT_RUNNER" 2>/dev/null || true
 wait "$USER_AGENT_RUNNER" 2>/dev/null || true
-unlink "$RULE"
+rm -f -- "$RULE"
 systemctl restart polkit.service
 
 echo "==> Installed user notification service"

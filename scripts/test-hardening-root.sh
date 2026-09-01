@@ -20,9 +20,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
-cargo build --manifest-path "$REPO/Cargo.toml" -p guardd -p guard-test-probe
 GUARDD="$REPO/target/debug/guardd"
 PROBE="$REPO/target/debug/guard-test-probe"
+echo "==> Checking pre-built debug binaries"
+# Build as the normal user before entering this root-only gate. The test must
+# never populate root's Cargo home or produce root-owned build artifacts.
+for artifact in "$GUARDD" "$PROBE"; do
+  [ -x "$artifact" ] || {
+    echo "ERROR: missing $artifact; build it as the normal user first"
+    exit 2
+  }
+done
 ROOT="$WORK/chromium"
 PROFILE="$ROOT/Default"
 mkdir -p "$PROFILE/Network" "$PROFILE/Local Storage"
@@ -74,7 +82,7 @@ expect_allowed_eventually() {
 }
 
 # New inode at an already-protected critical path.
-rm -f "$PROFILE/Network/Cookies"
+rm -f -- "$PROFILE/Network/Cookies"
 printf '%s' 'synthetic-cookie-v2' > "$PROFILE/Network/Cookies"
 expect_denied_eventually "$PROFILE/Network/Cookies"
 
@@ -91,7 +99,7 @@ printf '%s' 'synthetic-cookie-v3' > "$NEW_PROFILE/Network/Cookies"
 expect_denied_eventually "$NEW_PROFILE/Network/Cookies"
 
 # Configured SSH key replaced with a new inode.
-rm -f "$SSH_KEY"
+rm -f -- "$SSH_KEY"
 printf '%s' 'synthetic-ephemeral-key-fixture-v2' > "$SSH_KEY"
 chmod 0600 "$SSH_KEY"
 expect_allowed_eventually "$SSH_KEY"

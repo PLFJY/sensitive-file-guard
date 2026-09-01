@@ -42,9 +42,15 @@ for tool in ssh-keygen ssh-add ssh-agent python3 cc; do
   fi
 done
 
-echo "==> Building release binaries"
-cargo build --manifest-path "$REPO/Cargo.toml" --release \
-  -p guardd -p guardctl -p guard-test-probe
+echo "==> Checking pre-built release binaries"
+# Build as the normal user before entering this root-only gate. The test must
+# never populate root's Cargo home or produce root-owned build artifacts.
+for artifact in "$GUARDD" "$GUARDCTL" "$PROBE"; do
+  [ -x "$artifact" ] || {
+    echo "ERROR: missing $artifact; build it as the normal user first"
+    exit 2
+  }
+done
 
 HOME_FIXTURE="$WORK/home"
 SSH_DIR="$HOME_FIXTURE/.ssh"
@@ -113,7 +119,7 @@ echo "==> Raw private-key access"
 if cat "$KEY" >/dev/null 2>&1; then pass "direct private-key read allowed"; else fail "direct private-key read interrupted"; fi
 if cp "$KEY" "$WORK/copied-key" 2>/dev/null; then
   pass "copy private key allowed"
-  rm -f "$WORK/copied-key"
+  rm -f -- "$WORK/copied-key"
 else
   fail "copy private key interrupted"
 fi
@@ -294,7 +300,7 @@ PY
 then pass "real ssh-add cannot use a lease with an unpinned agent environment"; else fail "malicious client bypassed the pinned-agent lease binding"; fi
 # Restore the trusted listener pathname from guardd's immutable hardlink so the
 # following positive-control scenario starts from the same verified agent.
-unlink "$AGENT_SOCKET"
+rm -f -- "$AGENT_SOCKET"
 ln "$IGNORE_PINNED_SOCKET" "$AGENT_SOCKET"
 wait "$FAKE_AGENT_PID" 2>/dev/null || true
 FAKE_AGENT_PID=""

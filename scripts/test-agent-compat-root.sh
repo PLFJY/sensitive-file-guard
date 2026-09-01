@@ -41,9 +41,9 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 2
 fi
 
-echo "==> Building release binaries"
-cd "$REPO"
-cargo build --release 2>&1 | grep -E '(Compiling guardd|Compiling guardctl|Compiling guard-test-probe|Finished|error)' || true
+echo "==> Checking pre-built release binaries"
+# Build as the normal user before entering this root-only gate. The test must
+# never populate root's Cargo home or produce root-owned build artifacts.
 test -x "$GUARDD"   || { echo "guardd binary missing"; exit 1; }
 test -x "$GUARDCTL" || { echo "guardctl binary missing"; exit 1; }
 test -x "$PROBE"    || { echo "guard-test-probe binary missing"; exit 1; }
@@ -55,7 +55,7 @@ cleanup() {
     kill -TERM "$GUARDD_PID" 2>/dev/null || true
     wait "$GUARDD_PID" 2>/dev/null || true
   fi
-  rm -rf "$WORK"
+  rm -rf -- "$WORK"
 }
 trap cleanup EXIT
 

@@ -44,6 +44,10 @@ if ! command -v systemctl >/dev/null 2>&1; then
   echo "ERROR: systemd not available. This test requires a systemd host."
   exit 2
 fi
+if [ -e /var/lib/guardd/audit.db ]; then
+  echo "ERROR: refusing to overwrite existing guardd audit state"
+  exit 2
+fi
 
 echo "==> Checking unprivileged pre-built release binaries"
 # Deployment must never populate root's Cargo home. Build before invoking this
@@ -58,15 +62,18 @@ CLEANUP_UNIT=false
 cleanup() {
   if [ "$CLEANUP_UNIT" = true ]; then
     systemctl stop guardd 2>/dev/null || true
-    bash "$REPO/deploy/install.sh" --uninstall 2>/dev/null || true
+    bash "$REPO/deploy/uninstall.sh" 2>/dev/null || true
   fi
   # The installer intentionally preserves operator config. This suite's config
   # is disposable, so remove it only when it still points into this WORK dir.
   if [ -f /etc/guardd/config.json ] && grep -q "$WORK" /etc/guardd/config.json; then
-    unlink /etc/guardd/config.json 2>/dev/null || true
+    rm -f -- /etc/guardd/config.json 2>/dev/null || true
     rmdir /etc/guardd 2>/dev/null || true
   fi
-  rm -rf "$WORK"
+  rm -f -- /var/lib/guardd/audit.db 2>/dev/null || true
+  rmdir /var/lib/guardd 2>/dev/null || true
+  rmdir /var/log/guardd 2>/dev/null || true
+  rm -rf -- "$WORK"
 }
 trap cleanup EXIT
 

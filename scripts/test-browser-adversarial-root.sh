@@ -45,30 +45,23 @@ then
   exit 2
 fi
 
-if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
-  TEST_USER="$SUDO_USER"
-  TEST_UID="$(id -u "$TEST_USER")"
-  TEST_GID="$(id -g "$TEST_USER")"
-else
-  TEST_USER=root
-  TEST_UID=0
-  TEST_GID=0
+if [ -z "${SUDO_USER:-}" ] || [ "$SUDO_USER" = root ]; then
+  echo "ERROR: invoke this gate through sudo from the active non-root desktop user."
+  exit 2
 fi
+TEST_USER="$SUDO_USER"
+TEST_UID="$(id -u "$TEST_USER")"
+TEST_GID="$(id -g "$TEST_USER")"
 
 run_as_test_user() {
-  if [ "$TEST_UID" -eq 0 ]; then
-    "$@"
-  else
-    runuser -u "$TEST_USER" -- "$@"
-  fi
+  runuser -u "$TEST_USER" -- "$@"
 }
 
-echo "==> Building release binaries"
-CARGO_BIN="$(command -v cargo)"
-(cd "$REPO" && run_as_test_user "$CARGO_BIN" build --release --bin guardd --bin guardctl \
-  --bin guard-test-probe --bin guard-notify)
+echo "==> Checking pre-built release binaries"
+# Build as the active desktop user before entering this root-only gate. The
+# gate must never use a root Cargo home or create root-owned build artifacts.
 for binary in "$GUARDD" "$GUARDCTL" "$PROBE" "$GUARD_NOTIFY"; do
-  test -x "$binary" || { echo "ERROR: missing binary: $binary"; exit 1; }
+  test -x "$binary" || { echo "ERROR: missing binary: $binary; build it as $TEST_USER first"; exit 1; }
 done
 
 WORK="$(mktemp -d /tmp/guard-browser-adversarial.XXXXXX)"

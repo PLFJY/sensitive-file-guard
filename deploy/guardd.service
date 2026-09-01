@@ -1,7 +1,7 @@
 # systemd unit for guardd — Sensitive Data Firewall daemon (Linux V1)
 #
 # Install:   sudo deploy/install.sh
-# Uninstall: sudo deploy/install.sh --uninstall
+# Uninstall: sudo deploy/uninstall.sh
 #
 # Why root: fanotify permission-event enforcement (FAN_CLASS_CONTENT +
 # FAN_OPEN_PERM) requires CAP_SYS_ADMIN. A capability-less mode cannot
