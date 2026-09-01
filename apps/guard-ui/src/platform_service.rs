@@ -110,6 +110,14 @@ pub struct MacSetupReadiness {
     pub explanation: String,
 }
 
+pub fn extension_install_button_label(extension_state: &str) -> &'static str {
+    if extension_state == "Not installed / unknown" {
+        "1. Install protection extension"
+    } else {
+        "1. Reinstall/update protection extension"
+    }
+}
+
 #[cfg(not(target_os = "macos"))]
 pub fn mac_setup_readiness() -> MacSetupReadiness {
     MacSetupReadiness {
@@ -1541,5 +1549,30 @@ mod bundled_runtime_tests {
         ordinary_file_open_sanity().unwrap();
         ordinary_process_sanity().unwrap();
         ordinary_sanity_with_timeout(std::time::Duration::from_secs(2)).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod extension_button_tests {
+    use super::extension_install_button_label;
+
+    #[test]
+    fn label_reflects_install_or_update_action() {
+        assert_eq!(
+            extension_install_button_label("Not installed / unknown"),
+            "1. Install protection extension"
+        );
+        for state in [
+            "Active",
+            "Pending approval",
+            "Restart required",
+            "Installed, disabled",
+            "Error",
+        ] {
+            assert_eq!(
+                extension_install_button_label(state),
+                "1. Reinstall/update protection extension"
+            );
+        }
     }
 }

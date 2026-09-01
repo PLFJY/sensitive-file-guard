@@ -131,6 +131,7 @@ struct UiState {
     host_entitlement_status: adw::ActionRow,
     endpoint_security_entitlement_status: adw::ActionRow,
     mac_setup_message: gtk::Label,
+    extension_install_button: Rc<RefCell<Option<gtk::Button>>>,
     pending_dialogs: Rc<RefCell<PendingDialogController>>,
 }
 
@@ -298,6 +299,7 @@ fn build_ui(
         host_entitlement_status,
         endpoint_security_entitlement_status,
         mac_setup_message,
+        extension_install_button: Rc::new(RefCell::new(None)),
         pending_dialogs: Rc::new(RefCell::new(PendingDialogController::default())),
     };
     let overview = scroll_page(overview_page(&state));
@@ -543,11 +545,14 @@ fn protection_page(state: &UiState) -> gtk::Box {
         page.append(&group);
         let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         actions.set_halign(gtk::Align::Start);
-        let install = gtk::Button::with_label("1. Install/update protection extension");
+        let install = gtk::Button::with_label(platform_service::extension_install_button_label(
+            "Not installed / unknown",
+        ));
         let fda = gtk::Button::with_label("2. Grant Full Disk Access");
         let readiness = platform_service::mac_setup_readiness();
         install.set_sensitive(readiness.can_request_extension_install);
         install.set_tooltip_text(Some(&readiness.explanation));
+        *state.extension_install_button.borrow_mut() = Some(install.clone());
         state.mac_setup_message.set_text(&readiness.explanation);
         actions.append(&install);
         actions.append(&fda);
@@ -1388,6 +1393,7 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
     let developer_mode_status = state.developer_mode_status.clone();
     let host_entitlement_status = state.host_entitlement_status.clone();
     let endpoint_security_entitlement_status = state.endpoint_security_entitlement_status.clone();
+    let extension_install_button = state.extension_install_button.clone();
     let pending_dialogs = state.pending_dialogs.clone();
     let config_state = state.clone();
     let window = window.clone();
@@ -1516,6 +1522,11 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
                 row.set_sensitive(overview.policy_enabled);
             }
             extension_status.set_subtitle(&overview.extension_state);
+            if let Some(button) = extension_install_button.borrow().as_ref() {
+                button.set_label(platform_service::extension_install_button_label(
+                    &overview.extension_state,
+                ));
+            }
             fda_status.set_subtitle(&overview.full_disk_access);
             sip_status.set_subtitle(&overview.sip_state);
             developer_mode_status.set_subtitle(&overview.developer_mode_state);
@@ -2322,11 +2333,12 @@ fn spawn_system_extension_install(button: gtk::Button, message: gtk::Label) {
         match result {
             Ok(Ok(explanation)) => {
                 message.set_text(&explanation);
+                button.set_label(platform_service::extension_install_button_label("Active"));
                 button.set_tooltip_text(None);
             }
             Ok(Err(error)) => {
                 message.set_text(&format!(
-                    "Unable to install the protection extension: {error}"
+                    "Unable to complete the protection extension install/update request: {error}"
                 ));
                 button.set_tooltip_text(Some(&error.to_string()));
             }
