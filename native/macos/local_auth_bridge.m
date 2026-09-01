@@ -42,13 +42,23 @@ guard_local_auth_result_t guard_local_authenticate(
     dispatch_semaphore_t completed = dispatch_semaphore_create(0);
     __block BOOL succeeded = NO;
     __block NSError *evaluationError = nil;
-    [context evaluatePolicy:LAPolicyDeviceOwnerAuthentication
-            localizedReason:reason
-                      reply:^(BOOL success, NSError *error) {
-                        succeeded = success;
-                        evaluationError = error;
-                        dispatch_semaphore_signal(completed);
-                      }];
+    void (^evaluate)(void) = ^{
+        [context evaluatePolicy:LAPolicyDeviceOwnerAuthentication
+                localizedReason:reason
+                          reply:^(BOOL success, NSError *error) {
+                            succeeded = success;
+                            evaluationError = error;
+                            dispatch_semaphore_signal(completed);
+                          }];
+    };
+    // LocalAuthentication owns macOS key-window focus. GUI callers wait from
+    // a worker thread, so begin its presentation on the AppKit main queue
+    // after GTK has finished handling the Allow-button response.
+    if ([NSThread isMainThread]) {
+        evaluate();
+    } else {
+        dispatch_async(dispatch_get_main_queue(), evaluate);
+    }
 
     uint64_t maximumMilliseconds = INT64_MAX / NSEC_PER_MSEC;
     int64_t timeoutNanoseconds =
