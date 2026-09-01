@@ -196,15 +196,13 @@ fn build_ui(app: &adw::Application, pending_only: bool, layout_smoke_page: Optio
     // import is pending. GApplication routes those activations to this primary
     // process, so creating another UiState here would poll the same pending ID
     // independently and show duplicate confirmation dialogs.
-    if let Some(window) = app.active_window() {
+    if let Some(window) = app.windows().into_iter().find(|window| window.is_visible()) {
         // GTK can retain a closed window object while GApplication is still
-        // servicing an activation from LaunchServices. Do not treat that
-        // invisible object as the control center: create a fresh window so a
-        // pending helper activation cannot leave a Dock-only process.
-        if window.is_visible() {
-            window.present();
-            return;
-        }
+        // servicing an activation from LaunchServices. Only present a mapped
+        // window; a closed/invisible object is ignored and a fresh control
+        // center is built below.
+        window.present();
+        return;
     }
 
     let status = gtk::Label::new(Some("Connecting to guardd…"));
@@ -364,6 +362,7 @@ fn build_ui(app: &adw::Application, pending_only: bool, layout_smoke_page: Optio
     #[cfg(target_os = "macos")]
     {
         let app_for_close = app.clone();
+        let window_for_close = window.clone();
         window.connect_close_request(move |_| {
             // GTK's default macOS behavior closes only the window and keeps
             // the GApplication resident in the Dock. Guard is a control
@@ -375,6 +374,9 @@ fn build_ui(app: &adw::Application, pending_only: bool, layout_smoke_page: Optio
             // GApplication resident with no window on macOS, which appears
             // as an unresponsive white Dock dot. The idle callback runs once
             // the close signal has returned and terminates the GUI cleanly.
+            // Hide the object immediately so a concurrent LaunchServices
+            // activation cannot present a stale closed window.
+            window_for_close.set_visible(false);
             let app_for_close = app_for_close.clone();
             glib::idle_add_local_once(move || app_for_close.quit());
             glib::Propagation::Proceed

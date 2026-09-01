@@ -4,7 +4,7 @@
 
 ## 运行链路
 
-`Sensitive File Guard.app` 负责 GUI、配置和用户确认；嵌套的 `guard-es.systemextension` 创建两个 Endpoint Security client：授权 client 只订阅 `AUTH_OPEN`、`AUTH_LINK`、`AUTH_RENAME`，并在订阅前以 Ventura 的 target-path mute inversion 选择受保护路径；进程图 client 全局订阅 `NOTIFY_FORK`、`NOTIFY_EXEC`、`NOTIFY_EXIT`。因此普通文件打开不会进入同步授权回调，而进程身份跟踪不会被路径选择意外过滤。`guardctl` 和 `guard-notify` 通过经过签名身份验证的 XPC 与控制面通信。macOS 上的 `guard-notify` 是用户会话常驻通知投递者：它在完成初始审计基线后向新拒绝事件发送系统通知，并在出现待确认请求时先通知、再唤起 Sensitive File Guard。GUI 不重复发送这些通知，因此关闭控制中心窗口不影响拒绝提示。已验证的 macOS Spotlight 索引器仍会被阻止读取受保护的浏览器资源；这些预期的后台索引拒绝保留在安全日志中，但不重复发送桌面通知。SSH 私钥读取拒绝仍会显示通知。策略、资源索引、进程身份、审计和 deadline 逻辑只有一份，不在 GUI 中复制。
+`Sensitive File Guard.app` 负责 GUI、配置和用户确认；嵌套的 `guard-es.systemextension` 创建两个 Endpoint Security client：授权 client 只订阅 `AUTH_OPEN`、`AUTH_LINK`、`AUTH_RENAME`，并在订阅前以 Ventura 的 target-path mute inversion 选择受保护路径；进程图 client 全局订阅 `NOTIFY_FORK`、`NOTIFY_EXEC`、`NOTIFY_EXIT`。因此普通文件打开不会进入同步授权回调，而进程身份跟踪不会被路径选择意外过滤。`guardctl` 和 `guard-notify` 通过经过签名身份验证的 XPC 与控制面通信。macOS 上的 `guard-notify` 是用户会话常驻通知投递者：它在完成初始审计基线后向新拒绝事件发送系统通知，并在出现待确认请求时先通知、再唤起 Sensitive File Guard。GUI 不重复发送这些通知，因此关闭控制中心窗口不影响拒绝提示。重新激活应用时会恢复任一仍可见的控制中心窗口；已关闭或不可见的窗口对象不会阻塞新窗口创建。已验证的 macOS Spotlight 索引器仍会被阻止读取受保护的浏览器资源；这些预期的后台索引拒绝保留在安全日志中，但不重复发送桌面通知。SSH 私钥读取拒绝仍会显示通知。策略、资源索引、进程身份、审计和 deadline 逻辑只有一份，不在 GUI 中复制。
 
 资源索引同时生成原生选择计划：Chromium/Firefox/Zen 使用各自 profile root，SSH 使用精确路径；Safari 只选择 Cookie 路径和 WebKit website-origin storage 路径，绝不选择整个 `~/Library`。SDK 对硬链接和符号链接没有额外保证，因此启动和配置时会在已批准命名空间内比较受保护 inode 的已见目录项数与 `st_nlink`；存在无法在选择范围内观察的外部硬链接时，配置被拒绝，运行状态不会虚报 `ACTIVE`。真实符号链接行为通过 `scripts/macos/run-target-selection-acceptance.sh` 的合成 fixture 测量。
 
