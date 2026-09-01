@@ -304,7 +304,7 @@ pub fn mac_setup_readiness() -> MacSetupReadiness {
         (Ok(true), Ok(true)) => MacSetupReadiness {
             can_request_extension_install: true,
             explanation: if self_use {
-                "SIP-off self-use checks passed: SIP is disabled and all signing entitlements are present. The button will submit an install or update request to macOS; if an older extension is active, macOS will replace it with the version in this bundle. Run sudo systemextensionsctl developer on manually before clicking.".into()
+                "SIP-off self-use checks passed: SIP is disabled and all signing entitlements are present. The button updates only the bundled protection extension; it does not replace Sensitive File Guard.app or guard-notify. If an older extension is active, macOS will replace it with the version in this bundle. Run sudo systemextensionsctl developer on manually before clicking.".into()
             } else {
                 "The host installation entitlement and bundled Endpoint Security entitlement are present. You can request a protection extension install or update.".into()
             },
@@ -345,7 +345,7 @@ pub fn request_system_extension_install() -> anyhow::Result<String> {
     let status = wait_for_lifecycle(&controller, std::time::Duration::from_secs(30))?;
     match status.state {
         LifecycleState::Active => Ok(
-            "macOS completed the protection extension install/update and the current version is active. Return to this page to confirm that Endpoint Security is Active; if Full Disk Access still shows Required, grant that permission separately."
+            "macOS completed the protection extension install/update from this app bundle and the current extension version is active. This does not replace Sensitive File Guard.app or guard-notify. Return to this page to confirm that Endpoint Security is Active; if Full Disk Access still shows Required, grant that permission separately."
                 .into(),
         ),
         LifecycleState::UserApprovalRequired => Ok(

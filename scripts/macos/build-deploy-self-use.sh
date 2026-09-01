@@ -46,6 +46,59 @@ stage_existing_apps() {
     fi
 }
 
+verify_installed_app_payload() {
+    source_app=$1
+    installed_app=$2
+    for relative_path in \
+        'Contents/Info.plist' \
+        'Contents/MacOS/SensitiveFileGuard' \
+        'Contents/MacOS/guard-notify'; do
+        if ! cmp -s "$source_app/$relative_path" "$installed_app/$relative_path"; then
+            echo "已安装包验证失败：$relative_path 与刚构建的包不一致" >&2
+            return 1
+        fi
+    done
+    VERIFY_SIGNING_MODE=self-use "$script_dir/verify-bundle.sh" "$installed_app"
+    echo "已验证：/Applications 中的 GUI 与 guard-notify 已与本次构建完全一致"
+}
+
+running_pids_for_executable() {
+    executable=$1
+    /usr/sbin/lsof -a -t -d txt "$executable" 2>/dev/null | sort -n -u || true
+}
+
+stop_running_app_payload() {
+    installed_app=$1
+    host_executable="$installed_app/Contents/MacOS/SensitiveFileGuard"
+    notify_executable="$installed_app/Contents/MacOS/guard-notify"
+    for executable in "$host_executable" "$notify_executable"; do
+        pids=$(running_pids_for_executable "$executable")
+        if [ -n "$pids" ]; then
+            echo "==> 停止正在运行的旧版：$executable（PID: $pids）"
+            for pid in $pids; do
+                kill -TERM "$pid" 2>/dev/null || true
+            done
+        fi
+    done
+
+    attempt=0
+    while [ "$attempt" -lt 50 ]; do
+        remaining_pids=
+        for executable in "$host_executable" "$notify_executable"; do
+            pids=$(running_pids_for_executable "$executable")
+            if [ -n "$pids" ]; then
+                remaining_pids="$remaining_pids $pids"
+            fi
+        done
+        [ -z "$remaining_pids" ] && return 0
+        attempt=$((attempt + 1))
+        sleep 0.1
+    done
+
+    echo "旧版 GUI/helper 未在 5 秒内退出，拒绝替换正在运行的 app" >&2
+    return 1
+}
+
 run_legacy_migration_test() {
     migration_test=1
     test_root=$(mktemp -d "${TMPDIR:-/tmp}/sensitive-file-guard-legacy-migration.XXXXXX")
@@ -147,12 +200,14 @@ sudo -v
 notify_label="${APP_BUNDLE_ID:-top.plfjy.SensitiveFileGuard}.guard-notify"
 echo "==> 停止旧版 guard-notify：$notify_label"
 launchctl bootout "gui/$(id -u)/$notify_label" >/dev/null 2>&1 || true
+stop_running_app_payload "$destination"
 
 legacy_destination=/Applications/Guard.app
 stage_existing_apps "$destination" "$legacy_destination" "$HOME/.Trash"
 echo "==> 安装到 $destination"
 sudo ditto "$app" "$destination"
 sudo chown -R root:wheel "$destination"
+verify_installed_app_payload "$app" "$destination"
 
 installed_guard="$destination/Contents/MacOS/SensitiveFileGuard"
 echo "==> 刷新并注册待处理确认 helper（不安装/激活系统扩展）"

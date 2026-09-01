@@ -180,6 +180,7 @@ fn main() {
     // deprecated GtkSettings dark-theme toggle from the desktop session.
     adw::StyleManager::default().set_color_scheme(adw::ColorScheme::Default);
     let app = adw::Application::new(Some(APP_ID), gio::ApplicationFlags::empty());
+    let system_authentication_in_progress = Rc::new(Cell::new(false));
     #[cfg(target_os = "macos")]
     {
         let quit = gio::SimpleAction::new("quit", None);
@@ -188,7 +189,18 @@ fn main() {
         app.add_action(&quit);
         app.set_accels_for_action("app.quit", &["<Primary>q"]);
     }
-    app.connect_activate(move |app| build_ui(app, pending_only, layout_smoke_page, close_smoke));
+    app.connect_activate({
+        let system_authentication_in_progress = system_authentication_in_progress.clone();
+        move |app| {
+            build_ui(
+                app,
+                pending_only,
+                layout_smoke_page,
+                close_smoke,
+                system_authentication_in_progress.clone(),
+            )
+        }
+    });
     let process_name = std::env::args().next().unwrap_or_else(|| "guard-ui".into());
     app.run_with_args(&[process_name]);
 }
@@ -198,6 +210,7 @@ fn build_ui(
     pending_only: bool,
     layout_smoke_page: Option<&'static str>,
     close_smoke: bool,
+    system_authentication_in_progress: Rc<Cell<bool>>,
 ) {
     // `guard-notify` can activate the application more than once while an
     // import is pending. GApplication routes those activations to this primary
@@ -208,7 +221,9 @@ fn build_ui(
         // servicing an activation from LaunchServices. Only present a mapped
         // window; a closed/invisible object is ignored and a fresh control
         // center is built below.
-        window.present();
+        if should_present_existing_window(system_authentication_in_progress.get()) {
+            window.present();
+        }
         return;
     }
 
@@ -397,12 +412,18 @@ fn build_ui(
     }
     let state_for_refresh = state.clone();
     let refresh_window = window.clone();
+    let refresh_system_authentication = system_authentication_in_progress.clone();
     refresh_status.connect_clicked(move |button| {
         button.set_sensitive(false);
         // This is a complete authoritative status refresh. It is deliberately
         // separate from the inline native-browser discovery action.
         refresh_browser_sources(&state_for_refresh);
-        refresh_state(&state_for_refresh, &refresh_window, false);
+        refresh_state(
+            &state_for_refresh,
+            &refresh_window,
+            false,
+            refresh_system_authentication.clone(),
+        );
         let button = button.clone();
         glib::timeout_add_seconds_local(1, move || {
             button.set_sensitive(true);
@@ -425,7 +446,12 @@ fn build_ui(
         }
     } else {
         load_configuration(&state);
-        start_polling(state, window, pending_only);
+        start_polling(
+            state,
+            window,
+            pending_only,
+            system_authentication_in_progress,
+        );
     }
 }
 
@@ -1360,18 +1386,39 @@ fn custom_browser_from_entries(
     })
 }
 
-fn start_polling(state: UiState, window: adw::ApplicationWindow, pending_only: bool) {
+fn start_polling(
+    state: UiState,
+    window: adw::ApplicationWindow,
+    pending_only: bool,
+    system_authentication_in_progress: Rc<Cell<bool>>,
+) {
     let state = Rc::new(state);
     let poll_state = state.clone();
     let poll_window = window.clone();
+    let poll_system_authentication = system_authentication_in_progress.clone();
     glib::timeout_add_seconds_local(2, move || {
-        refresh_state(&poll_state, &poll_window, pending_only);
+        refresh_state(
+            &poll_state,
+            &poll_window,
+            pending_only,
+            poll_system_authentication.clone(),
+        );
         glib::ControlFlow::Continue
     });
-    refresh_state(&state, &window, pending_only);
+    refresh_state(
+        &state,
+        &window,
+        pending_only,
+        system_authentication_in_progress,
+    );
 }
 
-fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only: bool) {
+fn refresh_state(
+    state: &UiState,
+    window: &adw::ApplicationWindow,
+    pending_only: bool,
+    system_authentication_in_progress: Rc<Cell<bool>>,
+) {
     // Never queue refresh work behind a stalled socket or service query. One
     // background request is enough; the next timer tick retries after it ends.
     if state.poll_in_flight.replace(true) {
@@ -1395,6 +1442,7 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
     let endpoint_security_entitlement_status = state.endpoint_security_entitlement_status.clone();
     let extension_install_button = state.extension_install_button.clone();
     let pending_dialogs = state.pending_dialogs.clone();
+    let system_authentication_in_progress = system_authentication_in_progress.clone();
     let config_state = state.clone();
     let window = window.clone();
     let after_id = event_data.borrow().first().map(|event| event.id);
@@ -1596,7 +1644,13 @@ fn refresh_state(state: &UiState, window: &adw::ApplicationWindow, pending_only:
                 (next, controller.is_empty())
             };
             if let Some(prompt) = next_prompt {
-                present_pending_dialog(&window, pending_dialogs.clone(), prompt, pending_only);
+                present_pending_dialog(
+                    &window,
+                    pending_dialogs.clone(),
+                    prompt,
+                    pending_only,
+                    system_authentication_in_progress.clone(),
+                );
             } else if complete_pending_snapshot
                 && should_close_pending_window(pending_only, pending_queue_empty)
             {
@@ -1957,6 +2011,7 @@ fn present_next_pending_dialog(
     window: &adw::ApplicationWindow,
     controller: Rc<RefCell<PendingDialogController>>,
     pending_only: bool,
+    system_authentication_in_progress: Rc<Cell<bool>>,
 ) {
     let next = {
         let mut controller_ref = controller.borrow_mut();
@@ -1967,7 +2022,13 @@ fn present_next_pending_dialog(
         }
     };
     if let Some(prompt) = next {
-        present_pending_dialog(window, controller, prompt, pending_only);
+        present_pending_dialog(
+            window,
+            controller,
+            prompt,
+            pending_only,
+            system_authentication_in_progress,
+        );
     }
 }
 
@@ -1976,6 +2037,7 @@ fn present_pending_dialog(
     controller: Rc<RefCell<PendingDialogController>>,
     prompt: PendingPrompt,
     pending_only: bool,
+    system_authentication_in_progress: Rc<Cell<bool>>,
 ) {
     let dialog = gtk::MessageDialog::builder()
         .transient_for(window)
@@ -1993,6 +2055,7 @@ fn present_pending_dialog(
     let response_window = window.clone();
     let response_prompt = prompt.clone();
     let response_pending_only = pending_only;
+    let response_system_authentication = system_authentication_in_progress.clone();
     let response_allow = allow.clone();
     let response_block = block.clone();
     let response_details = prompt.details.clone();
@@ -2005,6 +2068,9 @@ fn present_pending_dialog(
         if !response_controller.borrow_mut().begin_authorization() {
             return;
         }
+        if is_allow {
+            response_system_authentication.set(true);
+        }
         response_allow.set_sensitive(false);
         response_block.set_sensitive(false);
         dialog.set_secondary_text(Some(&format!(
@@ -2015,15 +2081,13 @@ fn present_pending_dialog(
                 "Blocking this request…"
             }
         )));
-        if is_allow {
-            hide_pending_dialog_for_system_authentication(dialog);
-        }
         resolve_pending_in_background(
             response_window.clone(),
             response_controller.clone(),
             response_prompt.clone(),
             is_allow,
             response_pending_only,
+            response_system_authentication.clone(),
             PendingDialogUi {
                 dialog: dialog.clone(),
                 allow_button: response_allow.clone(),
@@ -2037,6 +2101,7 @@ fn present_pending_dialog(
     let close_window = window.clone();
     let close_prompt = prompt;
     let close_pending_only = pending_only;
+    let close_system_authentication = system_authentication_in_progress;
     let close_allow = allow.clone();
     let close_block = block.clone();
     let close_details = close_prompt.details.clone();
@@ -2060,6 +2125,7 @@ fn present_pending_dialog(
             close_prompt.clone(),
             false,
             close_pending_only,
+            close_system_authentication.clone(),
             PendingDialogUi {
                 dialog: dialog.clone(),
                 allow_button: close_allow.clone(),
@@ -2086,6 +2152,7 @@ fn resolve_pending_in_background(
     prompt: PendingPrompt,
     allow: bool,
     pending_only: bool,
+    system_authentication_in_progress: Rc<Cell<bool>>,
     ui: PendingDialogUi,
 ) {
     glib::MainContext::default().spawn_local(async move {
@@ -2100,11 +2167,23 @@ fn resolve_pending_in_background(
         .await;
         if allow {
             match result {
-                Ok(Ok(())) => {
-                    complete_pending_dialog(&window, &controller, &ui.dialog, pending_only, true)
-                }
+                Ok(Ok(())) => complete_pending_dialog(
+                    &window,
+                    &controller,
+                    &ui.dialog,
+                    pending_only,
+                    true,
+                    &system_authentication_in_progress,
+                ),
                 Ok(Err(error)) if platform_service::pending_error_is_terminal(&error) => {
-                    complete_pending_dialog(&window, &controller, &ui.dialog, pending_only, true)
+                    complete_pending_dialog(
+                        &window,
+                        &controller,
+                        &ui.dialog,
+                        pending_only,
+                        true,
+                        &system_authentication_in_progress,
+                    )
                 }
                 Ok(Err(error)) => retry_pending_dialog(
                     &controller,
@@ -2113,6 +2192,7 @@ fn resolve_pending_in_background(
                     &ui.dialog,
                     &ui.details,
                     format!("Authentication was not completed: {error}"),
+                    &system_authentication_in_progress,
                 ),
                 Err(error) => retry_pending_dialog(
                     &controller,
@@ -2121,10 +2201,18 @@ fn resolve_pending_in_background(
                     &ui.dialog,
                     &ui.details,
                     format!("Authorization could not be completed: {error:?}"),
+                    &system_authentication_in_progress,
                 ),
             }
         } else {
-            complete_pending_dialog(&window, &controller, &ui.dialog, pending_only, true);
+            complete_pending_dialog(
+                &window,
+                &controller,
+                &ui.dialog,
+                pending_only,
+                true,
+                &system_authentication_in_progress,
+            );
         }
     });
 }
@@ -2136,25 +2224,16 @@ fn retry_pending_dialog(
     dialog: &gtk::MessageDialog,
     details: &str,
     error: String,
+    system_authentication_in_progress: &Rc<Cell<bool>>,
 ) {
+    system_authentication_in_progress.set(false);
     if controller.borrow_mut().retry() {
         allow_button.set_sensitive(true);
         block_button.set_sensitive(true);
         dialog.set_secondary_text(Some(&format!(
             "{details}\n\n{error} You can try again or block this request."
         )));
-        if !dialog.is_visible() {
-            dialog.present();
-        }
     }
-}
-
-fn hide_pending_dialog_for_system_authentication(dialog: &gtk::MessageDialog) {
-    #[cfg(target_os = "macos")]
-    dialog.set_visible(false);
-
-    #[cfg(not(target_os = "macos"))]
-    let _ = dialog;
 }
 
 fn complete_pending_dialog(
@@ -2163,7 +2242,9 @@ fn complete_pending_dialog(
     dialog: &gtk::MessageDialog,
     pending_only: bool,
     close_when_empty: bool,
+    system_authentication_in_progress: &Rc<Cell<bool>>,
 ) {
+    system_authentication_in_progress.set(false);
     if controller.borrow_mut().finish() {
         dialog.close();
         controller.borrow_mut().release_terminal();
@@ -2172,13 +2253,33 @@ fn complete_pending_dialog(
         {
             window.close();
         } else {
-            present_next_pending_dialog(window, controller.clone(), pending_only);
+            present_next_pending_dialog(
+                window,
+                controller.clone(),
+                pending_only,
+                system_authentication_in_progress.clone(),
+            );
         }
     }
 }
 
 const fn should_close_pending_window(pending_only: bool, queue_empty: bool) -> bool {
     pending_only && queue_empty
+}
+
+const fn should_present_existing_window(system_authentication_in_progress: bool) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        // guard-notify retries LaunchServices activation while a request stays
+        // pending. LocalAuthentication must retain the active macOS window
+        // until the Allow operation reaches a terminal result.
+        !system_authentication_in_progress
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = system_authentication_in_progress;
+        true
+    }
 }
 
 #[cfg(any())]
@@ -2449,6 +2550,20 @@ mod tests {
         assert!(should_close_pending_window(true, true));
         assert!(!should_close_pending_window(false, true));
         assert!(!should_close_pending_window(true, false));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn system_authentication_blocks_reactivation_of_an_existing_window() {
+        assert!(should_present_existing_window(false));
+        assert!(!should_present_existing_window(true));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn system_authentication_does_not_change_non_macos_activation() {
+        assert!(should_present_existing_window(false));
+        assert!(should_present_existing_window(true));
     }
 
     #[test]
