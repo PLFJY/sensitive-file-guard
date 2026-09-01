@@ -1069,6 +1069,7 @@ mod tests {
     use guard_core::identity::{AncestorSummary, TrustTier};
     use guard_core::policy::DenyReason;
     use guard_core::resource::{ProtectedResourceId, ProtectedResourceKind};
+    use guard_platform::config::BrowserProtectionLevel;
     use guard_test_fixtures::chromium::ChromiumProfile;
     use guard_test_fixtures::firefox::FirefoxProfile;
     use std::os::unix::io::AsRawFd;
@@ -1247,8 +1248,9 @@ mod tests {
     #[test]
     fn classify_fd_tree_descendant_synthesizes_resource() {
         let p = ChromiumProfile::create("Default").unwrap();
-        let engine =
-            EnforcementEngine::from_config(&chrome_config(&p.user_data_dir, None)).expect("engine");
+        let mut config = chrome_config(&p.user_data_dir, None);
+        config.browser_protection_level = BrowserProtectionLevel::Strict;
+        let engine = EnforcementEngine::from_config(&config).expect("engine");
         let descendant = p.local_storage_dir.join("https_example.com_0.localstorage");
         let f = std::fs::File::open(&descendant).unwrap();
         let res = engine
@@ -1427,13 +1429,27 @@ mod tests {
     #[test]
     fn from_config_enrolls_chromium_resources() {
         let p = ChromiumProfile::create("Default").unwrap();
+        let mut config = chrome_config(&p.user_data_dir, None);
+        config.browser_protection_level = BrowserProtectionLevel::Strict;
+        let engine = EnforcementEngine::from_config(&config).expect("engine");
+        assert_eq!(engine.registry().file_count(), 5, "critical files enrolled");
+        assert_eq!(
+            engine.registry().trees().len(),
+            3,
+            "web storage roots enrolled"
+        );
+    }
+
+    #[test]
+    fn common_level_excludes_web_storage_tree() {
+        let p = ChromiumProfile::create("Default").unwrap();
         let engine =
             EnforcementEngine::from_config(&chrome_config(&p.user_data_dir, None)).expect("engine");
-        assert!(
-            engine.registry().file_count() >= 6,
-            "critical files enrolled"
-        );
-        assert!(!engine.registry().trees().is_empty(), "tree roots enrolled");
+        let descendant = p.local_storage_dir.join("https_example.com_0.localstorage");
+        let f = std::fs::File::open(&descendant).unwrap();
+
+        assert!(engine.registry().trees().is_empty());
+        assert!(engine.classify_fd(f.as_raw_fd()).is_none());
     }
 
     #[test]
