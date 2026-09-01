@@ -125,6 +125,7 @@ fi
 
 echo "==> 构建带 Endpoint Security entitlement 的 SELF_USE_SIP_OFF 包"
 SELF_USE_SIP_OFF=1 \
+CODESIGN_TIMESTAMP=none \
 SFG_SELF_USE_SIGNING_IDENTITY="$identity" \
 SFG_SELF_USE_SIGNING_KEYCHAIN="$keychain" \
 GUARD_BUILD_NUMBER="$build_number" \
@@ -133,6 +134,11 @@ MACOS_RELEASE_ROOT="$build_root" \
 
 echo "==> 再次验证最终签名包"
 VERIFY_SIGNING_MODE=self-use "$script_dir/verify-bundle.sh" "$app"
+
+# Authenticate before stopping the current helper or moving the installed
+# app. A cancelled sudo prompt must leave the running installation untouched.
+echo "==> 验证 /Applications 安装权限"
+sudo -v
 
 # Remove a previously registered helper before replacing the app. This is
 # important when an older Sensitive File Guard.app was moved to Trash: launchd otherwise may

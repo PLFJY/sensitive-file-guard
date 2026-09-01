@@ -73,3 +73,23 @@ run_page() {
 run_page overview --ui-layout-smoke
 run_page protection --ui-layout-smoke-protection
 run_page log --ui-layout-smoke-log
+
+close_log=$(mktemp "${TMPDIR:-/tmp}/guard-ui-close.XXXXXX")
+"$guard" --ui-close-smoke >"$close_log" 2>&1 &
+close_pid=$!
+close_attempt=0
+while kill -0 "$close_pid" 2>/dev/null && [ "$close_attempt" -lt 20 ]; do
+    sleep 0.25
+    close_attempt=$((close_attempt + 1))
+done
+if kill -0 "$close_pid" 2>/dev/null; then
+    kill "$close_pid" 2>/dev/null || true
+    wait "$close_pid" 2>/dev/null || true
+    echo "GUI process remained in the Dock after close-request" >&2
+    sed -n '1,80p' "$close_log" >&2
+    rm -f -- "$close_log"
+    exit 1
+fi
+wait "$close_pid"
+rm -f -- "$close_log"
+echo "PASS: macOS close-request exited the GUI process"

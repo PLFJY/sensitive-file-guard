@@ -101,7 +101,7 @@ fi
 
 timestamp_flag=--timestamp
 if [ "${CODESIGN_TIMESTAMP:-secure}" = none ]; then
-    timestamp_flag=
+    timestamp_flag=--timestamp=none
 fi
 
 sign_code() {

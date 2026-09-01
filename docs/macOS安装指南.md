@@ -10,7 +10,7 @@ Guard 不会自动关闭 SIP、修改 TCC 数据库、注入完全磁盘访问�
 scripts/macos/build-deploy-self-use.sh
 ```
 
-脚本会检查 SIP、创建/复用本地 Keychain 身份、构建并验证 entitlement-bearing 包，并把已安装的 `/Applications/Sensitive File Guard.app` 和遗留 `/Applications/Guard.app` 可恢复地移到 `~/.Trash`。它不会自动激活系统扩展。
+脚本会检查 SIP、创建/复用本地 Keychain 身份、以无外部时间戳的本地签名构建并验证 entitlement-bearing 包，并把已安装的 `/Applications/Sensitive File Guard.app` 和遗留 `/Applications/Guard.app` 可恢复地移到 `~/.Trash`。在停止当前 helper 或移动应用前，脚本会先验证 `/Applications` 安装权限；取消密码提示不会改变当前运行状态。它不会自动激活系统扩展。
 
 ## 手工流程
 

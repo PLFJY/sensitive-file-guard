@@ -160,11 +160,12 @@ fn main() {
     }
     let pending_only = std::env::args().any(|arg| arg == PENDING_ONLY_ARG);
     let packaging_smoke = std::env::args().any(|arg| arg == "--packaging-smoke");
+    let close_smoke = std::env::args().any(|arg| arg == "--ui-close-smoke");
     let layout_smoke_page = if std::env::args().any(|arg| arg == "--ui-layout-smoke-protection") {
         Some("protection")
     } else if std::env::args().any(|arg| arg == "--ui-layout-smoke-log") {
         Some("log")
-    } else if std::env::args().any(|arg| arg == "--ui-layout-smoke") {
+    } else if close_smoke || std::env::args().any(|arg| arg == "--ui-layout-smoke") {
         Some("overview")
     } else {
         None
@@ -186,12 +187,17 @@ fn main() {
         app.add_action(&quit);
         app.set_accels_for_action("app.quit", &["<Primary>q"]);
     }
-    app.connect_activate(move |app| build_ui(app, pending_only, layout_smoke_page));
+    app.connect_activate(move |app| build_ui(app, pending_only, layout_smoke_page, close_smoke));
     let process_name = std::env::args().next().unwrap_or_else(|| "guard-ui".into());
     app.run_with_args(&[process_name]);
 }
 
-fn build_ui(app: &adw::Application, pending_only: bool, layout_smoke_page: Option<&'static str>) {
+fn build_ui(
+    app: &adw::Application,
+    pending_only: bool,
+    layout_smoke_page: Option<&'static str>,
+    close_smoke: bool,
+) {
     // `guard-notify` can activate the application more than once while an
     // import is pending. GApplication routes those activations to this primary
     // process, so creating another UiState here would poll the same pending ID
@@ -362,24 +368,29 @@ fn build_ui(app: &adw::Application, pending_only: bool, layout_smoke_page: Optio
     #[cfg(target_os = "macos")]
     {
         let app_for_close = app.clone();
-        let window_for_close = window.clone();
-        window.connect_close_request(move |_| {
+        window.connect_close_request(move |window| {
             // GTK's default macOS behavior closes only the window and keeps
             // the GApplication resident in the Dock. Guard is a control
             // center, not a menu-bar agent: closing its window must quit the
             // GUI process. The Endpoint Security extension is independent and
             // remains active; pending-only helper invocations exit here too.
-            // Finish the native window-close transaction first. Calling
-            // `quit` synchronously from `close-request` can leave GTK's
-            // GApplication resident with no window on macOS, which appears
-            // as an unresponsive white Dock dot. The idle callback runs once
-            // the close signal has returned and terminates the GUI cleanly.
-            // Hide the object immediately so a concurrent LaunchServices
-            // activation cannot present a stale closed window.
-            window_for_close.set_visible(false);
+            // Hide the object immediately and consume the native close. The
+            // application exits on the next main-context turn, so GTK cannot
+            // leave a closed native window registered as the active window.
+            // If LaunchServices races this transition, activation ignores the
+            // hidden object and creates a fresh control-center window.
+            window.set_visible(false);
             let app_for_close = app_for_close.clone();
-            glib::idle_add_local_once(move || app_for_close.quit());
-            glib::Propagation::Proceed
+            glib::idle_add_local_once(move || {
+                if !app_for_close
+                    .windows()
+                    .into_iter()
+                    .any(|window| window.is_visible())
+                {
+                    app_for_close.quit();
+                }
+            });
+            glib::Propagation::Stop
         });
     }
     let state_for_refresh = state.clone();
@@ -404,6 +415,12 @@ fn build_ui(app: &adw::Application, pending_only: bool, layout_smoke_page: Optio
             apply_log_layout_smoke_state(&state);
         }
         stack.set_visible_child_name(page);
+        if close_smoke {
+            let window = window.clone();
+            glib::timeout_add_local_once(std::time::Duration::from_millis(250), move || {
+                window.close()
+            });
+        }
     } else {
         load_configuration(&state);
         start_polling(state, window, pending_only);
