@@ -653,6 +653,14 @@ pub fn set_user_agent_enabled(enabled: bool) -> anyhow::Result<()> {
     }
 }
 
+#[cfg(target_os = "macos")]
+pub fn open_user_agent_settings() {
+    platform_macos::user_agent::UserAgentController::open_system_settings();
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn open_user_agent_settings() {}
+
 #[cfg(not(target_os = "macos"))]
 pub fn set_user_agent_enabled(_enabled: bool) -> anyhow::Result<()> {
     anyhow::bail!("SMAppService is available only on macOS")

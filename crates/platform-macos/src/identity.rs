@@ -55,7 +55,15 @@ const SPOTLIGHT_INDEXERS: &[(&str, &str)] = &[
         "com.apple.mds",
     ),
     (
+        "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mds",
+        "com.apple.mds",
+    ),
+    (
         "/System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Support/mdworker_shared",
+        "com.apple.mdworker_shared",
+    ),
+    (
+        "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared",
         "com.apple.mdworker_shared",
     ),
 ];
@@ -348,6 +356,18 @@ mod tests {
 
         process.executable.path = PathBuf::from(
             "/System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Support/mds",
+        );
+        process.code.signing_id = Some("com.apple.mds".into());
+        assert!(is_verified_spotlight_indexer(&process));
+
+        process.executable.path = PathBuf::from(
+            "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared",
+        );
+        process.code.signing_id = Some("com.apple.mdworker_shared".into());
+        assert!(is_verified_spotlight_indexer(&process));
+
+        process.executable.path = PathBuf::from(
+            "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mds",
         );
         process.code.signing_id = Some("com.apple.mds".into());
         assert!(is_verified_spotlight_indexer(&process));

@@ -1714,6 +1714,15 @@ mod tests {
             "spotlight_browser_secret_denied"
         );
 
+        let mut versioned_path = worker.clone();
+        versioned_path.executable.path = std::path::PathBuf::from(
+            "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared",
+        );
+        assert_eq!(
+            denial_event_code(resource, &versioned_path),
+            "spotlight_browser_secret_denied"
+        );
+
         for mutate in [
             |facts: &mut MacProcessFacts| {
                 facts.executable.path = std::path::PathBuf::from("/tmp/mdworker_shared")

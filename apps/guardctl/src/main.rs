@@ -1670,6 +1670,7 @@ fn print_explain(e: &guard_ipc::EventInfo) {
     if let Some(rc) = &e.reason_code {
         println!("  reason_code   : {}", rc);
     }
+    println!("  event_code    : {}", e.event_code);
     println!("  uid           : {}", e.uid);
     println!("  pid           : {}", e.pid);
     println!("  start_time    : {}", e.start_time);
