@@ -33,6 +33,37 @@ store_password() {
     fi
 }
 
+replace_unrecoverable_keychain() {
+    echo "无法使用登录 Keychain 中保存的凭据解锁现有专用 Keychain：$keychain" >&2
+    echo "接下来 macOS 会要求输入该专用 Keychain 的密码，不是 macOS 登录密码。" >&2
+    echo "密码正确后，脚本会再次确认是否移除旧 Keychain 并重新创建。" >&2
+    if ! security unlock-keychain "$keychain"; then
+        echo "专用 Keychain 解锁失败，保留原文件并停止。" >&2
+        return 1
+    fi
+
+    printf '确认移除旧专用 Keychain 并重新创建？[y/N] '
+    confirmation=
+    IFS= read -r confirmation || true
+    case "$confirmation" in
+        y|Y|yes|YES|Yes) ;;
+        *)
+            echo "已取消，保留原专用 Keychain。" >&2
+            return 1
+            ;;
+    esac
+
+    security delete-keychain "$keychain" || {
+        echo "移除旧专用 Keychain 失败，保留现有状态。" >&2
+        return 1
+    }
+    test ! -e "$keychain" || {
+        echo "移除旧专用 Keychain 后文件仍存在，停止重建。" >&2
+        return 1
+    }
+    echo "旧专用 Keychain 已移除，将在原路径创建新的 Keychain。"
+}
+
 resolved=$("$(dirname "$0")/resolve-self-use-signing-identity.sh" \
     "$identity" "$keychain" 2>/dev/null || true)
 
@@ -58,11 +89,15 @@ if [ -f "$keychain" ]; then
     done
     unset candidate_password
     test -n "$password" || {
-        echo "stored credentials cannot unlock the existing self-use keychain: $keychain" >&2
-        echo "Do not enter the macOS login password. Preserve this keychain and create a new one at a different path." >&2
-        exit 2
+        replace_unrecoverable_keychain || exit 2
+        password=$(openssl rand -hex 32)
+        security create-keychain -p "$password" "$keychain"
+        security set-keychain-settings -lut 21600 "$keychain"
+        store_password
+        resolved=
     }
-    if [ "$credential_source" != "$password_service|$password_account" ]; then
+    if [ -n "${credential_source:-}" ] && \
+        [ "$credential_source" != "$password_service|$password_account" ]; then
         store_password
         echo "migrated self-use Keychain credential to its path-scoped account"
     fi

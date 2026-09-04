@@ -210,43 +210,23 @@ sudo chown -R root:wheel "$destination"
 verify_installed_app_payload "$app" "$destination"
 
 installed_guard="$destination/Contents/MacOS/SensitiveFileGuard"
-echo "==> 刷新并注册待处理确认 helper（不安装/激活系统扩展）"
-# App replacement is the one place where a registered helper must be
-# deliberately refreshed. Normal GUI enable operations are idempotent and do
-# not unregister a healthy helper.
-"$installed_guard" --unregister-pending-helper
-attempt=0
-while [ "$attempt" -lt 50 ]; do
-    helper_status=$("$installed_guard" --pending-helper-status 2>&1 || true)
-    [ "$helper_status" = NotRegistered ] && break
-    attempt=$((attempt + 1))
-    sleep 0.1
-done
-if [ "$helper_status" != NotRegistered ]; then
-    echo "helper 注销未完成，停止部署：$helper_status" >&2
-    exit 1
-fi
-if ! "$installed_guard" --register-pending-helper; then
-    helper_status=$("$installed_guard" --pending-helper-status 2>&1 || true)
-    echo "helper 注册失败：$helper_status" >&2
-    echo "请在系统设置 → 通用 → 登录项中允许 Sensitive File Guard，然后重新运行部署脚本。" >&2
-    exit 1
+echo "==> 清理旧版待处理确认 helper（可选，不阻塞部署）"
+# The pending-confirmation helper is optional and must run only while the
+# protection policy is enabled. Remove a stale registration left by the
+# replaced bundle, but do not install or require the new helper here; the GUI
+# provides an explicit install/retry action when the user wants it.
+if ! "$installed_guard" --unregister-pending-helper; then
+    echo "提示：旧 helper 未能注销；部署本身仍已完成，可在 Protection 页面重试。" >&2
 fi
 helper_status=$("$installed_guard" --pending-helper-status 2>&1 || true)
-if [ "$helper_status" != Enabled ]; then
-    echo "helper 注册后未进入 Enabled：$helper_status" >&2
-    exit 1
-fi
-attempt=0
-while ! launchctl print "gui/$(id -u)/$notify_label" >/dev/null 2>&1; do
-    attempt=$((attempt + 1))
-    if [ "$attempt" -ge 50 ]; then
-        echo "helper 已注册，但 launchd 未在 5 秒内加载 $notify_label" >&2
-        exit 1
-    fi
-    sleep 0.1
-done
-echo "helper 已注册并由 launchd 加载：$notify_label"
+case "$helper_status" in
+    NotRegistered|NotFound)
+        echo "helper 当前未运行（可选）；如需确认唤醒，在 Protection 页面安装。"
+        ;;
+    *)
+        echo "helper 当前状态：$helper_status（不影响本次部署）"
+        ;;
+esac
 
 echo
 echo "macOS 自用包已部署：$destination"

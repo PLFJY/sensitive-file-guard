@@ -10,11 +10,11 @@ Guard 不会自动关闭 SIP、修改 TCC 数据库、注入完全磁盘访问�
 scripts/macos/build-deploy-self-use.sh
 ```
 
-脚本会检查 SIP、创建/复用本地 Keychain 身份、以无外部时间戳的本地签名构建并验证 entitlement-bearing 包，并把已安装的 `/Applications/Sensitive File Guard.app` 和遗留 `/Applications/Guard.app` 可恢复地移到 `~/.Trash`。在停止当前 helper 或移动应用前，脚本会先验证 `/Applications` 安装权限；取消密码提示不会改变当前运行状态。它不会自动激活系统扩展。
+脚本会检查 SIP、创建/复用本地 Keychain 身份、以无外部时间戳的本地签名构建并验证 entitlement-bearing 包，并把已安装的 `/Applications/Sensitive File Guard.app` 和遗留 `/Applications/Guard.app` 可恢复地移到 `~/.Trash`。在停止当前 helper 或移动应用前，脚本会先验证 `/Applications` 安装权限；取消密码提示不会改变当前运行状态。待处理确认 helper 是可选的，部署脚本只清理旧注册，不自动注册或要求它持续运行；需要时在 Protection 页面显式安装。它不会自动激活系统扩展。
 
 ## 手工流程
 
-1. 在 SIP 仍开启时创建身份：`scripts/macos/create-self-use-signing-identity.sh`。若出现 keychain 密码提示，使用脚本生成并保存在登录 Keychain 中的专用密码，不是 macOS 登录密码；无法解锁旧 keychain 时换新路径，不要删除旧 keychain。
+1. 在 SIP 仍开启时创建身份：`scripts/macos/create-self-use-signing-identity.sh`。若出现 Keychain 密码提示，输入专用 Keychain 密码，不是 macOS 登录密码。若登录 Keychain 中保存的凭据无法解锁旧 Keychain，脚本会提供交互式解锁、确认移除并按原路径重建；密码错误或取消时会保留旧 Keychain 并停止。
 2. 构建并验证：
 
    ```sh
@@ -39,14 +39,14 @@ scripts/macos/build-deploy-self-use.sh
 
 这条命令只发送一条合成通知，不读取受保护文件。若命令失败，查看终端中的原生通知错误；若命令成功但横幅不可见，检查系统设置中的 Guard 通知权限、专注模式和通知中心摘要设置。真实拒绝事件只有在 `guard-notify` 已运行并完成初始事件基线后才会通知新事件。
 
-如果通知来源仍显示为 Script Editor，说明旧版 helper 仍被 launchd 运行，通常是之前移入废纸篓的旧应用。退出 Sensitive File Guard 后重新运行一键部署脚本；脚本会停止旧 helper、安装新包、显式刷新 `SMAppService` 注册，并验证状态为 `Enabled` 且 launchd 已加载任务。需要登录项批准或未能加载时，部署会明确失败，不会留下一个看似成功但无法唤起 GUI 的安装。也可以只检查当前状态：
+如果通知来源仍显示为 Script Editor，说明旧版 helper 仍被 launchd 运行，通常是之前移入废纸篓的旧应用。退出 Sensitive File Guard 后重新运行一键部署脚本；脚本会停止旧 helper、安装新包并清理旧注册，但不会强制安装可选 helper。需要自动唤起 GUI 时，在 Protection 已开启后点击“Install / retry confirmation helper”；需要登录项批准或未能加载时，界面会保留具体错误。也可以只检查当前状态：
 
 ```sh
 /Applications/Sensitive\ File\ Guard.app/Contents/MacOS/SensitiveFileGuard --pending-helper-status
 launchctl print "gui/$(id -u)/top.plfjy.SensitiveFileGuard.guard-notify" 2>/dev/null || true
 ```
 
-第一条必须输出 `Enabled`，第二条必须能看到正在运行的任务。当前版本中，关闭“防护服务”会同时注销并停止 `guard-notify`；重新打开防护服务后才允许重新注册 helper。helper 不能脱离主服务单独轮询或发通知。检测到新的浏览器迁移或 SSH 确认请求时，helper 通过 macOS LaunchServices 打开/激活当前 `Sensitive File Guard.app`；如果第一次 activation 恰好撞上 GUI 退出，它会在请求仍有效时进行少量有界重试，系统通知仍只发送一次。包含空格的安装路径也会安全处理。
+helper 已安装并获批准时，第一条会输出 `Enabled`，第二条能看到正在运行的任务；`NotRegistered` 或 `NotFound` 表示可选 helper 当前没有安装。当前版本中，关闭“防护服务”会同时注销并停止 `guard-notify`；重新打开防护服务后才允许重新注册 helper。helper 不能脱离主服务单独轮询或发通知。检测到新的浏览器迁移或 SSH 确认请求时，helper 通过 macOS LaunchServices 打开/激活当前 `Sensitive File Guard.app`；如果第一次 activation 恰好撞上 GUI 退出，它会在请求仍有效时进行少量有界重试，系统通知仍只发送一次。包含空格的安装路径也会安全处理。
 
 ## 三种构建模式
 

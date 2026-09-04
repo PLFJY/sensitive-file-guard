@@ -628,6 +628,7 @@ fn protection_page(state: &UiState) -> gtk::Box {
         helper_group.add(&helper);
         let helper_actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         helper_actions.set_halign(gtk::Align::Start);
+        helper_actions.set_margin_top(8);
         let install_helper = gtk::Button::with_label("Install / retry confirmation helper");
         install_helper.set_sensitive(false);
         let open_login_items = gtk::Button::with_label("Open Login Items settings");
