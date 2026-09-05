@@ -45,7 +45,21 @@ impl EnforcementConfig {
 
 /// Parse a Linux Scoped resource configuration.
 pub fn parse_config(bytes: &[u8]) -> anyhow::Result<EnforcementConfig> {
-    serde_json::from_slice(bytes)
+    let mut value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|error| anyhow::anyhow!("malformed configuration: {error}"))?;
+    if let Some(object) = value.as_object_mut() {
+        if let Some(policy_enabled) = object.remove("policy_enabled") {
+            anyhow::ensure!(
+                policy_enabled.is_boolean(),
+                "malformed configuration: `policy_enabled` must be a boolean"
+            );
+        }
+    }
+    // Linux uses guardd.service as its lifecycle switch. Older cross-platform
+    // UI builds accidentally persisted the macOS-only policy_enabled field;
+    // accept that one field for migration while deny_unknown_fields continues
+    // to reject every other unsupported option.
+    serde_json::from_value(value)
         .map_err(|error| anyhow::anyhow!("malformed configuration: {error}"))
 }
 
@@ -250,6 +264,29 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn macos_policy_enabled_field_is_ignored_for_compatibility() {
+        for enabled in [false, true] {
+            let config = parse_config(
+                format!(
+                    r#"{{"policy_enabled":{enabled},"browsers":[],"enrolled_exes":["/synthetic/exe"],"ssh_keys":[]}}"#
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+            assert_eq!(config.enrolled_exes, [PathBuf::from("/synthetic/exe")]);
+        }
+    }
+
+    #[test]
+    fn malformed_macos_policy_enabled_field_is_rejected() {
+        let error = parse_config(
+            br#"{"policy_enabled":"yes","browsers":[],"enrolled_exes":[],"ssh_keys":[]}"#,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("must be a boolean"));
     }
 
     #[test]

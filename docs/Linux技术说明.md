@@ -34,7 +34,7 @@ Linux fanotify 不总能提供打开者原始的读写标志，因此迁移授�
 
 `guardctl setup --home "$HOME"` 只根据已发现并验证的浏览器元数据生成配置，不猜测 SSH 私钥，也不会覆盖已有配置。审计日志只保存决策、资源类别和进程元数据，不保存 Cookie、密码、session token、数据库行或私钥内容。
 
-Linux 配置使用 `browser_protection_level: common|strict` 表达资源范围，缺失时默认为 `common`。配置只描述浏览器、已登记可执行文件和 SSH 私钥资源；Linux 后端没有执行策略选择器，未知配置字段会被拒绝。
+Linux 配置使用 `browser_protection_level: common|strict` 表达资源范围，缺失时默认为 `common`。配置只描述浏览器、已登记可执行文件和 SSH 私钥资源；Linux 后端没有执行策略选择器。Linux GUI 不会写入 macOS 的 `policy_enabled` 字段；为修复旧版 GUI 产生的配置，解析器会迁移并忽略这一项布尔字段，其他未知字段仍会被拒绝。
 
 审计数据库最多保留最新 1000 条事件。写入器在每次批量提交时自动删除更早的记录；查询接口的 `limit` 只是返回数量上限。若写入队列瞬时满载，系统会丢弃新事件并增加 `audit_dropped` 计数，不会删除已经保存的旧事件。
 
@@ -42,7 +42,7 @@ Linux 配置使用 `browser_protection_level: common|strict` 表达资源范围�
 
 `guard-notify` 是用户会话中的可选通知服务，不拥有防护策略；它独立轮询按 UID 过滤的待确认快照，因此服务重启后仍存在的迁移或 SSH 读取请求会提示并最多三次唤起 `guard-ui --pending-only`（间隔两秒）。所有允许、阻止和 polkit 仍只在 daemon 完成。`guard-ui` 显示来自 daemon 的 authoritative 状态。GUI 的“刷新状态”会重新查询服务、策略、健康、浏览器保护和 SSH Key 保护，不等同于“扫描原生浏览器”。
 
-通过 GUI 保存配置只会重启原本已经运行的 `guardd.service`；若服务已停止，配置会落盘但不会因此启用防护。Linux IPC 请求帧必须在一秒内完整到达，半帧或慢速本地客户端会被关闭，不会无限阻塞后续 IPC 请求。
+通过 GUI 保存配置只会重启原本已经运行的 `guardd.service`；若服务已停止，配置会落盘但不会因此启用防护。此时总开关仍可直接启动服务，不依赖只有 daemon 运行后才可取得的 IPC 配置快照。Linux IPC 请求帧必须在一秒内完整到达，半帧或慢速本地客户端会被关闭，不会无限阻塞后续 IPC 请求。
 
 ## 验收重点
 

@@ -2416,7 +2416,14 @@ fn spawn_protection_change(
         syncing.set(true);
         match result {
             Ok(Ok(updated)) => {
-                *candidate.borrow_mut() = Some(updated);
+                #[cfg(target_os = "linux")]
+                if let Some(updated) = updated {
+                    *candidate.borrow_mut() = Some(updated);
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    *candidate.borrow_mut() = Some(updated);
+                }
                 switch.set_active(enabled);
                 switch.set_tooltip_text(None);
             }

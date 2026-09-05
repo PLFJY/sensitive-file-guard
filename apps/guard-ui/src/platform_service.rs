@@ -74,6 +74,7 @@ fn render_loader_cache(template: &str, app: &std::path::Path) -> String {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EditableConfiguration {
+    #[cfg(target_os = "macos")]
     #[serde(default)]
     pub policy_enabled: bool,
     #[serde(default)]
@@ -85,6 +86,11 @@ pub struct EditableConfiguration {
     #[serde(default)]
     pub mac_allowlist: platform_macos::config::MacAllowlistConfig,
 }
+
+#[cfg(target_os = "linux")]
+pub type ProtectionConfigurationUpdate = Option<EditableConfiguration>;
+#[cfg(not(target_os = "linux"))]
+pub type ProtectionConfigurationUpdate = EditableConfiguration;
 
 pub const fn is_linux_backend() -> bool {
     cfg!(target_os = "linux")
@@ -395,22 +401,27 @@ pub const fn apply_button_label() -> &'static str {
     if cfg!(target_os = "macos") {
         "Apply Policy"
     } else {
-        "Apply & Restart"
+        "Apply Configuration"
     }
 }
 
 pub fn initial_configuration_if_missing(backend_reachable: bool) -> Option<EditableConfiguration> {
-    if cfg!(target_os = "macos") && backend_reachable {
+    #[cfg(target_os = "macos")]
+    if backend_reachable {
         Some(EditableConfiguration {
             policy_enabled: false,
             browser_protection_level: Default::default(),
             browsers: Vec::new(),
             enrolled_exes: Vec::new(),
             ssh_keys: Vec::new(),
-            #[cfg(target_os = "macos")]
             mac_allowlist: platform_macos::config::MacAllowlistConfig::default(),
         })
     } else {
+        None
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = backend_reachable;
         None
     }
 }
@@ -571,29 +582,10 @@ fn mac_full_disk_access(daemon: Option<&guard_ipc::StatusInfo>) -> String {
 pub fn set_protection_enabled(
     enabled: bool,
     candidate: Option<EditableConfiguration>,
-) -> anyhow::Result<EditableConfiguration> {
+) -> anyhow::Result<ProtectionConfigurationUpdate> {
     #[cfg(target_os = "linux")]
     {
-        let candidate = candidate.ok_or_else(|| anyhow::anyhow!("active policy is unavailable"))?;
-        let verb = if enabled {
-            ServiceOperation::Start
-        } else {
-            ServiceOperation::Stop
-        };
-        if enabled {
-            apply(verb)?;
-            if let Err(error) = apply_notifications(verb) {
-                let _ = apply(ServiceOperation::Stop);
-                return Err(error);
-            }
-        } else {
-            apply_notifications(verb)?;
-            if let Err(error) = apply(verb) {
-                let _ = apply_notifications(ServiceOperation::Start);
-                return Err(error);
-            }
-        }
-        Ok(candidate)
+        set_linux_protection_enabled(enabled, candidate, apply, apply_notifications)
     }
     #[cfg(target_os = "macos")]
     {
@@ -634,6 +626,37 @@ pub fn set_protection_enabled(
         let _ = (enabled, candidate);
         anyhow::bail!("protection control is unavailable on this target")
     }
+}
+
+#[cfg(target_os = "linux")]
+fn set_linux_protection_enabled(
+    enabled: bool,
+    candidate: Option<EditableConfiguration>,
+    apply_service: impl Fn(ServiceOperation) -> anyhow::Result<()>,
+    apply_notifier: impl Fn(ServiceOperation) -> anyhow::Result<()>,
+) -> anyhow::Result<Option<EditableConfiguration>> {
+    let verb = if enabled {
+        ServiceOperation::Start
+    } else {
+        ServiceOperation::Stop
+    };
+    if enabled {
+        apply_service(verb)?;
+        if let Err(error) = apply_notifier(verb) {
+            let _ = apply_service(ServiceOperation::Stop);
+            return Err(error);
+        }
+    } else {
+        apply_notifier(verb)?;
+        if let Err(error) = apply_service(verb) {
+            let _ = apply_notifier(ServiceOperation::Start);
+            return Err(error);
+        }
+    }
+    // A stopped daemon has no IPC configuration snapshot. Starting Linux
+    // protection must therefore not depend on a candidate obtained from that
+    // daemon; the normal poll will repopulate it after startup.
+    Ok(candidate)
 }
 
 #[cfg(target_os = "macos")]
@@ -706,6 +729,7 @@ pub fn editable_from_metadata(info: guard_ipc::ConfigurationInfo) -> Option<Edit
     };
 
     Some(EditableConfiguration {
+        #[cfg(target_os = "macos")]
         policy_enabled: info.policy_enabled.unwrap_or(cfg!(target_os = "linux")),
         browser_protection_level,
         browsers,
@@ -1562,7 +1586,7 @@ mod bundled_runtime_tests {
 
 #[cfg(test)]
 mod extension_button_tests {
-    use super::extension_install_button_label;
+    use super::{apply_button_label, extension_install_button_label, EditableConfiguration};
 
     #[test]
     fn label_reflects_install_or_update_action() {
@@ -1582,5 +1606,53 @@ mod extension_button_tests {
                 "1. Reinstall/update protection extension"
             );
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_configuration_does_not_persist_macos_lifecycle_field() {
+        let configuration = EditableConfiguration {
+            browser_protection_level: Default::default(),
+            browsers: Vec::new(),
+            enrolled_exes: vec!["/synthetic/exe".into()],
+            ssh_keys: Vec::new(),
+        };
+        let value = serde_json::to_value(configuration).unwrap();
+        assert!(value.get("policy_enabled").is_none());
+        assert_eq!(value["enrolled_exes"][0], "/synthetic/exe");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_apply_label_does_not_promise_to_start_an_inactive_service() {
+        assert_eq!(apply_button_label(), "Apply Configuration");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_protection_can_start_without_a_daemon_configuration_snapshot() {
+        use std::cell::RefCell;
+
+        use guard_platform::ServiceOperation;
+
+        let service_operations = RefCell::new(Vec::new());
+        let notifier_operations = RefCell::new(Vec::new());
+        let updated = super::set_linux_protection_enabled(
+            true,
+            None,
+            |operation| {
+                service_operations.borrow_mut().push(operation);
+                Ok(())
+            },
+            |operation| {
+                notifier_operations.borrow_mut().push(operation);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert!(updated.is_none());
+        assert_eq!(*service_operations.borrow(), [ServiceOperation::Start]);
+        assert_eq!(*notifier_operations.borrow(), [ServiceOperation::Start]);
     }
 }
