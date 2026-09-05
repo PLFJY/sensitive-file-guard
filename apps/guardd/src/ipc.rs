@@ -22,23 +22,25 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use guard_audit::AuditStore;
 use guard_ipc::{
     ConfigCheckInfo, ConfigurationInfo, ConfiguredBrowserInfo, EventInfo, LeaseInfo,
     MigrationAuthorizedInfo, MigrationPendingInfo, MigrationResolutionAction,
-    MigrationResolutionInfo, Response, ResponseBody, SshLoadAuthorizedInfo, SshPendingInfo,
-    SshProtectedInfo, SshReadResolutionAction, SshReadResolutionInfo, StatusInfo,
-    MAX_REQUEST_BYTES, PROTOCOL_VERSION,
+    MigrationResolutionInfo, PendingHelperSnapshotInfo, Response, ResponseBody,
+    SshLoadAuthorizedInfo, SshPendingInfo, SshProtectedInfo, SshReadResolutionAction,
+    SshReadResolutionInfo, StatusInfo, MAX_REQUEST_BYTES, PROTOCOL_VERSION,
 };
 use guard_ipc::{Request, RequestOp};
 use platform_linux::fanotify::FanotifyGroup;
-use platform_linux::ipc::{read_request, write_response, IpcServer, PeerCreds};
+use platform_linux::ipc::{read_request_until_deadline, write_response, IpcServer, PeerCreds};
 
 use crate::enforce::{BackendMetrics, EnforcementEngine, SshAgentBinding};
 use crate::pending::{PendingMigrationStore, PendingSshReadStore};
 
 static NEXT_AGENT_PIN: AtomicU64 = AtomicU64::new(1);
+const REQUEST_FRAME_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Shared engine + audit state handed to the IPC server thread.
 pub struct IpcState {
@@ -68,9 +70,9 @@ pub enum SensitiveAuthorization {
 }
 
 /// Run the accept loop. Blocks until the socket is closed or an unrecoverable
-/// error occurs. Each connection is handled inline (requests are tiny and fast;
-/// the authorization loop is not blocked because `handle_request` only holds
-/// the engine lock for microseconds).
+/// error occurs. Each connection is handled inline. Framing is bounded by a
+/// short absolute deadline, so a peer that sends only a partial frame cannot
+/// retain the accept loop indefinitely.
 pub fn serve_loop(state: &IpcState, socket_path: &Path) -> io::Result<()> {
     let server = IpcServer::bind(socket_path)?;
     tracing::info!(path = %socket_path.display(), "IPC server listening");
@@ -85,7 +87,11 @@ pub fn serve_loop(state: &IpcState, socket_path: &Path) -> io::Result<()> {
 }
 
 fn handle_one_connection(state: &IpcState, stream: &mut UnixStream, creds: PeerCreds) {
-    let req_bytes = match read_request(stream, MAX_REQUEST_BYTES) {
+    let req_bytes = match read_request_until_deadline(
+        stream,
+        MAX_REQUEST_BYTES,
+        Instant::now() + REQUEST_FRAME_TIMEOUT,
+    ) {
         Ok(b) => b,
         Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return,
         Err(e) => {
@@ -128,7 +134,8 @@ fn handle_request_with_connection(
         RequestOp::ConfigurationApply { .. } => {
             Response::err("configuration_apply is unavailable on the Linux transport")
         }
-        RequestOp::PendingHelperPoll | RequestOp::PendingHelperStatus => {
+        RequestOp::PendingHelperPoll => handle_pending_helper_poll(state, creds),
+        RequestOp::PendingHelperStatus => {
             Response::err("pending_helper_health is unavailable on the Linux transport")
         }
         // This fixture-only switch belongs to the macOS Endpoint Security
@@ -518,6 +525,34 @@ fn handle_migration_pending_list(state: &IpcState, creds: PeerCreds) -> Response
         .map(pending_info_to_ipc)
         .collect();
     Response::ok(ResponseBody::MigrationPending(values))
+}
+
+/// Metadata-only snapshot used by the unprivileged Linux notification helper.
+/// Both stores apply the kernel-authenticated peer UID filter before their
+/// records are serialized; this request cannot resolve or authorize anything.
+fn handle_pending_helper_poll(state: &IpcState, creds: PeerCreds) -> Response {
+    let migrations = state
+        .pending_migrations
+        .lock()
+        .expect("pending migration mutex poisoned")
+        .list_for_uid(creds.uid, creds.uid == 0)
+        .into_iter()
+        .map(pending_info_to_ipc)
+        .collect();
+    let ssh_reads = state
+        .pending_ssh_reads
+        .lock()
+        .expect("pending SSH read mutex poisoned")
+        .list_for_uid(creds.uid, creds.uid == 0)
+        .into_iter()
+        .map(ssh_pending_info_to_ipc)
+        .collect();
+    Response::ok(ResponseBody::PendingHelperSnapshot(
+        PendingHelperSnapshotInfo {
+            migrations,
+            ssh_reads,
+        },
+    ))
 }
 
 fn handle_migration_pending_get(state: &IpcState, creds: PeerCreds, id: &str) -> Response {
@@ -1532,6 +1567,89 @@ mod tests {
     use crate::enforce::{EnforcementConfig, EnforcementEngine};
     use std::ffi::OsStr;
     use std::os::fd::AsRawFd;
+
+    struct NoopPendingPermission;
+
+    impl guard_platform::PendingPermission for NoopPendingPermission {
+        fn allow(self: Box<Self>) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn deny(self: Box<Self>) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn pending_helper_poll_returns_only_the_kernel_peer_uid_snapshot() {
+        let fixture = guard_test_fixtures::SshFixture::create().expect("SSH fixture");
+        let config = EnforcementConfig {
+            browser_protection_level: Default::default(),
+            browsers: vec![],
+            enrolled_exes: vec![],
+            ssh_keys: vec![fixture.private_key.clone()],
+        };
+        let engine = Arc::new(Mutex::new(
+            EnforcementEngine::from_config(&config).expect("engine"),
+        ));
+        let key = std::fs::File::open(&fixture.private_key).expect("open fixture key");
+        let mut details = engine
+            .lock()
+            .expect("engine mutex poisoned")
+            .pending_ssh_details(std::process::id() as i32, key.as_raw_fd())
+            .expect("pending SSH details");
+        details.target.uid = 4242;
+
+        let mut ssh_pending = PendingSshReadStore::default();
+        let created = ssh_pending.enqueue(details, Box::new(NoopPendingPermission), unix_secs());
+        assert!(matches!(
+            created,
+            crate::pending::SshEnqueueResult::Created(_)
+        ));
+        let state = IpcState {
+            engine,
+            audit: Arc::new(AuditStore::open(Path::new(":memory:")).expect("audit")),
+            version: "test".into(),
+            group: None,
+            authorization: SensitiveAuthorization::Polkit,
+            ssh_agent_pins: Arc::new(Mutex::new(HashMap::new())),
+            backend_metrics: Arc::new(BackendMetrics::new()),
+            pending_migrations: Arc::new(Mutex::new(PendingMigrationStore::default())),
+            pending_ssh_reads: Arc::new(Mutex::new(ssh_pending)),
+        };
+
+        let allowed = handle_pending_helper_poll(
+            &state,
+            PeerCreds {
+                pid: 1,
+                uid: 4242,
+                gid: 4242,
+            },
+        );
+        let denied = handle_pending_helper_poll(
+            &state,
+            PeerCreds {
+                pid: 2,
+                uid: 4243,
+                gid: 4243,
+            },
+        );
+        match allowed.body.expect("allowed snapshot") {
+            ResponseBody::PendingHelperSnapshot(snapshot) => {
+                assert!(snapshot.migrations.is_empty());
+                assert_eq!(snapshot.ssh_reads.len(), 1);
+                assert_eq!(snapshot.ssh_reads[0].uid, 4242);
+            }
+            _ => panic!("expected pending helper snapshot"),
+        }
+        match denied.body.expect("denied snapshot") {
+            ResponseBody::PendingHelperSnapshot(snapshot) => {
+                assert!(snapshot.migrations.is_empty());
+                assert!(snapshot.ssh_reads.is_empty());
+            }
+            _ => panic!("expected pending helper snapshot"),
+        }
+    }
 
     #[test]
     fn ssh_read_approval_releases_engine_lock_and_keeps_audit_metadata_only() {

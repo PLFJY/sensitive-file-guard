@@ -1,18 +1,21 @@
 //! Unprivileged user-session notification presenter.
 //!
 //! This process contains no policy engine. On Linux it polls guardd's
-//! credential-filtered IPC event feed and presents denies via notify-send. On
-//! macOS it polls the authenticated system-extension XPC service, delivers
+//! credential-filtered IPC event and pending feeds, presents denies via
+//! notify-send, and opens the pending-only UI for confirmation. On macOS it
+//! polls the authenticated system-extension XPC service, delivers
 //! notifications from the user-session LaunchAgent, and opens the sibling GTK
 //! pending-only UI when an interactive decision is waiting.
 
-#[cfg(target_os = "linux")]
-use std::collections::HashMap;
 #[cfg(target_os = "macos")]
 use std::collections::HashSet;
+#[cfg(target_os = "linux")]
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::Duration;
+#[cfg(target_os = "linux")]
+use std::time::Instant;
 
 use clap::Parser;
 #[cfg(target_os = "linux")]
@@ -74,6 +77,7 @@ const fn default_poll_ms() -> u64 {
 fn run_linux(cli: &Cli) -> ExitCode {
     let mut last_seen = None;
     let mut last_notified = HashMap::new();
+    let mut pending = LinuxPendingObserver::default();
     loop {
         match fetch_events(&cli.socket) {
             Ok(mut events) => {
@@ -81,12 +85,10 @@ fn run_linux(cli: &Cli) -> ExitCode {
                 let newest = events.last().map(|event| event.id);
                 if let Some(previous) = last_seen {
                     let now_ms = unix_ms();
-                    for event in events.iter().filter(|event| {
-                        event.id > previous
-                            && (event.decision.contains("Deny")
-                                || event.event_code == "ssh_key_access_confirmation_required"
-                                || event.event_code == "browser_migration_confirmation_required")
-                    }) {
+                    for event in events
+                        .iter()
+                        .filter(|event| event.id > previous && event.decision.contains("Deny"))
+                    {
                         if !should_notify(&mut last_notified, event, now_ms) {
                             continue;
                         }
@@ -97,13 +99,6 @@ fn run_linux(cli: &Cli) -> ExitCode {
                             // Event IDs are safe metadata and give the acceptance
                             // harness an unambiguous delivery acknowledgement.
                             eprintln!("guard-notify: delivered event_id={}", event.id);
-                        }
-                        if matches!(
-                            event.event_code.as_str(),
-                            "browser_migration_confirmation_required"
-                                | "ssh_key_access_confirmation_required"
-                        ) {
-                            activate_guard_ui();
                         }
                     }
                     if let Some(newest) = newest {
@@ -119,6 +114,24 @@ fn run_linux(cli: &Cli) -> ExitCode {
                 }
             }
             Err(error) => eprintln!("guard-notify: {error}"),
+        }
+        match fetch_linux_pending(&cli.socket) {
+            Ok(current) => {
+                let observation = pending.observe(current, Instant::now());
+                if observation.notify {
+                    if let Err(error) = notify(
+                        "Sensitive File Guard confirmation required",
+                        "Sensitive File Guard is waiting for your decision about protected browser credentials, website authentication storage, or an SSH private key.",
+                        "normal",
+                    ) {
+                        eprintln!("guard-notify: desktop notification failed: {error}");
+                    }
+                }
+                if observation.activate {
+                    activate_guard_ui();
+                }
+            }
+            Err(error) => eprintln!("guard-notify: pending poll: {error}"),
         }
         if cli.once {
             return ExitCode::SUCCESS;
@@ -419,6 +432,76 @@ fn guard_ui_bundle(guard: &Path) -> anyhow::Result<PathBuf> {
 type NotificationKey = (u32, String, String, String, String);
 
 #[cfg(target_os = "linux")]
+const PENDING_ACTIVATION_RETRY_DELAY: Duration = Duration::from_secs(2);
+#[cfg(target_os = "linux")]
+const MAX_PENDING_ACTIVATIONS: u8 = 3;
+
+/// Opaque pending IDs are the only facts retained by the presenter. Approval
+/// stays in guardd and requires its normal polkit authorization path.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum LinuxPendingKey {
+    Migration(String),
+    SshRead(String),
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct LinuxPendingObservation {
+    notify: bool,
+    activate: bool,
+}
+
+#[cfg(target_os = "linux")]
+struct PendingActivation {
+    attempts: u8,
+    next_attempt_at: Instant,
+}
+
+/// Observes live daemon pending state. Unlike the audit feed, this snapshot
+/// includes requests created before the notifier started, so a helper restart
+/// cannot silently consume a still-actionable confirmation.
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct LinuxPendingObserver {
+    presented: HashSet<LinuxPendingKey>,
+    activations: HashMap<LinuxPendingKey, PendingActivation>,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxPendingObserver {
+    fn observe(
+        &mut self,
+        current: HashSet<LinuxPendingKey>,
+        now: Instant,
+    ) -> LinuxPendingObservation {
+        let notify = current
+            .iter()
+            .any(|pending| !self.presented.contains(pending));
+        self.presented = current.clone();
+        self.activations
+            .retain(|pending, _| current.contains(pending));
+
+        let mut activate = false;
+        for pending in current {
+            let entry = self
+                .activations
+                .entry(pending)
+                .or_insert(PendingActivation {
+                    attempts: 0,
+                    next_attempt_at: now,
+                });
+            if entry.attempts < MAX_PENDING_ACTIVATIONS && now >= entry.next_attempt_at {
+                entry.attempts += 1;
+                entry.next_attempt_at = now + PENDING_ACTIVATION_RETRY_DELAY;
+                activate = true;
+            }
+        }
+        LinuxPendingObservation { notify, activate }
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn should_notify(
     last_notified: &mut HashMap<NotificationKey, u64>,
     event: &EventInfo,
@@ -478,6 +561,38 @@ fn fetch_events(socket: &Path) -> Result<Vec<EventInfo>, String> {
     match response.body {
         Some(ResponseBody::Events(events)) => Ok(events),
         _ => Err("daemon returned an unexpected response".into()),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn fetch_linux_pending(socket: &Path) -> Result<HashSet<LinuxPendingKey>, String> {
+    let request = Request {
+        version: PROTOCOL_VERSION,
+        op: RequestOp::PendingHelperPoll,
+    };
+    let bytes = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
+    let response = IpcClient::request(socket, &bytes)
+        .map_err(|error| format!("IPC {}: {error}", socket.display()))?;
+    let response: Response =
+        serde_json::from_slice(&response).map_err(|error| error.to_string())?;
+    if !response.ok {
+        return Err(response
+            .error
+            .unwrap_or_else(|| "daemon rejected pending helper poll".into()));
+    }
+    match response.body {
+        Some(ResponseBody::PendingHelperSnapshot(snapshot)) => Ok(snapshot
+            .migrations
+            .into_iter()
+            .map(|pending| LinuxPendingKey::Migration(pending.id))
+            .chain(
+                snapshot
+                    .ssh_reads
+                    .into_iter()
+                    .map(|pending| LinuxPendingKey::SshRead(pending.id)),
+            )
+            .collect()),
+        _ => Err("daemon returned an unexpected pending snapshot".into()),
     }
 }
 
@@ -673,6 +788,89 @@ mod tests {
         assert!(!notification_rate_limited(&std::io::Error::other(
             "permission denied"
         )));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pending_snapshot_notifies_and_activates_existing_request_after_restart() {
+        let mut observer = LinuxPendingObserver::default();
+        let pending = HashSet::from([LinuxPendingKey::Migration("m1".into())]);
+        assert_eq!(
+            observer.observe(pending.clone(), Instant::now()),
+            LinuxPendingObservation {
+                notify: true,
+                activate: true,
+            }
+        );
+        assert_eq!(
+            observer.observe(pending, Instant::now()),
+            LinuxPendingObservation::default()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pending_activation_is_limited_to_three_attempts_and_stops_when_resolved() {
+        let mut observer = LinuxPendingObserver::default();
+        let started = Instant::now();
+        let pending = HashSet::from([LinuxPendingKey::SshRead("s1".into())]);
+
+        assert!(observer.observe(pending.clone(), started).activate);
+        assert!(
+            !observer
+                .observe(pending.clone(), started + Duration::from_secs(1))
+                .activate
+        );
+        assert!(
+            observer
+                .observe(pending.clone(), started + PENDING_ACTIVATION_RETRY_DELAY,)
+                .activate
+        );
+        assert!(
+            observer
+                .observe(
+                    pending.clone(),
+                    started + PENDING_ACTIVATION_RETRY_DELAY * 2,
+                )
+                .activate
+        );
+        assert!(
+            !observer
+                .observe(
+                    pending.clone(),
+                    started + PENDING_ACTIVATION_RETRY_DELAY * 3,
+                )
+                .activate
+        );
+        assert_eq!(
+            observer.observe(HashSet::new(), started + Duration::from_secs(7)),
+            LinuxPendingObservation::default()
+        );
+        assert_eq!(
+            observer.observe(pending, started + Duration::from_secs(8)),
+            LinuxPendingObservation {
+                notify: true,
+                activate: true,
+            }
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn distinct_pending_requests_are_notified_once_each() {
+        let mut observer = LinuxPendingObserver::default();
+        let started = Instant::now();
+        let migration = LinuxPendingKey::Migration("m1".into());
+        assert!(
+            observer
+                .observe(HashSet::from([migration.clone()]), started)
+                .notify
+        );
+        let next = observer.observe(
+            HashSet::from([migration, LinuxPendingKey::SshRead("s1".into())]),
+            started + Duration::from_secs(1),
+        );
+        assert!(next.notify);
     }
 
     #[cfg(target_os = "macos")]

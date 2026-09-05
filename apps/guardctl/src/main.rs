@@ -874,37 +874,87 @@ fn apply_config_transactionally() -> anyhow::Result<()> {
         "configuration input exceeds {} bytes",
         MAX_CONFIG_STDIN
     );
-    let _cfg = validate_candidate_bytes(&bytes)?;
-    let parent = Path::new(ACTIVE_CONFIG)
-        .parent()
-        .expect("fixed config has parent");
-    std::fs::create_dir_all(parent)?;
-    let previous = std::fs::read(ACTIVE_CONFIG).ok();
-    let temp = parent.join(format!(".config.json.{}.tmp", std::process::id()));
-    write_root_config(&temp, &bytes)?;
-    std::fs::rename(&temp, ACTIVE_CONFIG)?;
-    let restarted = std::process::Command::new("systemctl")
-        .args(["restart", "guardd.service"])
-        .status()?
-        .success();
-    let healthy = restarted
-        && std::process::Command::new("systemctl")
+    let service = SystemdGuarddService;
+    apply_config_bytes_transactionally(
+        &bytes,
+        Path::new(ACTIVE_CONFIG),
+        &service,
+        write_root_config,
+    )
+}
+
+/// Narrow systemd boundary for the configuration transaction. It is kept
+/// separate so the transaction can prove that an inactive service stays
+/// inactive when an operator merely saves a new policy.
+#[cfg(target_os = "linux")]
+trait GuarddService {
+    fn is_active(&self) -> anyhow::Result<bool>;
+    fn restart(&self) -> anyhow::Result<bool>;
+}
+
+#[cfg(target_os = "linux")]
+struct SystemdGuarddService;
+
+#[cfg(target_os = "linux")]
+impl GuarddService for SystemdGuarddService {
+    fn is_active(&self) -> anyhow::Result<bool> {
+        Ok(std::process::Command::new("systemctl")
             .args(["is-active", "--quiet", "guardd.service"])
             .status()?
-            .success();
-    if healthy {
+            .success())
+    }
+
+    fn restart(&self) -> anyhow::Result<bool> {
+        Ok(std::process::Command::new("systemctl")
+            .args(["restart", "guardd.service"])
+            .status()?
+            .success())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn apply_config_bytes_transactionally<S, W>(
+    bytes: &[u8],
+    config_path: &Path,
+    service: &S,
+    write_config: W,
+) -> anyhow::Result<()>
+where
+    S: GuarddService,
+    W: Fn(&Path, &[u8]) -> anyhow::Result<()>,
+{
+    validate_candidate_bytes(bytes)?;
+    // Capture this before modifying the config. `systemctl restart` starts an
+    // inactive unit, which would otherwise turn an edit into an enable action.
+    let was_active = service.is_active()?;
+    let parent = config_path.parent().expect("configuration path has parent");
+    std::fs::create_dir_all(parent)?;
+    let previous = std::fs::read(config_path).ok();
+    let temp = parent.join(format!(".config.json.{}.tmp", std::process::id()));
+    write_config(&temp, bytes)?;
+    std::fs::rename(&temp, config_path)?;
+    if !was_active {
         return Ok(());
     }
+    let health_failure = match service.restart() {
+        Ok(true) => match service.is_active() {
+            Ok(true) => return Ok(()),
+            Ok(false) => "guardd.service is inactive after restart".into(),
+            Err(error) => format!("cannot check guardd.service after restart: {error}"),
+        },
+        Ok(false) => "systemctl restart guardd.service failed".into(),
+        Err(error) => format!("cannot restart guardd.service: {error}"),
+    };
     if let Some(old) = previous {
-        write_root_config(&temp, &old)?;
-        std::fs::rename(&temp, ACTIVE_CONFIG)?;
-        let _ = std::process::Command::new("systemctl")
-            .args(["restart", "guardd.service"])
-            .status();
+        write_config(&temp, &old)?;
+        std::fs::rename(&temp, config_path)?;
+        let _ = service.restart();
     } else {
-        let _ = std::fs::remove_file(ACTIVE_CONFIG);
+        let _ = std::fs::remove_file(config_path);
     }
-    anyhow::bail!("new configuration failed health check; previous configuration restored")
+    anyhow::bail!(
+        "new configuration failed health check ({health_failure}); previous configuration restored"
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -2281,6 +2331,8 @@ mod tests {
     //! integration script.
 
     use super::*;
+    #[cfg(target_os = "linux")]
+    use std::cell::Cell;
 
     #[cfg(target_os = "macos")]
     #[test]
@@ -2583,5 +2635,123 @@ mod tests {
                 "{forbidden} must not enter ssh-add's execve environment"
             );
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    struct FakeGuarddService {
+        active: Cell<bool>,
+        restart_succeeds: bool,
+        restart_errors: bool,
+        restart_calls: Cell<u32>,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl GuarddService for FakeGuarddService {
+        fn is_active(&self) -> anyhow::Result<bool> {
+            Ok(self.active.get())
+        }
+
+        fn restart(&self) -> anyhow::Result<bool> {
+            self.restart_calls
+                .set(self.restart_calls.get().saturating_add(1));
+            if self.restart_errors {
+                anyhow::bail!("synthetic restart error");
+            }
+            self.active.set(self.restart_succeeds);
+            Ok(self.restart_succeeds)
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn test_config_writer(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?;
+        file.write_all(bytes)?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn valid_config_bytes() -> &'static [u8] {
+        br#"{"browsers":[],"enrolled_exes":["/synthetic/exe"],"ssh_keys":[]}"#
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inactive_service_config_apply_persists_without_starting_guardd() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("config.json");
+        let service = FakeGuarddService {
+            active: Cell::new(false),
+            restart_succeeds: true,
+            restart_errors: false,
+            restart_calls: Cell::new(0),
+        };
+
+        apply_config_bytes_transactionally(
+            valid_config_bytes(),
+            &config,
+            &service,
+            test_config_writer,
+        )
+        .unwrap();
+
+        assert_eq!(std::fs::read(&config).unwrap(), valid_config_bytes());
+        assert_eq!(service.restart_calls.get(), 0);
+        assert!(!service.active.get());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn active_service_config_apply_restarts_once_when_healthy() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("config.json");
+        let service = FakeGuarddService {
+            active: Cell::new(true),
+            restart_succeeds: true,
+            restart_errors: false,
+            restart_calls: Cell::new(0),
+        };
+
+        apply_config_bytes_transactionally(
+            valid_config_bytes(),
+            &config,
+            &service,
+            test_config_writer,
+        )
+        .unwrap();
+
+        assert_eq!(service.restart_calls.get(), 1);
+        assert!(service.active.get());
+        assert_eq!(std::fs::read(&config).unwrap(), valid_config_bytes());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn active_service_config_apply_restarts_and_rolls_back_on_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("config.json");
+        let previous = br#"{"browsers":[],"enrolled_exes":["/previous/exe"],"ssh_keys":[]}"#;
+        std::fs::write(&config, previous).unwrap();
+        let service = FakeGuarddService {
+            active: Cell::new(true),
+            restart_succeeds: false,
+            restart_errors: true,
+            restart_calls: Cell::new(0),
+        };
+
+        let error = apply_config_bytes_transactionally(
+            valid_config_bytes(),
+            &config,
+            &service,
+            test_config_writer,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("health check"));
+        assert_eq!(std::fs::read(&config).unwrap(), previous);
+        assert_eq!(service.restart_calls.get(), 2);
     }
 }

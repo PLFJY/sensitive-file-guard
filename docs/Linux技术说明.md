@@ -40,7 +40,9 @@ Linux 配置使用 `browser_protection_level: common|strict` 表达资源范围�
 
 ## 通知和 GUI
 
-`guard-notify` 是用户会话中的可选通知服务，不拥有防护策略；`guard-ui` 显示来自 daemon 的 authoritative 状态。GUI 的“刷新状态”会重新查询服务、策略、健康、浏览器保护和 SSH Key 保护，不等同于“扫描原生浏览器”。
+`guard-notify` 是用户会话中的可选通知服务，不拥有防护策略；它独立轮询按 UID 过滤的待确认快照，因此服务重启后仍存在的迁移或 SSH 读取请求会提示并最多三次唤起 `guard-ui --pending-only`（间隔两秒）。所有允许、阻止和 polkit 仍只在 daemon 完成。`guard-ui` 显示来自 daemon 的 authoritative 状态。GUI 的“刷新状态”会重新查询服务、策略、健康、浏览器保护和 SSH Key 保护，不等同于“扫描原生浏览器”。
+
+通过 GUI 保存配置只会重启原本已经运行的 `guardd.service`；若服务已停止，配置会落盘但不会因此启用防护。Linux IPC 请求帧必须在一秒内完整到达，半帧或慢速本地客户端会被关闭，不会无限阻塞后续 IPC 请求。
 
 ## 验收重点
 

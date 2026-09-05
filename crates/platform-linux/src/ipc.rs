@@ -18,7 +18,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use libc::{getsockopt, socklen_t, ucred, SOL_SOCKET, SO_PEERCRED};
 
@@ -213,6 +213,33 @@ pub fn read_request(stream: &mut UnixStream, max_bytes: usize) -> io::Result<Vec
     Ok(buf)
 }
 
+/// Read one framed request, but require the complete frame to arrive before
+/// `deadline`. This is for the daemon's accept loop: an authorized local peer
+/// must not be able to hold that single loop forever by sending only part of a
+/// length prefix or payload.
+///
+pub fn read_request_until_deadline(
+    stream: &mut UnixStream,
+    max_bytes: usize,
+    deadline: Instant,
+) -> io::Result<Vec<u8>> {
+    let mut prefix = [0_u8; 4];
+    read_exact_until_deadline(stream, &mut prefix, deadline)?;
+    let len = u32::from_be_bytes(prefix) as usize;
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    if len > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("request frame too large: {len} > {max_bytes}"),
+        ));
+    }
+    let mut buf = vec![0_u8; len];
+    read_exact_until_deadline(stream, &mut buf, deadline)?;
+    Ok(buf)
+}
+
 /// Write a length-prefixed response frame.
 pub fn write_response(stream: &mut UnixStream, payload: &[u8]) -> io::Result<()> {
     let len = payload.len() as u32;
@@ -238,6 +265,78 @@ fn read_exact_or_eof(stream: &mut UnixStream, buf: &mut [u8]) -> io::Result<()> 
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "peer closed"));
         }
         filled += n;
+    }
+    Ok(())
+}
+
+fn read_exact_until_deadline(
+    stream: &mut UnixStream,
+    buf: &mut [u8],
+    deadline: Instant,
+) -> io::Result<()> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        // SAFETY: `stream` is a connected Unix socket and the slice is valid
+        // writable memory for its exact remaining length. MSG_DONTWAIT avoids
+        // changing O_NONBLOCK on a descriptor that might be shared elsewhere.
+        let read = unsafe {
+            libc::recv(
+                stream.as_raw_fd(),
+                buf[filled..].as_mut_ptr().cast(),
+                buf.len() - filled,
+                libc::MSG_DONTWAIT,
+            )
+        };
+        if read == 0 {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "peer closed"));
+        }
+        if read > 0 {
+            filled += read as usize;
+            continue;
+        }
+        let error = io::Error::last_os_error();
+        match error.kind() {
+            io::ErrorKind::WouldBlock => {
+                wait_for_readable(stream.as_raw_fd(), deadline)?;
+            }
+            io::ErrorKind::Interrupted => continue,
+            _ => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn wait_for_readable(fd: RawFd, deadline: Instant) -> io::Result<()> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "IPC request frame deadline exceeded",
+        ));
+    }
+    let timeout_ms = remaining
+        .as_millis()
+        .saturating_add(1)
+        .min(i32::MAX as u128) as i32;
+    let mut poll_fd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: poll_fd points to one initialized descriptor for this call.
+    let ready = unsafe { libc::poll(&mut poll_fd, 1, timeout_ms) };
+    if ready < 0 {
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::Interrupted {
+            return Ok(());
+        }
+        return Err(error);
+    }
+    if ready == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "IPC request frame deadline exceeded",
+        ));
     }
     Ok(())
 }
@@ -444,6 +543,71 @@ mod tests {
         assert!(resp.is_err(), "client must reject oversized response");
         // Server handled exactly one connection and exited; join is safe.
         let _ = h.join();
+    }
+
+    #[test]
+    fn incomplete_request_frame_expires_at_an_absolute_deadline() {
+        let (mut reader, mut writer) = UnixStream::pair().unwrap();
+        writer.write_all(&16_u32.to_be_bytes()).unwrap();
+        writer.flush().unwrap();
+
+        let started = Instant::now();
+        let error = read_request_until_deadline(
+            &mut reader,
+            64 * 1024,
+            started + Duration::from_millis(25),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn complete_request_frame_arrives_before_deadline() {
+        let (mut reader, mut writer) = UnixStream::pair().unwrap();
+        write_response(&mut writer, b"complete").unwrap();
+        let request = read_request_until_deadline(
+            &mut reader,
+            64 * 1024,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(request, b"complete");
+    }
+
+    #[test]
+    fn expired_partial_frame_does_not_block_the_next_connection() {
+        let (path, _dir) = tmp_socket();
+        let server_path = path.clone();
+        let server = thread::spawn(move || {
+            let server = IpcServer::bind(&server_path).unwrap();
+            let (mut partial, _) = server.accept().unwrap();
+            let error = read_request_until_deadline(
+                &mut partial,
+                64 * 1024,
+                Instant::now() + Duration::from_millis(25),
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+
+            let (mut complete, _) = server.accept().unwrap();
+            let request = read_request_until_deadline(
+                &mut complete,
+                64 * 1024,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap();
+            write_response(&mut complete, &request).unwrap();
+        });
+        wait_for_socket(&path);
+        let mut partial = UnixStream::connect(&path).unwrap();
+        partial.write_all(&16_u32.to_be_bytes()).unwrap();
+        partial.flush().unwrap();
+        thread::sleep(Duration::from_millis(50));
+
+        let response = IpcClient::request(&path, b"next request").unwrap();
+        assert_eq!(response, b"next request");
+        server.join().unwrap();
     }
 
     #[test]
