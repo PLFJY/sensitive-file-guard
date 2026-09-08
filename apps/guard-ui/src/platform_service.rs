@@ -781,6 +781,12 @@ pub fn handle_system_extension_command() -> Option<i32> {
     {
         return Some(pending_helper_status());
     }
+    if arguments
+        .iter()
+        .any(|argument| argument == "--ensure-pending-helper")
+    {
+        return Some(ensure_pending_helper());
+    }
     let action = std::env::args().find(|argument| {
         matches!(
             argument.as_str(),
@@ -1078,6 +1084,20 @@ fn pending_helper_status() -> i32 {
 }
 
 #[cfg(target_os = "macos")]
+fn ensure_pending_helper() -> i32 {
+    match ensure_required_user_agent() {
+        Ok(()) => {
+            println!("pending helper registration requested");
+            0
+        }
+        Err(error) => {
+            eprintln!("guard-ui: required pending helper registration failed: {error:#}");
+            1
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn discover_macos_browsers(arguments: &[String]) -> i32 {
     use std::sync::Arc;
 
@@ -1130,6 +1150,7 @@ pub fn handle_system_extension_command() -> Option<i32> {
                 | "--discover-macos-browsers"
                 | "--xpc-status"
                 | "--pending-helper-status"
+                | "--ensure-pending-helper"
         )
     });
     if requested {

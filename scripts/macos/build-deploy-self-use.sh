@@ -210,21 +210,22 @@ sudo chown -R root:wheel "$destination"
 verify_installed_app_payload "$app" "$destination"
 
 installed_guard="$destination/Contents/MacOS/SensitiveFileGuard"
-echo "==> 清理旧版待处理确认 helper（可选，不阻塞部署）"
-# The pending-confirmation helper is optional and must run only while the
-# protection policy is enabled. Remove a stale registration left by the
-# replaced bundle, but do not install or require the new helper here; the GUI
-# provides an explicit install/retry action when the user wants it.
-if ! "$installed_guard" --unregister-pending-helper; then
-    echo "提示：旧 helper 未能注销；部署本身仍已完成，可在 Protection 页面重试。" >&2
+echo "==> 注册必需的待处理确认 helper"
+# This executable mode exits before GTK initialization. It is safe for the
+# non-interactive deployment script and prevents an unrecognized helper flag
+# from falling through to the GUI application loop.
+if ! "$installed_guard" --ensure-pending-helper; then
+    echo "错误：必需 helper 未能注册；请在登录项设置中批准 Sensitive File Guard 后重试。" >&2
+    exit 1
 fi
 helper_status=$("$installed_guard" --pending-helper-status 2>&1 || true)
 case "$helper_status" in
-    NotRegistered|NotFound)
-        echo "helper 当前未运行（可选）；如需确认唤醒，在 Protection 页面安装。"
+    Enabled|RequiresApproval)
+        echo "helper 当前状态：$helper_status"
         ;;
     *)
-        echo "helper 当前状态：$helper_status（不影响本次部署）"
+        echo "错误：必需 helper 状态异常：$helper_status" >&2
+        exit 1
         ;;
 esac
 
