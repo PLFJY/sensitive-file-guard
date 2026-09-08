@@ -468,6 +468,11 @@ pub fn platform_overview(
     let policy_enabled = configuration
         .and_then(|configuration| configuration.policy_enabled)
         .unwrap_or(false);
+    // Repair a missing registration during ordinary status refreshes. There
+    // is intentionally no UI switch to disable this required companion.
+    if policy_enabled {
+        let _ = ensure_required_user_agent();
+    }
     let helper_running = policy_enabled
         && guard_client::macos::MacGuardClient::for_current_process()
             .and_then(|client| client.pending_helper_status())
@@ -591,34 +596,12 @@ pub fn set_protection_enabled(
     {
         let mut candidate =
             candidate.ok_or_else(|| anyhow::anyhow!("active policy is unavailable"))?;
-        let previous_enabled = candidate.policy_enabled;
         candidate.policy_enabled = enabled;
         let bytes = serde_json::to_vec(&candidate)?;
+        // `apply_config` registers the required helper before enabling policy
+        // and unregisters it after disabling policy. Keeping both lifecycle
+        // operations in that transaction prevents a second SMAppService call.
         apply_config(&bytes)?;
-        // The notification helper is part of the protection service lifecycle
-        // on macOS. It must never keep polling the control plane after the
-        // user has turned protection off. Registration is deliberately done
-        // through SMAppService, so disabling it also asks launchd to stop the
-        // existing guard-notify process.
-        if let Err(error) = set_user_agent_enabled(enabled) {
-            // Do not leave the UI reporting a green service while its
-            // notification companion is still running (or failed to start).
-            // Restore the previous policy atomically from the user's point of
-            // view; the next poll will then show the real helper state.
-            candidate.policy_enabled = previous_enabled;
-            let rollback = match serde_json::to_vec(&candidate) {
-                Ok(bytes) => apply_config(&bytes),
-                Err(rollback_error) => Err(anyhow::anyhow!(rollback_error)),
-            };
-            if let Err(rollback_error) = rollback {
-                eprintln!(
-                    "guard-ui: guard-notify lifecycle failed ({error:#}); policy rollback also failed: {rollback_error:#}"
-                );
-            }
-            return Err(anyhow::anyhow!(
-                "guard-notify lifecycle update failed; protection change rolled back: {error:#}"
-            ));
-        }
         Ok(candidate)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -659,20 +642,20 @@ fn set_linux_protection_enabled(
     Ok(candidate)
 }
 
+/// The notification presenter is part of macOS protection, rather than an
+/// optional convenience. A pending SSH or migration request must have a
+/// user-session path to its bounded confirmation dialog.
 #[cfg(target_os = "macos")]
-pub fn set_user_agent_enabled(enabled: bool) -> anyhow::Result<()> {
-    if enabled {
-        let protection_enabled = configuration()?.policy_enabled.unwrap_or(false);
-        anyhow::ensure!(
-            protection_enabled,
-            "Enable protection before starting guard-notify"
-        );
-    }
-    let agent = platform_macos::user_agent::UserAgentController::bundled()?;
-    if enabled {
-        agent.register()
-    } else {
-        agent.unregister()
+pub fn ensure_required_user_agent() -> anyhow::Result<()> {
+    use platform_macos::user_agent::{UserAgentController, UserAgentStatus};
+
+    let agent = UserAgentController::bundled()?;
+    match agent.status()? {
+        UserAgentStatus::NotRegistered => agent.register(),
+        UserAgentStatus::Enabled | UserAgentStatus::RequiresApproval => Ok(()),
+        UserAgentStatus::NotFound => anyhow::bail!(
+            "required guard-notify LaunchAgent is missing from the application bundle"
+        ),
     }
 }
 
@@ -683,11 +666,6 @@ pub fn open_user_agent_settings() {
 
 #[cfg(not(target_os = "macos"))]
 pub fn open_user_agent_settings() {}
-
-#[cfg(not(target_os = "macos"))]
-pub fn set_user_agent_enabled(_enabled: bool) -> anyhow::Result<()> {
-    anyhow::bail!("SMAppService is available only on macOS")
-}
 
 pub fn editable_from_metadata(info: guard_ipc::ConfigurationInfo) -> Option<EditableConfiguration> {
     let browser_protection_level =
@@ -802,18 +780,6 @@ pub fn handle_system_extension_command() -> Option<i32> {
         .any(|argument| argument == "--pending-helper-status")
     {
         return Some(pending_helper_status());
-    }
-    if arguments
-        .iter()
-        .any(|argument| argument == "--register-pending-helper")
-    {
-        return Some(pending_helper_mutation(true));
-    }
-    if arguments
-        .iter()
-        .any(|argument| argument == "--unregister-pending-helper")
-    {
-        return Some(pending_helper_mutation(false));
     }
     let action = std::env::args().find(|argument| {
         matches!(
@@ -1112,50 +1078,6 @@ fn pending_helper_status() -> i32 {
 }
 
 #[cfg(target_os = "macos")]
-fn pending_helper_mutation(register: bool) -> i32 {
-    if register {
-        match configuration().and_then(|configuration| {
-            anyhow::ensure!(
-                configuration.policy_enabled.unwrap_or(false),
-                "Enable protection before starting guard-notify"
-            );
-            Ok(())
-        }) {
-            Ok(()) => {}
-            Err(error) => {
-                eprintln!("guard-ui: pending helper registration refused: {error:#}");
-                return 1;
-            }
-        }
-    }
-    let result =
-        platform_macos::user_agent::UserAgentController::bundled().and_then(|controller| {
-            if register {
-                controller.register()
-            } else {
-                controller.unregister()
-            }
-        });
-    match result {
-        Ok(()) => {
-            println!(
-                "pending helper {}",
-                if register {
-                    "registered"
-                } else {
-                    "unregistered"
-                }
-            );
-            0
-        }
-        Err(error) => {
-            eprintln!("guard-ui: pending helper mutation failed: {error:#}");
-            1
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
 fn discover_macos_browsers(arguments: &[String]) -> i32 {
     use std::sync::Arc;
 
@@ -1208,8 +1130,6 @@ pub fn handle_system_extension_command() -> Option<i32> {
                 | "--discover-macos-browsers"
                 | "--xpc-status"
                 | "--pending-helper-status"
-                | "--register-pending-helper"
-                | "--unregister-pending-helper"
         )
     });
     if requested {
@@ -1278,10 +1198,17 @@ pub fn apply_config(bytes: &[u8]) -> anyhow::Result<()> {
 pub fn apply_config(bytes: &[u8]) -> anyhow::Result<()> {
     let editable: EditableConfiguration = serde_json::from_slice(bytes)?;
     let config = mac_config_from_editable(editable)?;
+    if config.policy_enabled {
+        ensure_required_user_agent()?;
+    }
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     guard_client::macos::MacGuardClient::for_current_process()?
         .apply_configuration(&config, deadline)
-        .map(|_| ())
+        .map(|_| ())?;
+    if !config.policy_enabled {
+        platform_macos::user_agent::UserAgentController::bundled()?.unregister()?;
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -1586,7 +1513,9 @@ mod bundled_runtime_tests {
 
 #[cfg(test)]
 mod extension_button_tests {
-    use super::{apply_button_label, extension_install_button_label, EditableConfiguration};
+    use super::extension_install_button_label;
+    #[cfg(target_os = "linux")]
+    use super::{apply_button_label, EditableConfiguration};
 
     #[test]
     fn label_reflects_install_or_update_action() {

@@ -121,9 +121,6 @@ struct UiState {
     protection_syncing: Rc<Cell<bool>>,
     browser_protection_level: adw::ComboRow,
     browser_protection_level_syncing: Rc<Cell<bool>>,
-    helper: Rc<RefCell<Option<adw::SwitchRow>>>,
-    helper_syncing: Rc<Cell<bool>>,
-    helper_error: Rc<RefCell<Option<String>>>,
     extension_status: adw::ActionRow,
     fda_status: adw::ActionRow,
     sip_status: adw::ActionRow,
@@ -132,7 +129,6 @@ struct UiState {
     endpoint_security_entitlement_status: adw::ActionRow,
     mac_setup_message: gtk::Label,
     extension_install_button: Rc<RefCell<Option<gtk::Button>>>,
-    helper_install_button: Rc<RefCell<Option<gtk::Button>>>,
     pending_dialogs: Rc<RefCell<PendingDialogController>>,
 }
 
@@ -305,9 +301,6 @@ fn build_ui(
         protection_syncing: Rc::new(Cell::new(false)),
         browser_protection_level,
         browser_protection_level_syncing: Rc::new(Cell::new(false)),
-        helper: Rc::new(RefCell::new(None)),
-        helper_syncing: Rc::new(Cell::new(false)),
-        helper_error: Rc::new(RefCell::new(None)),
         extension_status,
         fda_status,
         sip_status,
@@ -316,7 +309,6 @@ fn build_ui(
         endpoint_security_entitlement_status,
         mac_setup_message,
         extension_install_button: Rc::new(RefCell::new(None)),
-        helper_install_button: Rc::new(RefCell::new(None)),
         pending_dialogs: Rc::new(RefCell::new(PendingDialogController::default())),
     };
     let overview = scroll_page(overview_page(&state));
@@ -600,57 +592,14 @@ fn protection_page(state: &UiState) -> gtk::Box {
         );
 
         let helper_group = adw::PreferencesGroup::new();
-        helper_group
-            .set_title("Optional: open Sensitive File Guard automatically for confirmations");
-        let helper = adw::SwitchRow::new();
-        helper.set_subtitle_lines(STATUS_SUBTITLE_LINES);
-        helper.set_title("Open Sensitive File Guard automatically when confirmation is required");
-        helper.set_subtitle("Runs only while protection is enabled to show browser migration or SSH key confirmations; it does not install extensions or grant permissions.");
-        helper.set_active(false);
-        helper.set_sensitive(false);
-        let helper_row = helper.clone();
-        let helper_syncing = state.helper_syncing.clone();
-        let helper_error = state.helper_error.clone();
-        helper.connect_active_notify(move |row| {
-            if helper_syncing.get() {
-                return;
-            }
-            helper_row.set_sensitive(false);
-            spawn_user_agent_change(
-                row.is_active(),
-                helper_row.clone(),
-                helper_syncing.clone(),
-                helper_error.clone(),
-                None,
-            );
-        });
-        *state.helper.borrow_mut() = Some(helper.clone());
-        helper_group.add(&helper);
-        let helper_actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        helper_actions.set_halign(gtk::Align::Start);
-        helper_actions.set_margin_top(8);
-        let install_helper = gtk::Button::with_label("Install / retry confirmation helper");
-        install_helper.set_sensitive(false);
+        helper_group.set_title("Required confirmation helper");
+        let helper = adw::ActionRow::new();
+        helper.set_title("Automatic confirmation presenter");
+        helper.set_subtitle("Required while protection is enabled. It opens Sensitive File Guard for browser-migration and SSH-key decisions.");
         let open_login_items = gtk::Button::with_label("Open Login Items settings");
-        let helper_row = helper.clone();
-        let helper_syncing = state.helper_syncing.clone();
-        let helper_error = state.helper_error.clone();
-        let install_helper_button = install_helper.clone();
-        install_helper.connect_clicked(move |button| {
-            button.set_sensitive(false);
-            spawn_user_agent_change(
-                true,
-                helper_row.clone(),
-                helper_syncing.clone(),
-                helper_error.clone(),
-                Some(install_helper_button.clone()),
-            );
-        });
         open_login_items.connect_clicked(|_| platform_service::open_user_agent_settings());
-        helper_actions.append(&install_helper);
-        helper_actions.append(&open_login_items);
-        helper_group.add(&helper_actions);
-        *state.helper_install_button.borrow_mut() = Some(install_helper);
+        helper.add_suffix(&open_login_items);
+        helper_group.add(&helper);
         page.append(&helper_group);
     }
     let level_group = adw::PreferencesGroup::new();
@@ -1459,9 +1408,6 @@ fn refresh_state(
     let poll_in_flight = state.poll_in_flight.clone();
     let protection = state.protection.clone();
     let protection_syncing = state.protection_syncing.clone();
-    let helper = state.helper.clone();
-    let helper_syncing = state.helper_syncing.clone();
-    let helper_error = state.helper_error.clone();
     let extension_status = state.extension_status.clone();
     let fda_status = state.fda_status.clone();
     let sip_status = state.sip_status.clone();
@@ -1469,7 +1415,6 @@ fn refresh_state(
     let host_entitlement_status = state.host_entitlement_status.clone();
     let endpoint_security_entitlement_status = state.endpoint_security_entitlement_status.clone();
     let extension_install_button = state.extension_install_button.clone();
-    let helper_install_button = state.helper_install_button.clone();
     let pending_dialogs = state.pending_dialogs.clone();
     let system_authentication_in_progress = system_authentication_in_progress.clone();
     let config_state = state.clone();
@@ -1571,35 +1516,6 @@ fn refresh_state(
                                 || !candidate.enrolled_exes.is_empty()
                         }),
                 );
-            }
-            if let Some(row) = helper.borrow().as_ref() {
-                // SMAppService reports RequiresApproval/Enabled before the
-                // helper can answer XPC. Keep the user's switch on during
-                // that transition; otherwise the two-second status poll
-                // immediately undoes a successful registration request.
-                let helper_registered = overview.policy_enabled
-                    && (overview.helper_running
-                    || matches!(
-                        overview.helper_state.as_str(),
-                        "Pending user approval" | "Enabled, not responding"
-                    ));
-                if row.is_active() != helper_registered {
-                    helper_syncing.set(true);
-                    row.set_active(helper_registered);
-                    helper_syncing.set(false);
-                }
-                row.set_subtitle(&overview.helper_state);
-                if let Some(error) = helper_error.borrow().as_ref() {
-                    row.set_subtitle(error);
-                }
-                // The pending helper is subordinate to the protection
-                // service. It is intentionally unavailable while the main
-                // protection switch is off, so it cannot keep polling or
-                // surface notifications on its own.
-                row.set_sensitive(overview.policy_enabled);
-            }
-            if let Some(button) = helper_install_button.borrow().as_ref() {
-                button.set_sensitive(overview.policy_enabled);
             }
             extension_status.set_subtitle(&overview.extension_state);
             if let Some(button) = extension_install_button.borrow().as_ref() {
@@ -2436,48 +2352,6 @@ fn spawn_protection_change(
                 switch.set_tooltip_text(Some(&format!(
                     "Protection task stopped unexpectedly: {error:?}"
                 )));
-            }
-        }
-        syncing.set(false);
-    });
-}
-
-fn spawn_user_agent_change(
-    enabled: bool,
-    row: adw::SwitchRow,
-    syncing: Rc<Cell<bool>>,
-    error_state: Rc<RefCell<Option<String>>>,
-    retry_button: Option<gtk::Button>,
-) {
-    glib::MainContext::default().spawn_local(async move {
-        let result =
-            gio::spawn_blocking(move || platform_service::set_user_agent_enabled(enabled)).await;
-        row.set_sensitive(true);
-        if let Some(button) = retry_button.as_ref() {
-            button.set_sensitive(true);
-        }
-        syncing.set(true);
-        match result {
-            Ok(Ok(())) => {
-                *error_state.borrow_mut() = None;
-                row.set_active(enabled);
-                row.set_tooltip_text(None);
-            }
-            Ok(Err(error)) => {
-                row.set_active(!enabled);
-                let operation = if enabled { "enable" } else { "disable" };
-                let message = format!("Failed to {operation} confirmation helper: {error}");
-                *error_state.borrow_mut() = Some(message.clone());
-                row.set_subtitle(&message);
-                row.set_tooltip_text(Some(&message));
-            }
-            Err(error) => {
-                row.set_active(!enabled);
-                let operation = if enabled { "enable" } else { "disable" };
-                let message = format!("Confirmation helper {operation} task failed: {error:?}");
-                *error_state.borrow_mut() = Some(message.clone());
-                row.set_subtitle(&message);
-                row.set_tooltip_text(Some(&message));
             }
         }
         syncing.set(false);
