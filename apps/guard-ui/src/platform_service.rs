@@ -478,6 +478,12 @@ pub fn platform_overview(
             .and_then(|client| client.pending_helper_status())
             .is_ok_and(|status| status.running);
     let agent_status = UserAgentController::bundled().and_then(|agent| agent.status());
+    if policy_enabled && !helper_running && matches!(&agent_status, Ok(UserAgentStatus::Enabled)) {
+        // An installation replacement may boot out the old launchd job while
+        // ServiceManagement still reports Enabled. Re-register the required
+        // helper instead of leaving pending SSH requests without a presenter.
+        let _ = reregister_required_user_agent();
+    }
     let helper_state = match agent_status {
         Ok(UserAgentStatus::Enabled) if helper_running => "Running",
         Ok(UserAgentStatus::Enabled) => "Enabled, not responding",
@@ -657,6 +663,11 @@ pub fn ensure_required_user_agent() -> anyhow::Result<()> {
             "required guard-notify LaunchAgent is missing from the application bundle"
         ),
     }
+}
+
+#[cfg(target_os = "macos")]
+fn reregister_required_user_agent() -> anyhow::Result<()> {
+    platform_macos::user_agent::UserAgentController::bundled()?.reregister()
 }
 
 #[cfg(target_os = "macos")]
@@ -1085,7 +1096,7 @@ fn pending_helper_status() -> i32 {
 
 #[cfg(target_os = "macos")]
 fn ensure_pending_helper() -> i32 {
-    match ensure_required_user_agent() {
+    match reregister_required_user_agent() {
         Ok(()) => {
             println!("pending helper registration requested");
             0

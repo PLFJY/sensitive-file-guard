@@ -56,6 +56,13 @@ impl UserAgentController {
         self.call_mutation(guard_user_agent_unregister)
     }
 
+    /// Replace an existing registration after its bundle was deployed. This
+    /// is intentionally distinct from idempotent `register`: launchd may
+    /// retain an Enabled ServiceManagement status after a deployment bootout.
+    pub fn reregister(&self) -> anyhow::Result<()> {
+        self.call_mutation(guard_user_agent_reregister)
+    }
+
     pub fn open_system_settings() {
         // SAFETY: this function has no arguments and only asks the OS to open
         // its Login Items settings pane.
@@ -105,6 +112,11 @@ extern "C" {
         error_buffer_length: usize,
     ) -> i32;
     fn guard_user_agent_unregister(
+        plist_name: *const c_char,
+        error_buffer: *mut c_char,
+        error_buffer_length: usize,
+    ) -> i32;
+    fn guard_user_agent_reregister(
         plist_name: *const c_char,
         error_buffer: *mut c_char,
         error_buffer_length: usize,

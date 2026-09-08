@@ -102,6 +102,55 @@ int guard_user_agent_unregister(const char *plist_name,
     return 0;
 }
 
+int guard_user_agent_reregister(const char *plist_name,
+                                char *error_buffer,
+                                size_t error_buffer_length) {
+    SMAppService *service = GuardAgentService(plist_name, error_buffer,
+                                              error_buffer_length);
+    if (service == nil) {
+        return -1;
+    }
+    if (service.status == SMAppServiceStatusRequiresApproval) {
+        GuardCopyAgentError(error_buffer, error_buffer_length,
+                            @"confirmation helper requires approval in System Settings > General > Login Items");
+        return -1;
+    }
+    if (service.status == SMAppServiceStatusEnabled) {
+        NSError *error = nil;
+        if (![service unregisterAndReturnError:&error]) {
+            GuardCopyAgentError(error_buffer, error_buffer_length,
+                                error.localizedDescription);
+            return -1;
+        }
+        // ServiceManagement updates status asynchronously. Wait for its own
+        // state transition before registering the replacement bundle; issuing
+        // both operations back-to-back can leave launchd with no helper.
+        for (NSUInteger attempt = 0; attempt < 100; ++attempt) {
+            if (service.status != SMAppServiceStatusEnabled) {
+                break;
+            }
+            [NSThread sleepForTimeInterval:0.05];
+        }
+        if (service.status == SMAppServiceStatusEnabled) {
+            GuardCopyAgentError(error_buffer, error_buffer_length,
+                                @"confirmation helper unregister did not complete within 5 seconds");
+            return -1;
+        }
+    }
+    if (service.status == SMAppServiceStatusRequiresApproval) {
+        GuardCopyAgentError(error_buffer, error_buffer_length,
+                            @"confirmation helper requires approval in System Settings > General > Login Items");
+        return -1;
+    }
+    NSError *error = nil;
+    if (![service registerAndReturnError:&error]) {
+        GuardCopyAgentError(error_buffer, error_buffer_length,
+                            error.localizedDescription);
+        return -1;
+    }
+    return 0;
+}
+
 void guard_user_agent_open_settings(void) {
     [SMAppService openSystemSettingsLoginItems];
 }
