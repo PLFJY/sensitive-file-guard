@@ -897,7 +897,26 @@ fn refresh_browser_sources(state: &UiState) {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/nonexistent"));
-    let discovered = platform_service::discover_native_browsers(&home);
+
+    // Native discovery verifies each candidate executable's code signature.
+    // That can take seconds on a machine with several browsers, so it must
+    // never run on GTK's main context. In particular, pending SSH decisions
+    // are reconciled after this function is requested and must not wait for a
+    // best-effort source-list refresh.
+    let state = state.clone();
+    glib::MainContext::default().spawn_local(async move {
+        let discovered =
+            gio::spawn_blocking(move || platform_service::discover_native_browsers(&home)).await;
+        if let Ok(discovered) = discovered {
+            apply_discovered_browser_sources(&state, discovered);
+        }
+    });
+}
+
+fn apply_discovered_browser_sources(
+    state: &UiState,
+    discovered: guard_platform::config::BrowserDiscovery,
+) {
     *state.unsupported_browsers.borrow_mut() = discovered.unsupported_sandboxed.clone();
     let discovered = discovered
         .browsers

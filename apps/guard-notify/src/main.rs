@@ -65,7 +65,9 @@ const fn default_poll_ms() -> u64 {
 
 #[cfg(target_os = "macos")]
 const fn default_poll_ms() -> u64 {
-    500
+    // A pending authorization has a bounded OS deadline. Keep the default
+    // notification-to-dialog delay short without permitting busy polling.
+    100
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]

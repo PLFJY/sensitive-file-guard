@@ -25,6 +25,10 @@ use crate::policy::{prepare_config, MacPolicy};
 
 const AUDIT_PATH: &str = "/Library/Application Support/Sensitive Data Firewall/audit.db";
 const HELPER_HEALTH_WINDOW: Duration = Duration::from_secs(3);
+// Target-selection changes are requested synchronously by the XPC control
+// path. Keep their handoff latency short without putting a wait on Endpoint
+// Security's authorization callback path.
+const SELECTION_UPDATE_POLL: Duration = Duration::from_millis(25);
 
 struct ControlHandler {
     policy: Arc<MacPolicy>,
@@ -539,7 +543,7 @@ pub fn run() -> ExitCode {
             let result = backend.update_target_selection(&update.plan);
             let _ = update.reply.send(result);
         }
-        match backend.recv_timeout(Duration::from_millis(250)) {
+        match backend.recv_timeout(SELECTION_UPDATE_POLL) {
             Ok(event) => policy.handle(event),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
