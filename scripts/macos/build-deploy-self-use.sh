@@ -170,11 +170,8 @@ case "$sip" in
 esac
 
 echo "==> 检查本地自签名身份：$identity"
-if ! "$script_dir/resolve-self-use-signing-identity.sh" "$identity" "$keychain" >/dev/null 2>&1; then
-    echo "未找到身份，创建本地专用 Keychain/证书（不会写入仓库）"
-    SFG_SELF_USE_SIGNING_IDENTITY="$identity" SFG_SELF_USE_SIGNING_KEYCHAIN="$keychain" \
-        "$script_dir/create-self-use-signing-identity.sh"
-fi
+SFG_SELF_USE_SIGNING_IDENTITY="$identity" SFG_SELF_USE_SIGNING_KEYCHAIN="$keychain" \
+    "$script_dir/create-self-use-signing-identity.sh"
 
 echo "==> 构建带 Endpoint Security entitlement 的 SELF_USE_SIP_OFF 包"
 SELF_USE_SIP_OFF=1 \

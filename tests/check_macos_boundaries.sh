@@ -4,10 +4,16 @@ set -eu
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 failed=0
 
-if rg -n 'NetworkExtension|NEFilter|systemextensionsctl' \
+if rg -n 'NetworkExtension|NEFilter' \
     "$repo_dir/crates/platform-macos" "$repo_dir/apps/guard-es" \
     "$repo_dir/native/macos" "$repo_dir/scripts/macos" "$repo_dir/packaging/macos"; then
-    echo "macOS boundary violation: Network Extension or undocumented lifecycle CLI found" >&2
+    echo "macOS boundary violation: Network Extension implementation found" >&2
+    failed=1
+fi
+if rg -n 'systemextensionsctl[[:space:]]+(activate|install|uninstall|reset|cleanup)' \
+    "$repo_dir/crates/platform-macos" "$repo_dir/apps/guard-es" \
+    "$repo_dir/native/macos" "$repo_dir/scripts/macos" "$repo_dir/packaging/macos"; then
+    echo "macOS boundary violation: mutating system-extension lifecycle CLI found" >&2
     failed=1
 fi
 if rg -n 'ES_EVENT_TYPE_(AUTH|NOTIFY)_[A-Z_]+' \

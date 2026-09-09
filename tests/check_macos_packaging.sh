@@ -7,12 +7,40 @@ failed=0
 
 for name in bundle-gtk-runtime.sh build-release-app.sh verify-bundle.sh \
     notarize-release.sh diagnose.sh uninstall-recovery.sh \
-    test-release-update.sh preflight-final-acceptance.sh; do
+    test-release-update.sh preflight-final-acceptance.sh \
+    create-self-use-signing-identity.sh build-deploy-self-use.sh; do
     if [ ! -x "$scripts/$name" ]; then
         echo "macOS packaging violation: missing executable script $name" >&2
         failed=1
     fi
 done
+if rg -n 'find-generic-password' \
+    "$scripts/build-release-app.sh" "$scripts/build-dev-app.sh"; then
+    echo "macOS packaging violation: build scripts bypass centralized keychain recovery" >&2
+    failed=1
+fi
+if ! rg -Uq '(?s)find-generic-password.{0,200}"\$login_keychain"' \
+    "$scripts/create-self-use-signing-identity.sh" || \
+   ! rg -Uq '(?s)add-generic-password.{0,200}"\$login_keychain"' \
+    "$scripts/create-self-use-signing-identity.sh"; then
+    echo "macOS packaging violation: self-use password is not managed through the login keychain" >&2
+    failed=1
+fi
+delete_count=$(rg -c 'security delete-keychain' \
+    "$scripts/create-self-use-signing-identity.sh" || true)
+if [ "$delete_count" -ne 1 ] || \
+   ! rg -q 'newly created, otherwise unrecoverable keychain' \
+    "$scripts/create-self-use-signing-identity.sh"; then
+    echo "macOS packaging violation: existing signing keychain may be silently deleted" >&2
+    failed=1
+fi
+if ! rg -q 'ensure_keychain_in_user_search_list' \
+    "$scripts/create-self-use-signing-identity.sh" || \
+   rg -Uq '(?s)list-keychains.{0,80}-s[[:space:]\\]*"\$keychain"[[:space:]\\]*"\$HOME/Library/Keychains/login' \
+    "$scripts/create-self-use-signing-identity.sh"; then
+    echo "macOS packaging violation: self-use keychain search-list update is absent or destructive" >&2
+    failed=1
+fi
 
 if rg -n 'codesign[^\n]*--deep' "$scripts/build-release-app.sh"; then
     echo "macOS packaging violation: release signing must be explicitly inside-out" >&2

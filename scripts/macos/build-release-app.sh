@@ -24,21 +24,9 @@ fi
 if [ "$self_use" = 1 ]; then
     identity=${SFG_SELF_USE_SIGNING_IDENTITY:-'Sensitive File Guard Local Development'}
     signing_keychain=${SFG_SELF_USE_SIGNING_KEYCHAIN:-"$HOME/Library/Keychains/SensitiveFileGuardSelfUse.keychain-db"}
-    if ! "$script_dir/resolve-self-use-signing-identity.sh" \
-        "$identity" "$signing_keychain" >/dev/null 2>&1; then
-        SFG_SELF_USE_SIGNING_IDENTITY="$identity" \
-        SFG_SELF_USE_SIGNING_KEYCHAIN="$signing_keychain" \
-            "$script_dir/create-self-use-signing-identity.sh"
-    fi
-    keychain_password=$(security find-generic-password -a "$signing_keychain" \
-        -s top.plfjy.SensitiveFileGuard.self-use-keychain -w 2>/dev/null || \
-        security find-generic-password -a "$USER" \
-            -s top.plfjy.SensitiveFileGuard.self-use-keychain -w 2>/dev/null) || {
-        echo "cannot unlock self-use signing keychain: $signing_keychain" >&2
-        exit 2
-    }
-    security unlock-keychain -p "$keychain_password" "$signing_keychain"
-    unset keychain_password
+    SFG_SELF_USE_SIGNING_IDENTITY="$identity" \
+    SFG_SELF_USE_SIGNING_KEYCHAIN="$signing_keychain" \
+        "$script_dir/create-self-use-signing-identity.sh"
     identity=$("$script_dir/resolve-self-use-signing-identity.sh" \
         "$identity" "$signing_keychain")
     signing_mode=self-use

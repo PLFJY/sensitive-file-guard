@@ -14,7 +14,7 @@ scripts/macos/build-deploy-self-use.sh
 
 ## 手工流程
 
-1. 在 SIP 仍开启时创建身份：`scripts/macos/create-self-use-signing-identity.sh`。若出现 Keychain 密码提示，输入专用 Keychain 密码，不是 macOS 登录密码。若登录 Keychain 中保存的凭据无法解锁旧 Keychain，脚本会提供交互式解锁、确认移除并按原路径重建；密码错误或取消时会保留旧 Keychain 并停止。
+1. 在 SIP 仍开启时创建身份：`scripts/macos/create-self-use-signing-identity.sh`。专用 Keychain 会在睡眠、六小时超时或重启后锁定；脚本会从登录 Keychain 读取生成的专用密码并自动解锁。若 macOS 要求批准读取已保存凭据，使用本机登录认证。脚本绝不会因为解锁失败而删除或替换已有签名 Keychain；凭据缺失或不匹配时会停止，并要求先显式移走旧 Keychain 再创建新身份。
 2. 构建并验证：
 
    ```sh

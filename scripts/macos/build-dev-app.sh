@@ -45,21 +45,9 @@ if [ "$self_use" = 1 ]; then
         echo "SELF_USE_SIP_OFF cannot be combined with SKIP_SIGNING=1" >&2
         exit 2
     }
-    if ! "$script_dir/resolve-self-use-signing-identity.sh" \
-        "$signing_identity" "$self_use_keychain" >/dev/null 2>&1; then
-        SFG_SELF_USE_SIGNING_IDENTITY="$signing_identity" \
-        SFG_SELF_USE_SIGNING_KEYCHAIN="$self_use_keychain" \
-            "$script_dir/create-self-use-signing-identity.sh"
-    fi
-    keychain_password=$(security find-generic-password -a "$self_use_keychain" \
-        -s top.plfjy.SensitiveFileGuard.self-use-keychain -w 2>/dev/null || \
-        security find-generic-password -a "$USER" \
-            -s top.plfjy.SensitiveFileGuard.self-use-keychain -w 2>/dev/null) || {
-        echo "cannot unlock self-use signing keychain: $self_use_keychain" >&2
-        exit 2
-    }
-    security unlock-keychain -p "$keychain_password" "$self_use_keychain"
-    unset keychain_password
+    SFG_SELF_USE_SIGNING_IDENTITY="$signing_identity" \
+    SFG_SELF_USE_SIGNING_KEYCHAIN="$self_use_keychain" \
+        "$script_dir/create-self-use-signing-identity.sh"
     signing_identity=$("$script_dir/resolve-self-use-signing-identity.sh" \
         "$signing_identity" "$self_use_keychain")
     "$script_dir/self-use-safety-gate.sh"
