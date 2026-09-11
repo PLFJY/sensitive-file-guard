@@ -22,6 +22,15 @@ self_use_identity=${SFG_SELF_USE_SIGNING_IDENTITY:-'Sensitive File Guard Local D
 self_use_keychain=${SFG_SELF_USE_SIGNING_KEYCHAIN:-"$HOME/Library/Keychains/SensitiveFileGuardSelfUse.keychain-db"}
 signing_identity=${SIGNING_IDENTITY:--}
 self_use=${SELF_USE_SIP_OFF:-0}
+compile_self_use=${GUARD_COMPILE_SELF_USE_SIP_OFF:-$self_use}
+self_use_keychain_unlocked=0
+
+lock_self_use_keychain() {
+    if [ "$self_use_keychain_unlocked" -eq 1 ]; then
+        security lock-keychain "$self_use_keychain" >/dev/null 2>&1 || true
+    fi
+}
+trap lock_self_use_keychain EXIT
 
 validate_bundle_id() {
     case "$1" in
@@ -35,7 +44,9 @@ validate_bundle_id "$app_bundle_id"
 validate_bundle_id "$extension_bundle_id"
 validate_bundle_id "$guard_xpc_service_name"
 case "$self_use" in 0|1) ;; *) echo "SELF_USE_SIP_OFF must be 0 or 1" >&2; exit 2 ;; esac
+case "$compile_self_use" in 0|1) ;; *) echo "GUARD_COMPILE_SELF_USE_SIP_OFF must be 0 or 1" >&2; exit 2 ;; esac
 if [ "$self_use" = 1 ]; then
+    self_use_keychain_unlocked=1
     signing_identity=$self_use_identity
     test "$signing_identity" != - || {
         echo "SELF_USE_SIP_OFF requires a local certificate; ad-hoc signing is not valid for authenticated XPC" >&2
@@ -93,6 +104,7 @@ GUARD_APP_BUNDLE_ID="$app_bundle_id" \
 GUARD_SYSTEM_EXTENSION_BUNDLE_ID="$extension_bundle_id" \
 GUARD_XPC_SERVICE_NAME="$guard_xpc_service_name" \
 GUARD_USER_AGENT_PLIST_NAME="$user_agent_plist_name" \
+GUARD_SELF_USE_SIP_OFF="$compile_self_use" \
     cargo build -p guard-ui -p guard-es -p guardctl -p guard-notify $cargo_flags $feature_flags
 
 if [ -e "$app_bundle" ]; then

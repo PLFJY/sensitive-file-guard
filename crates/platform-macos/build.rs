@@ -3,6 +3,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=GUARD_SYSTEM_EXTENSION_BUNDLE_ID");
     println!("cargo:rerun-if-env-changed=GUARD_XPC_SERVICE_NAME");
     println!("cargo:rerun-if-env-changed=GUARD_USER_AGENT_PLIST_NAME");
+    println!("cargo:rerun-if-env-changed=GUARD_SELF_USE_SIP_OFF");
     println!("cargo:rerun-if-changed=../../native/macos/system_extension_bridge.m");
     println!("cargo:rerun-if-changed=../../native/macos/system_extension_bridge.h");
     println!("cargo:rerun-if-changed=../../native/macos/endpoint_security_bridge.c");

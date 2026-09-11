@@ -7,6 +7,11 @@
 
 typedef struct guard_xpc_server guard_xpc_server_t;
 
+typedef enum guard_xpc_validation_mode {
+    GUARD_XPC_VALIDATION_DYNAMIC = 0,
+    GUARD_XPC_VALIDATION_SELF_USE_STATIC = 1,
+} guard_xpc_validation_mode_t;
+
 typedef bool (*guard_xpc_peer_callback_t)(uint32_t euid, void *context);
 typedef bool (*guard_xpc_request_callback_t)(const uint8_t *request,
                                              size_t request_length,
@@ -23,6 +28,7 @@ typedef void (*guard_xpc_response_free_t)(const uint8_t *response,
 guard_xpc_server_t *guard_xpc_server_create(
     const char *service_name,
     const char *client_code_signing_requirement,
+    guard_xpc_validation_mode_t validation_mode,
     size_t maximum_request_bytes,
     size_t maximum_concurrent_requests,
     guard_xpc_peer_callback_t peer_callback,
@@ -41,6 +47,7 @@ void guard_xpc_server_destroy(guard_xpc_server_t *server);
 // guard_xpc_bytes_free.
 bool guard_xpc_request(const char *service_name,
                        const char *server_code_signing_requirement,
+                       guard_xpc_validation_mode_t validation_mode,
                        const uint8_t *request,
                        size_t request_length,
                        uint64_t timeout_milliseconds,

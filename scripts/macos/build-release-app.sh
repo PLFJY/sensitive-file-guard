@@ -14,6 +14,14 @@ version=${GUARD_VERSION:-0.1.0}
 architecture=$(uname -m)
 local_only=${LOCAL_SIGNING_ONLY:-0}
 self_use=${SELF_USE_SIP_OFF:-0}
+signing_keychain_unlocked=0
+
+lock_signing_keychain() {
+    if [ "$signing_keychain_unlocked" -eq 1 ]; then
+        security lock-keychain "$signing_keychain" >/dev/null 2>&1 || true
+    fi
+}
+trap lock_signing_keychain EXIT
 
 case "$local_only" in 0|1) ;; *) echo "LOCAL_SIGNING_ONLY must be 0 or 1" >&2; exit 2 ;; esac
 case "$self_use" in 0|1) ;; *) echo "SELF_USE_SIP_OFF must be 0 or 1" >&2; exit 2 ;; esac
@@ -24,6 +32,7 @@ fi
 if [ "$self_use" = 1 ]; then
     identity=${SFG_SELF_USE_SIGNING_IDENTITY:-'Sensitive File Guard Local Development'}
     signing_keychain=${SFG_SELF_USE_SIGNING_KEYCHAIN:-"$HOME/Library/Keychains/SensitiveFileGuardSelfUse.keychain-db"}
+    signing_keychain_unlocked=1
     SFG_SELF_USE_SIGNING_IDENTITY="$identity" \
     SFG_SELF_USE_SIGNING_KEYCHAIN="$signing_keychain" \
         "$script_dir/create-self-use-signing-identity.sh"
@@ -63,7 +72,8 @@ for command_name in codesign ditto file; do
     }
 done
 
-SELF_USE_SIP_OFF=0 MACOS_BUILD_ROOT="$build_root" BUILD_PROFILE=release SKIP_SIGNING=1 \
+SELF_USE_SIP_OFF=0 GUARD_COMPILE_SELF_USE_SIP_OFF="$self_use" \
+MACOS_BUILD_ROOT="$build_root" BUILD_PROFILE=release SKIP_SIGNING=1 \
     "$script_dir/build-dev-app.sh"
 "$script_dir/bundle-gtk-runtime.sh" "$app"
 "$script_dir/build-app-icon.sh" \

@@ -571,7 +571,7 @@ fn mac_extension_state(xpc_reachable: bool) -> String {
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
             Ok(LifecycleState::UserApprovalRequired) => return "Pending approval".into(),
-            Ok(LifecycleState::Active) => return "Active".into(),
+            Ok(LifecycleState::Active) => return "Installed, control channel unavailable".into(),
             Ok(LifecycleState::RestartRequired) => return "Restart required".into(),
             Ok(LifecycleState::Deactivated) => return "Installed, disabled".into(),
             Ok(LifecycleState::Failed) => return "Error".into(),

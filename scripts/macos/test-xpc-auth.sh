@@ -36,6 +36,13 @@ test -n "$signing_authority" || {
 signing_selector=$signing_authority
 identity_description="Apple Team $team_id"
 local_certificate=
+local_keychain_unlocked=0
+lock_test_keychain() {
+    if [ "$local_keychain_unlocked" -eq 1 ]; then
+        security lock-keychain "$self_use_keychain" >/dev/null 2>&1 || true
+    fi
+}
+trap lock_test_keychain EXIT
 if [ -z "$team_id" ] || [ "$team_id" = "not set" ]; then
     self_use_identity=${SFG_SELF_USE_SIGNING_IDENTITY:-'Sensitive File Guard Local Development'}
     self_use_keychain=${SFG_SELF_USE_SIGNING_KEYCHAIN:-"$HOME/Library/Keychains/SensitiveFileGuardSelfUse.keychain-db"}
@@ -43,6 +50,10 @@ if [ -z "$team_id" ] || [ "$team_id" = "not set" ]; then
         "$script_dir/resolve-self-use-signing-identity.sh" \
             "$self_use_identity" "$self_use_keychain"
     )
+    SFG_SELF_USE_SIGNING_IDENTITY="$self_use_identity" \
+    SFG_SELF_USE_SIGNING_KEYCHAIN="$self_use_keychain" \
+        "$script_dir/create-self-use-signing-identity.sh" >/dev/null
+    local_keychain_unlocked=1
     signing_selector=$local_certificate
     identity_description="local certificate $local_certificate"
     local_requirement="=certificate leaf = H\"$local_certificate\""
@@ -69,6 +80,7 @@ cleanup() {
         launchctl bootout "$domain" "$plist" >/dev/null 2>&1 || true
     fi
     rm -rf -- "$guard_xpc_test_root"
+    lock_test_keychain
 }
 trap cleanup EXIT HUP INT TERM
 

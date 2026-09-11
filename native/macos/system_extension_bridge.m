@@ -77,6 +77,8 @@ static NSString *GuardIdentifier(const char *identifier, char *error, size_t err
 
 - (void)requestNeedsUserApproval:(OSSystemExtensionRequest *)request {
     (void)request;
+    NSLog(@"Guard system extension request requires user approval: %@",
+          self.identifier);
     GuardSetState(self.identifier, GuardLifecycleUserApprovalRequired,
                   @"system extension activation is awaiting user approval");
 }
@@ -84,6 +86,8 @@ static NSString *GuardIdentifier(const char *identifier, char *error, size_t err
 - (void)request:(OSSystemExtensionRequest *)request
     didFinishWithResult:(OSSystemExtensionRequestResult)result {
     (void)request;
+    NSLog(@"Guard system extension request completed: %@ result=%ld",
+          self.identifier, (long)result);
     if (result == OSSystemExtensionRequestWillCompleteAfterReboot) {
         GuardSetState(self.identifier, GuardLifecycleRestartRequired,
                       @"system extension request completed; restart required");
@@ -101,6 +105,9 @@ static NSString *GuardIdentifier(const char *identifier, char *error, size_t err
 
 - (void)request:(OSSystemExtensionRequest *)request didFailWithError:(NSError *)error {
     (void)request;
+    NSLog(@"Guard system extension request failed: %@ domain=%@ code=%ld message=%@",
+          self.identifier, error.domain, (long)error.code,
+          error.localizedDescription);
     GuardSetState(self.identifier, GuardLifecycleFailed, error.localizedDescription);
     @synchronized(GuardDelegates) {
         [GuardDelegates removeObjectForKey:self.identifier];
@@ -122,8 +129,11 @@ static NSString *GuardIdentifier(const char *identifier, char *error, size_t err
             // replacement. Prefer the enabled replacement over stale teardown
             // state so diagnostics describe the effective protection state.
             if (property.isEnabled) {
+                NSString *diagnostic = [NSString stringWithFormat:
+                    @"system extension is enabled (version %@ build %@)",
+                    property.bundleShortVersion, property.bundleVersion];
                 GuardSetState(self.identifier, GuardLifecycleActive,
-                              @"system extension is enabled");
+                              diagnostic);
                 @synchronized(GuardDelegates) {
                     [GuardDelegates removeObjectForKey:self.identifier];
                 }
@@ -186,6 +196,9 @@ static int GuardSubmit(const char *identifier, BOOL activating, BOOL properties,
             GuardDelegates[bundleIdentifier] = delegate;
         }
         [OSSystemExtensionManager.sharedManager submitRequest:request];
+        NSLog(@"Guard submitted system extension %@ request for %@",
+              properties ? @"properties" : (activating ? @"activation" : @"deactivation"),
+              bundleIdentifier);
     });
     return 0;
 }

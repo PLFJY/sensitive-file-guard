@@ -14,7 +14,7 @@ scripts/macos/build-deploy-self-use.sh
 
 ## 手工流程
 
-1. 在 SIP 仍开启时创建身份：`scripts/macos/create-self-use-signing-identity.sh`。专用 Keychain 会在睡眠、六小时超时或重启后锁定；脚本会从登录 Keychain 读取生成的专用密码并自动解锁。若 macOS 要求批准读取已保存凭据，使用本机登录认证。脚本绝不会因为解锁失败而删除或替换已有签名 Keychain；凭据缺失或不匹配时会停止，并要求先显式移走旧 Keychain 再创建新身份。
+1. 在 SIP 仍开启时创建身份：`scripts/macos/create-self-use-signing-identity.sh`。构建脚本会从登录 Keychain 读取生成的专用密码、仅在签名期间解锁专用 Keychain，并在构建成功或失败退出时重新锁定。若 macOS 要求批准读取已保存凭据，使用本机登录认证。脚本绝不会因为解锁失败而删除或替换已有签名 Keychain；凭据缺失或不匹配时会停止，并要求先显式移走旧 Keychain 再创建新身份。
 2. 构建并验证：
 
    ```sh
@@ -53,6 +53,8 @@ helper 已安装并获批准时，第一条会输出 `Enabled`，第二条能看
 - `LOCAL_SIGNING_ONLY=1`：无受限 entitlement，只做 GUI/打包 smoke test，不能真实拦截。
 - `SELF_USE_SIP_OFF=1`：本地证书签名、保留 host/extension entitlement，用于 SIP-off 自用保护。
 - 不设置上述模式：正式 Apple provisioning/Developer ID/公证路径，当前不是自用路径的前置条件。
+
+`SELF_USE_SIP_OFF=1` 会在编译时固定为自用认证模式：XPC 的每条消息先通过系统提供的 audit token 绑定发送进程，再验证完整静态代码签名、准确的 signing identifier、本地证书指纹、canonical executable path 和稳定的 `st_dev + st_ino`。任一字段缺失或文件可被组/其他用户写入时均拒绝。正式 Apple Team 构建仍使用系统动态 trusted-execution 校验，运行时环境变量不能在两种模式之间切换。
 
 ## 诊断与回滚
 

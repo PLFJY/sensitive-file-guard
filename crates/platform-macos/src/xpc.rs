@@ -15,6 +15,12 @@ use crate::{DEFAULT_APP_BUNDLE_ID, DEFAULT_EXTENSION_BUNDLE_ID, DEFAULT_XPC_SERV
 const ERROR_CAPACITY: usize = 512;
 const MAX_CONCURRENT_REQUESTS: usize = 32;
 const DEFAULT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+const XPC_VALIDATION_DYNAMIC: u32 = 0;
+const XPC_VALIDATION_SELF_USE_STATIC: u32 = 1;
+
+fn self_use_sip_off_build() -> bool {
+    option_env!("GUARD_SELF_USE_SIP_OFF") == Some("1")
+}
 
 /// Owner of `/dev/console`, which is the active GUI login targeted by the
 /// Phase-05 single-session XPC service. Multi-session routing remains explicit
@@ -175,11 +181,22 @@ impl SigningRequirements {
         let certificate = signature.leaf_certificate_sha1.as_deref().ok_or_else(|| {
             anyhow::anyhow!("ad-hoc signing has no Team ID or local certificate; authenticated XPC is unavailable")
         })?;
+        anyhow::ensure!(
+            self_use_sip_off_build(),
+            "a local signing certificate is accepted only in an explicit SELF_USE_SIP_OFF build"
+        );
         Self::for_local_certificate(
             certificate,
             DEFAULT_APP_BUNDLE_ID,
             DEFAULT_EXTENSION_BUNDLE_ID,
         )
+    }
+
+    fn validation_mode(&self) -> u32 {
+        match self.identity {
+            MacSigningIdentity::AppleTeam { .. } => XPC_VALIDATION_DYNAMIC,
+            MacSigningIdentity::LocalCertificate { .. } => XPC_VALIDATION_SELF_USE_STATIC,
+        }
     }
 }
 
@@ -331,6 +348,7 @@ impl MacXpcServer {
             guard_xpc_server_create(
                 service_name.as_ptr(),
                 requirement.as_ptr(),
+                requirements.validation_mode(),
                 MAX_REQUEST_BYTES,
                 MAX_CONCURRENT_REQUESTS,
                 Some(peer_callback),
@@ -387,20 +405,34 @@ impl Drop for MacXpcServer {
 pub struct MacXpcTransport {
     service_name: CString,
     server_requirement: CString,
+    validation_mode: u32,
 }
 
 impl MacXpcTransport {
     pub fn new(service_name: &str, server_requirement: &str) -> anyhow::Result<Self> {
+        Self::new_with_validation_mode(service_name, server_requirement, XPC_VALIDATION_DYNAMIC)
+    }
+
+    fn new_with_validation_mode(
+        service_name: &str,
+        server_requirement: &str,
+        validation_mode: u32,
+    ) -> anyhow::Result<Self> {
         validate_requirement_syntax(server_requirement)?;
         Ok(Self {
             service_name: CString::new(service_name)?,
             server_requirement: CString::new(server_requirement)?,
+            validation_mode,
         })
     }
 
     pub fn for_current_process() -> anyhow::Result<Self> {
         let requirements = SigningRequirements::current_process()?;
-        Self::new(DEFAULT_XPC_SERVICE_NAME, &requirements.server_requirement)
+        Self::new_with_validation_mode(
+            DEFAULT_XPC_SERVICE_NAME,
+            &requirements.server_requirement,
+            requirements.validation_mode(),
+        )
     }
 
     pub fn request_with_deadline(
@@ -425,6 +457,7 @@ impl MacXpcTransport {
             guard_xpc_request(
                 self.service_name.as_ptr(),
                 self.server_requirement.as_ptr(),
+                self.validation_mode,
                 payload.as_ptr(),
                 payload.len(),
                 timeout_milliseconds,
@@ -525,6 +558,7 @@ extern "C" {
     fn guard_xpc_server_create(
         service_name: *const c_char,
         client_code_signing_requirement: *const c_char,
+        validation_mode: u32,
         maximum_request_bytes: usize,
         maximum_concurrent_requests: usize,
         peer_callback: Option<extern "C" fn(u32, *mut c_void) -> bool>,
@@ -542,6 +576,7 @@ extern "C" {
     fn guard_xpc_request(
         service_name: *const c_char,
         server_code_signing_requirement: *const c_char,
+        validation_mode: u32,
         request: *const u8,
         request_length: usize,
         timeout_milliseconds: u64,
@@ -776,5 +811,20 @@ mod tests {
         assert!(requirements
             .server_requirement
             .contains("io.example.Guard.guard-es"));
+        assert_eq!(
+            requirements.validation_mode(),
+            XPC_VALIDATION_SELF_USE_STATIC
+        );
+    }
+
+    #[test]
+    fn apple_team_keeps_dynamic_xpc_validation() {
+        let requirements = SigningRequirements::new(
+            "ABCDE12345",
+            "io.example.Guard",
+            "io.example.Guard.guard-es",
+        )
+        .unwrap();
+        assert_eq!(requirements.validation_mode(), XPC_VALIDATION_DYNAMIC);
     }
 }
