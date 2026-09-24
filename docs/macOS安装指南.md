@@ -27,6 +27,16 @@ scripts/macos/build-deploy-self-use.sh
 5. 在 Protection 页面选择 Browser Protection Level。Common（推荐）保护浏览器 Cookie、保存的登录凭据和所需密钥材料；Strict 额外保护支持的网站 origin storage。SSH 私钥单独登记，不受该选择影响。
 6. 运行现有 `scripts/macos/run-*-acceptance.sh`。target-selection 验收会自动暂存和恢复合成 profile；它只会请求 macOS 本机认证，不要求手工录入 profile。
 
+## 本机定制浏览器（Firefox AutoConfig）
+
+Firefox AutoConfig 在 macOS 上会把配置文件放进 `Firefox.app/Contents/Resources`，因此修改后的包不再满足 Mozilla 的原始资源签名。Guard 不会仅凭 Firefox 的名称或路径忽略这个失败。
+
+需要保留 AutoConfig 时，推荐保留一份独立命名的定制 Firefox.app，在所有 AutoConfig 文件就位后对整个 app bundle 做本机代码签名，并用 `codesign --verify --deep --strict` 验证。然后在 Protection 页选择“Add custom browser…”，明确选择 Firefox family、对应 profile root 和该 app 内的真实 `Contents/MacOS/firefox`，再应用配置。不要把 shell launcher 选作浏览器可执行文件。
+
+具有有效本机签名的显式自定义 app 会按固定签名登记（无论本机证书是否带 Team ID）：运行时必须同时匹配 canonical path、signing ID、有效 `CS_VALID` 状态和登记时的完整 CDHash。CDHash 覆盖代码签名的资源清单；修改 AutoConfig、更新 Firefox 或再次签名后，旧登记会失效，必须重新检查并登记。这条路径不会自动信任签名已经无效的原始 Firefox，也不会仅按主程序文件名放行。
+
+若直接把签名无效的 Firefox 作为普通自定义可执行文件登记，只能得到现有的文件 SHA-256 身份；它不能把 AutoConfig 资源纳入签名封装，安全边界较弱，不建议用于 Firefox AutoConfig。
+
 ## 确认助手和通知自检
 
 “遇到确认请求时自动打开 Sensitive File Guard”由必需的 LaunchAgent 提供。Protection 页面不提供关闭它的开关；若 macOS 要求批准，可通过“Open Login Items settings”打开“系统设置 → 通用 → 登录项”批准 Sensitive File Guard。macOS 的拒绝和确认通知由常驻的 `guard-notify` LaunchAgent 发送，因此关闭控制中心窗口不会停止 helper；GUI 只显示安全日志和确认界面，不再重复投递。

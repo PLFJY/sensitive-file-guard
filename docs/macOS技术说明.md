@@ -16,6 +16,8 @@ Strict 额外保护 Chromium `Session Storage/`、`Local Storage/`、`IndexedDB/
 
 Open Tabs、Cloud Tabs、最近关闭标签、tab restore、History、Bookmarks、Reading List 与普通 UI/导航状态不会进入资源索引。浏览器保护等级不改变 Endpoint Security AUTH_OPEN、identity、pending authorization、migration、SSH 或 Process Shield 的机制。
 
+浏览器身份分三类：已知发行方签名按 app bundle、Team ID、signing ID 和有效代码签名匹配；本机签名的显式定制 app 按 canonical executable path、signing ID、`CS_VALID` 和固定 CDHash 匹配；无有效签名的单文件自定义浏览器按稳定文件元数据和 SHA-256 匹配。固定 CDHash 用于 Firefox AutoConfig 等有意修改后重新签名的 bundle，任何资源变更、更新或重签都会要求显式重新登记。签名无效的已知浏览器不会自动降级成自定义信任。
+
 实时配置采用保守顺序：先扩大 ES 选择集，再发布新策略，最后缩小选择集并写入 authoritative config；任一步失败都会保留或恢复已知安全状态，磁盘配置不会先于有效选择状态提交。状态接口还公开 `target_path_inversion_active`、`authorization_events_delivered`、`protected_authorization_events` 和 `process_lifecycle_events`，分别用于验证内核选择已启用、授权回调负载和全局生命周期跟踪。
 
 ## 审计日志保留

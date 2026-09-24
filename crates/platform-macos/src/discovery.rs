@@ -161,21 +161,25 @@ impl MacBrowserDiscovery {
         let profile_root = std::fs::canonicalize(profile_root)?;
         let executable = std::fs::canonicalize(executable)?;
         let signature = self.signatures.inspect(&executable).ok();
-        if let Some(signature) = signature.filter(|signature| {
-            signature.valid && signature.team_id.is_some() && signature.signing_id.is_some()
-        }) {
+        if let Some(signature) = signature.filter(|signature| signature.valid) {
             if let Some(app_bundle) = containing_app_bundle(&executable) {
+                // Known native browsers reach `signed_enrollment` only after
+                // their vendor Team ID has been checked by `enroll_known`.
+                // An explicitly selected custom app is pinned even if its
+                // local certificate happens to carry a Team ID; custom
+                // signing must never inherit vendor-style update trust.
+                let enrollment = if signature.signing_id.is_some() && signature.cdhash.len() == 20 {
+                    pinned_signature_enrollment(executable.clone(), &signature)?
+                } else {
+                    enroll_custom_executable(&executable)?
+                };
                 return Ok(MacBrowserEnrollment {
                     browser_id: id,
                     family,
                     profile_root,
                     owner_uid,
                     app_bundle: Some(app_bundle),
-                    executables: vec![signed_enrollment(
-                        BrowserExecutableRole::Main,
-                        executable,
-                        &signature,
-                    )?],
+                    executables: vec![enrollment],
                 });
             }
         }
@@ -348,6 +352,25 @@ fn signed_enrollment(
             .signing_id
             .clone()
             .ok_or_else(|| anyhow::anyhow!("signed executable has no signing ID"))?,
+    })
+}
+
+fn pinned_signature_enrollment(
+    path: PathBuf,
+    signature: &SignatureInspection,
+) -> anyhow::Result<MacExecutableEnrollment> {
+    let cdhash: [u8; 20] = signature
+        .cdhash
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("signed executable has no 20-byte code-directory hash"))?;
+    Ok(MacExecutableEnrollment::PinnedSignature {
+        path,
+        signing_id: signature
+            .signing_id
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("signed executable has no signing ID"))?,
+        cdhash,
     })
 }
 
@@ -726,6 +749,49 @@ mod tests {
         assert!(matches!(
             enrollment.executables.as_slice(),
             [MacExecutableEnrollment::ExplicitHash { .. }]
+        ));
+    }
+
+    #[test]
+    fn custom_signed_app_is_cdhash_enrolled_even_with_a_team_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("custom-profile");
+        let executable = temp
+            .path()
+            .join("Firefox Custom.app/Contents/MacOS/firefox");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, b"synthetic locally signed browser").unwrap();
+        let executable = std::fs::canonicalize(executable).unwrap();
+        let signatures = Arc::new(FakeSignatures::default());
+        signatures.values.lock().unwrap().insert(
+            executable.clone(),
+            SignatureInspection {
+                valid: true,
+                team_id: Some("LOCALTEAM".into()),
+                signing_id: Some("org.mozilla.firefox".into()),
+                leaf_certificate_sha1: None,
+                cdhash: vec![9; 20],
+                diagnostic: None,
+            },
+        );
+        let discovery = MacBrowserDiscovery::new(vec![], signatures);
+        let enrollment = discovery
+            .enroll_custom(
+                BrowserId("firefox-custom".to_owned()),
+                BrowserFamily::Firefox,
+                &profile,
+                &executable,
+                501,
+            )
+            .unwrap();
+        assert!(matches!(
+            enrollment.executables.as_slice(),
+            [MacExecutableEnrollment::PinnedSignature {
+                signing_id,
+                cdhash,
+                ..
+            }] if signing_id == "org.mozilla.firefox" && cdhash == &[9; 20]
         ));
     }
 }

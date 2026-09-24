@@ -27,6 +27,16 @@ pub enum MacExecutableEnrollment {
         team_id: String,
         signing_id: String,
     },
+    /// A reviewed, locally signed app bundle whose exact Code Directory is
+    /// pinned. This supports intentionally modified browsers without trusting
+    /// an invalid vendor signature or a process name. Re-signing after any
+    /// bundle-resource change produces a different cdhash and requires
+    /// explicit reenrollment.
+    PinnedSignature {
+        path: PathBuf,
+        signing_id: String,
+        cdhash: [u8; 20],
+    },
     ExplicitHash {
         path: PathBuf,
         dev: u64,
@@ -41,7 +51,9 @@ pub enum MacExecutableEnrollment {
 impl MacExecutableEnrollment {
     pub fn path(&self) -> &Path {
         match self {
-            Self::Signed { path, .. } | Self::ExplicitHash { path, .. } => path,
+            Self::Signed { path, .. }
+            | Self::PinnedSignature { path, .. }
+            | Self::ExplicitHash { path, .. } => path,
         }
     }
 }
@@ -203,6 +215,29 @@ impl MacBrowserTrustStore {
                             );
                         }
                     }
+                    MacExecutableEnrollment::PinnedSignature {
+                        path,
+                        signing_id,
+                        cdhash,
+                    } => {
+                        let bundle = browser.app_bundle.as_ref().ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "pinned-signature browser enrollment requires an app bundle"
+                            )
+                        })?;
+                        anyhow::ensure!(
+                            path.starts_with(bundle),
+                            "pinned-signature browser executable is outside its app bundle"
+                        );
+                        anyhow::ensure!(
+                            !signing_id.is_empty(),
+                            "pinned-signature browser has no signing identifier"
+                        );
+                        anyhow::ensure!(
+                            cdhash.iter().any(|byte| *byte != 0),
+                            "pinned-signature browser has an empty code-directory hash"
+                        );
+                    }
                     MacExecutableEnrollment::ExplicitHash { .. } => {
                         anyhow::ensure!(
                             verify_explicit_hash(executable)?,
@@ -268,6 +303,16 @@ impl MacBrowserTrustStore {
                             && process.code.team_id.as_deref() == Some(team_id)
                             && process.code.signing_id.as_deref() == Some(signing_id)
                     }
+                    MacExecutableEnrollment::PinnedSignature {
+                        path,
+                        signing_id,
+                        cdhash,
+                    } => {
+                        process.code.valid
+                            && process.executable.path == *path
+                            && process.code.signing_id.as_deref() == Some(signing_id)
+                            && process.code.cdhash == *cdhash
+                    }
                     MacExecutableEnrollment::ExplicitHash {
                         dev,
                         ino,
@@ -288,7 +333,8 @@ impl MacBrowserTrustStore {
                         browser: Some(browser.browser_id.clone()),
                         tier: match executable {
                             MacExecutableEnrollment::Signed { .. } => TrustTier::Sandbox,
-                            MacExecutableEnrollment::ExplicitHash { .. } => {
+                            MacExecutableEnrollment::PinnedSignature { .. }
+                            | MacExecutableEnrollment::ExplicitHash { .. } => {
                                 TrustTier::EnrolledUserWritable
                             }
                         },
@@ -537,6 +583,38 @@ mod tests {
             )
             .tier
             .is_trusted());
+    }
+
+    #[test]
+    fn pinned_local_signature_requires_valid_code_and_exact_cdhash() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = temp.path().join("Firefox Custom.app");
+        let executable = bundle.join("Contents/MacOS/firefox");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, b"locally signed fixture").unwrap();
+        let enrollment = MacBrowserEnrollment {
+            browser_id: BrowserId("firefox-custom".to_owned()),
+            family: BrowserFamily::Firefox,
+            profile_root: temp.path().join("profile"),
+            owner_uid: 501,
+            app_bundle: Some(bundle),
+            executables: vec![MacExecutableEnrollment::PinnedSignature {
+                path: executable.clone(),
+                signing_id: "org.mozilla.firefox".to_owned(),
+                cdhash: [7; 20],
+            }],
+        };
+        let store = MacBrowserTrustStore::load_and_revalidate(vec![enrollment]).unwrap();
+        let trusted = process(&executable, 501, "", "org.mozilla.firefox");
+        assert!(store.classify(&trusted, 501).tier.is_trusted());
+
+        let mut changed_hash = trusted.clone();
+        changed_hash.code.cdhash = [8; 20];
+        assert_eq!(store.classify(&changed_hash, 501).tier, TrustTier::Unknown);
+
+        let mut invalid = trusted;
+        invalid.code.valid = false;
+        assert_eq!(store.classify(&invalid, 501).tier, TrustTier::Unknown);
     }
 
     #[test]
